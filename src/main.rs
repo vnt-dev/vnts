@@ -1,9 +1,6 @@
 use std::io::Write;
 use std::net::UdpSocket;
 use std::thread;
-use std::time::Duration;
-
-use colored::Colorize;
 
 pub mod error;
 pub mod proto;
@@ -36,9 +33,17 @@ fn log_init() {
 fn main() {
     log_init();
     let udp = UdpSocket::bind("0.0.0.0:29876").unwrap();
-    let udp1 = udp.try_clone().unwrap();
-    thread::spawn(move || {
-        service::handle_loop(udp1).unwrap();
-    });
+    let num = if let Ok(num) = thread::available_parallelism() {
+        num.get()
+    } else {
+        1
+    };
+    for _ in 0..num {
+        let udp = udp.try_clone().unwrap();
+        thread::spawn(move || {
+            service::handle_loop(udp).unwrap();
+        });
+    }
+
     service::handle_loop(udp).unwrap();
 }
