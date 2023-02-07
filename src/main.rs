@@ -32,7 +32,7 @@ fn log_init() {
 
 fn main() {
     log_init();
-    let udp = UdpSocket::bind("0.0.0.0:29876").unwrap();
+    let udp = UdpSocket::bind("0.0.0.0:29875").unwrap();
     let num = if let Ok(num) = thread::available_parallelism() {
         num.get()
     } else {
