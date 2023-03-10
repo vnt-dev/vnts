@@ -1,12 +1,9 @@
-use std::borrow::BorrowMut;
 use std::fmt;
-use std::io::Cursor;
-use std::net::{IpAddr, Ipv4Addr};
-use std::ops::Range;
+use std::net::Ipv4Addr;
 
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, ReadBytesExt};
 
-use crate::{cal_checksum, UdpPacket};
+use crate::cal_checksum;
 use crate::error::*;
 use crate::ip::ipv4::protocol::Protocol;
 
@@ -33,18 +30,6 @@ RFC:  791   https://www.ietf.org/rfc/rfc791.txt
                                                数据体
  注：头部长度单位是4字节，所以ip头最长60字节，选项最长40字节，选项填充按4字节对齐
 */
-///
-/// -----IPv4头
-const IPV4_VER_IHL: usize = 0;
-const IPV4_DSCP_ECN: usize = 1;
-const IPV4_LENGTH: Range<usize> = 2..4;
-const IPV4_IDENT: Range<usize> = 4..6;
-const IPV4_FLG_OFF: Range<usize> = 6..8;
-const IPV4_TTL: usize = 8;
-const IPV4_PROTOCOL: usize = 9;
-const IPV4_CHECKSUM: Range<usize> = 10..12;
-const IPV4_SRC_ADDR: Range<usize> = 12..16;
-const IPV4_DST_ADDR: Range<usize> = 16..20;
 
 pub struct IpV4Packet<B> {
     pub buffer: B,
@@ -56,7 +41,7 @@ impl<B: AsRef<[u8]>> IpV4Packet<B> {
     }
     pub fn new(buffer: B) -> Result<Self> {
         if buffer.as_ref()[0] >> 4 != 4 {
-            Err(Error::InvalidPacket)?
+            Err(Error::Unimplemented)?
         }
         if buffer.as_ref().len() < 20 {
             Err(Error::SmallBuffer)?
@@ -99,26 +84,19 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> IpV4Packet<B> {
         &mut self.buffer.as_mut()[len..]
     }
 
-    pub fn set_source_ip(&mut self, value: Ipv4Addr) -> Result<&mut Self> {
+    pub fn set_source_ip(&mut self, value: Ipv4Addr) {
         self.header_mut()[12..16].copy_from_slice(&value.octets());
-
-        Ok(self)
     }
-    pub fn set_destination_ip(&mut self, value: Ipv4Addr) -> Result<&mut Self> {
+    pub fn set_destination_ip(&mut self, value: Ipv4Addr) {
         self.header_mut()[16..20].copy_from_slice(&value.octets());
-
-        Ok(self)
     }
-    fn set_checksum(&mut self, value: u16) -> Result<&mut Self> {
-        Cursor::new(&mut self.header_mut()[10..])
-            .write_u16::<BigEndian>(value)?;
-
-        Ok(self)
+    fn set_checksum(&mut self, value: u16) {
+        self.header_mut()[10..12].copy_from_slice(&value.to_be_bytes())
     }
     /// 更新校验和
-    pub fn update_checksum(&mut self) -> Result<&mut Self> {
+    pub fn update_checksum(&mut self) {
         //先将校验和置0
-        self.set_checksum(0)?;
+        self.set_checksum(0);
         self.set_checksum(cal_checksum(self.header()))
     }
 }
@@ -128,7 +106,6 @@ impl<B: AsRef<[u8]>> IpV4Packet<B> {
     pub fn version(&self) -> u8 {
         self.buffer.as_ref()[0] >> 4
     }
-
 
     /// 头部长度，以4字节为单位
     pub fn header_len(&self) -> u8 {
@@ -140,15 +117,16 @@ impl<B: AsRef<[u8]>> IpV4Packet<B> {
     /// 类别(3)+丢失概率(2)+用途(1)
     ///
     ///
-    /// 类别子字段值	名称
-    /// 000	  常规(Routine)
-    /// 001   优先(Priority)
-    /// 010	  立即(Immediate)
-    /// 011	  瞬间(Flash)
-    /// 100	  瞬间覆盖(Flash Override)
-    /// 101	  严重(CRITIC/ECP)
-    /// 110	  网间控制(Internetwork Control)
-    /// 111	  网络控制(Network Control)
+    /// 类别子字段值	|  名称
+    /// ---|:---
+    /// 000	 | 常规(Routine)
+    /// 001  | 优先(Priority)
+    /// 010	 | 立即(Immediate)
+    /// 011	 | 瞬间(Flash)
+    /// 100	 | 瞬间覆盖(Flash Override)
+    /// 101	 | 严重(CRITIC/ECP)
+    /// 110	 | 网间控制(Internetwork Control)
+    /// 111	 | 网络控制(Network Control)
     ///
     ///
     /// 参考：https://www.modb.pro/db/477116
@@ -163,12 +141,16 @@ impl<B: AsRef<[u8]>> IpV4Packet<B> {
 
     /// ip报总字节数
     pub fn length(&self) -> u16 {
-        (&self.buffer.as_ref()[2..]).read_u16::<BigEndian>().unwrap()
+        (&self.buffer.as_ref()[2..])
+            .read_u16::<BigEndian>()
+            .unwrap()
     }
 
     /// 标识. ip报文在数据链路层可能会被拆分，同一报文的不同分组标识字段相同
     pub fn id(&self) -> u16 {
-        (&self.buffer.as_ref()[4..]).read_u16::<BigEndian>().unwrap()
+        (&self.buffer.as_ref()[4..])
+            .read_u16::<BigEndian>()
+            .unwrap()
     }
 
     /// 标志 3位.
@@ -188,7 +170,10 @@ impl<B: AsRef<[u8]>> IpV4Packet<B> {
     /// 以字节为单位,用于指明分段起始点相对于包头起始点的偏移量
     /// 由于分段到达时可能错序，所以分段的偏移字段可以使接收者按照正确的顺序重组数据包
     pub fn offset(&self) -> u16 {
-        (&self.buffer.as_ref()[6..]).read_u16::<BigEndian>().unwrap() & 0x1fff
+        (&self.buffer.as_ref()[6..])
+            .read_u16::<BigEndian>()
+            .unwrap()
+            & 0x1fff
     }
 
     /// 生存时间.
@@ -204,7 +189,9 @@ impl<B: AsRef<[u8]>> IpV4Packet<B> {
 
     /// 首部校验和
     pub fn checksum(&self) -> u16 {
-        (&self.buffer.as_ref()[10..]).read_u16::<BigEndian>().unwrap()
+        (&self.buffer.as_ref()[10..])
+            .read_u16::<BigEndian>()
+            .unwrap()
     }
     /// 验证校验和
     ///
@@ -219,7 +206,8 @@ impl<B: AsRef<[u8]>> IpV4Packet<B> {
             self.buffer.as_ref()[12],
             self.buffer.as_ref()[13],
             self.buffer.as_ref()[14],
-            self.buffer.as_ref()[15])
+            self.buffer.as_ref()[15],
+        )
     }
 
     /// 目标ip.
@@ -228,7 +216,8 @@ impl<B: AsRef<[u8]>> IpV4Packet<B> {
             self.buffer.as_ref()[16],
             self.buffer.as_ref()[17],
             self.buffer.as_ref()[18],
-            self.buffer.as_ref()[19])
+            self.buffer.as_ref()[19],
+        )
     }
 
     /// 选项.

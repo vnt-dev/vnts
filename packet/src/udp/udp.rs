@@ -2,11 +2,10 @@ use std::fmt;
 use std::io::Cursor;
 use std::net::IpAddr;
 
-use byteorder::{BigEndian, ReadBytesExt};
 use byteorder::WriteBytesExt;
+use byteorder::{BigEndian, ReadBytesExt};
 
 use crate::error::*;
-use crate::ip::IpPacket;
 
 /// udp协议
 ///
@@ -30,28 +29,28 @@ RFC 768   https://www.ietf.org/rfc/rfc768.txt
 /// ipv6 udp伪首部
 /*  https://datatracker.ietf.org/doc/html/rfc2460
 
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |                                                               |
-   +                                                               +
-   |                                                               |
-   +                         Source Address                        +
-   |                                                               |
-   +                                                               +
-   |                                                               |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |                                                               |
-   +                                                               +
-   |                                                               |
-   +                      Destination Address                      +
-   |                                                               |
-   +                                                               +
-   |                                                               |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |                   Upper-Layer Packet Length                   |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |                      zero                     |  Next Header  |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- */
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                                                               |
+  +                                                               +
+  |                                                               |
+  +                         Source Address                        +
+  |                                                               |
+  +                                                               +
+  |                                                               |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                                                               |
+  +                                                               +
+  |                                                               |
+  +                      Destination Address                      +
+  |                                                               |
+  +                                                               +
+  |                                                               |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                   Upper-Layer Packet Length                   |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                      zero                     |  Next Header  |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+*/
 
 pub struct UdpPacket<B> {
     source_ip: IpAddr,
@@ -61,7 +60,11 @@ pub struct UdpPacket<B> {
 
 impl<B: AsRef<[u8]>> UdpPacket<B> {
     pub fn unchecked(source_ip: IpAddr, destination_ip: IpAddr, buffer: B) -> UdpPacket<B> {
-        UdpPacket { source_ip, destination_ip, buffer }
+        UdpPacket {
+            source_ip,
+            destination_ip,
+            buffer,
+        }
     }
     pub fn new(source_ip: IpAddr, destination_ip: IpAddr, buffer: B) -> Result<UdpPacket<B>> {
         if buffer.as_ref().len() < 8 {
@@ -75,22 +78,30 @@ impl<B: AsRef<[u8]>> UdpPacket<B> {
 impl<B: AsRef<[u8]>> UdpPacket<B> {
     /// 源端口
     pub fn source_port(&self) -> u16 {
-        (&self.buffer.as_ref()[0..]).read_u16::<BigEndian>().unwrap()
+        (&self.buffer.as_ref()[0..])
+            .read_u16::<BigEndian>()
+            .unwrap()
     }
 
     /// 目标端口
     pub fn destination_port(&self) -> u16 {
-        (&self.buffer.as_ref()[2..]).read_u16::<BigEndian>().unwrap()
+        (&self.buffer.as_ref()[2..])
+            .read_u16::<BigEndian>()
+            .unwrap()
     }
 
     /// 总字节数
     pub fn length(&self) -> u16 {
-        (&self.buffer.as_ref()[4..]).read_u16::<BigEndian>().unwrap()
+        (&self.buffer.as_ref()[4..])
+            .read_u16::<BigEndian>()
+            .unwrap()
     }
 
     /// Checksum of the packet.
     pub fn checksum(&self) -> u16 {
-        (&self.buffer.as_ref()[6..]).read_u16::<BigEndian>().unwrap()
+        (&self.buffer.as_ref()[6..])
+            .read_u16::<BigEndian>()
+            .unwrap()
     }
     /// 验证校验和,ipv4中为0表示不使用校验和，ipv6校验和不能为0
     pub fn is_valid(&self) -> bool {
@@ -103,11 +114,16 @@ impl<B: AsRef<[u8]>> UdpPacket<B> {
         match self.source_ip {
             IpAddr::V4(src) => {
                 if let IpAddr::V4(dest) = self.destination_ip {
-                    return crate::ipv4_cal_checksum(self.buffer.as_ref(),
-                                                    &src, &dest, 17, self.length());
+                    return crate::ipv4_cal_checksum(
+                        self.buffer.as_ref(),
+                        &src,
+                        &dest,
+                        17,
+                        self.length(),
+                    );
                 }
             }
-            IpAddr::V6(src) => {}
+            IpAddr::V6(_src) => {}
         }
         unimplemented!()
     }
@@ -123,19 +139,22 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> UdpPacket<B> {
     /// 设置源端口
     pub fn set_source_port(&mut self, value: u16) -> &mut Self {
         Cursor::new(&mut self.header_mut()[0..])
-            .write_u16::<BigEndian>(value).unwrap();
+            .write_u16::<BigEndian>(value)
+            .unwrap();
         self
     }
 
     /// 设置目的端口
     pub fn set_destination_port(&mut self, value: u16) -> &mut Self {
         Cursor::new(&mut self.header_mut()[2..])
-            .write_u16::<BigEndian>(value).unwrap();
+            .write_u16::<BigEndian>(value)
+            .unwrap();
         self
     }
     fn set_checknum(&mut self, value: u16) {
         Cursor::new(&mut self.header_mut()[6..])
-            .write_u16::<BigEndian>(value).unwrap();
+            .write_u16::<BigEndian>(value)
+            .unwrap();
     }
     pub fn update_checknum(&mut self) {
         //先写0

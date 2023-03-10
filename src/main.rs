@@ -1,4 +1,3 @@
-
 use std::net::UdpSocket;
 use std::thread;
 
@@ -32,18 +31,19 @@ fn log_init() {
 
 fn main() {
     log_init();
-    let udp = UdpSocket::bind("0.0.0.0:29875").unwrap();
+    let udp = UdpSocket::bind("0.0.0.0:29871").unwrap();
+    log::info!("启动:{:?}",udp.local_addr().unwrap());
     let num = if let Ok(num) = thread::available_parallelism() {
-        num.get()
+        num.get() * 2
     } else {
-        1
+        2
     };
     for _ in 0..num {
         let udp = udp.try_clone().unwrap();
         thread::spawn(move || {
-            service::handle_loop(udp).unwrap();
+            service::handle_loop(udp);
         });
     }
 
-    service::handle_loop(udp).unwrap();
+    service::handle_loop(udp);
 }
