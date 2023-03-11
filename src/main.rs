@@ -16,7 +16,7 @@ fn log_init() {
         .encoder(Box::new(log4rs::encode::pattern::PatternEncoder::new(
             "{d(%+)(utc)} [{f}:{L}] {h({l})} {M}:{m}{n}\n",
         )))
-        .build(home.join("switch_server.log"))
+        .build(home.join("switch_server_v1.1.log"))
         .unwrap();
     let config = log4rs::Config::builder()
         .appender(log4rs::config::Appender::builder().build("logfile", Box::new(logfile)))
