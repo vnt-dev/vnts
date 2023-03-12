@@ -157,6 +157,7 @@ fn handle(udp: &UdpSocket, buf: &mut [u8], addr: SocketAddr) -> Result<()> {
             let (id, mut virtual_ip) =
                 if let Some(mut device_info) = lock.virtual_ip_map.get_mut(&request.device_id) {
                     device_info.status = PeerDeviceStatus::Online;
+                    device_info.name = request.name.clone();
                     (device_info.id, device_info.ip)
                 } else {
                     (Local::now().timestamp_millis(), 0)
@@ -330,6 +331,7 @@ fn handle_(
                             let mut device_list = DeviceList::new();
                             device_list.epoch = epoch;
                             device_list.device_info_list = ips;
+                            log::info!("context:{:?},device_list:{:?}",context,device_list);
                             let bytes = device_list.write_to_bytes()?;
                             let mut device_list_packet =
                                 NetPacket::new(vec![0u8; 12 + bytes.len()])?;
@@ -343,7 +345,6 @@ fn handle_(
                             device_list_packet.set_destination(source);
                             device_list_packet.set_payload(&bytes);
                             udp.send_to(device_list_packet.buffer(), addr)?;
-                            log::info!("device_list_packet {:?}",device_list_packet);
                         }
                     }
                 }
