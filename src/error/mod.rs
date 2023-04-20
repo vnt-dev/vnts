@@ -19,6 +19,8 @@ pub enum Error {
     NotSupport,
     #[error("Stop")]
     Stop(String),
+    #[error("Warn")]
+    Warn(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

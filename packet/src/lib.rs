@@ -1,17 +1,13 @@
-use std::borrow::BorrowMut;
-use std::fmt;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::Ipv4Addr;
 
 use byteorder::BigEndian;
 use byteorder::ReadBytesExt;
 
-use crate::udp::udp::UdpPacket;
-
-pub mod ip;
-pub mod udp;
-pub mod icmp;
-pub mod tcp;
 pub mod error;
+pub mod icmp;
+pub mod ip;
+pub mod tcp;
+pub mod udp;
 
 // pub enum IpUpperLayer<B> {
 //     UDP(UdpPacket<B>),
@@ -92,16 +88,22 @@ pub fn cal_checksum(buffer: &[u8]) -> u16 {
 /// ipv4上层协议校验和计算方式
 /// ipv4 udp伪首部 用于参与计算首部校验和
 /*
-    0      7 8     15 16    23 24    31
-    +--------+--------+--------+--------+
-    |          source address           |
-    +--------+--------+--------+--------+
-    |        destination address        |
-    +--------+--------+--------+--------+
-    |  zero  |protocol|       length    |
-    +--------+--------+--------+--------+
- */
-pub fn ipv4_cal_checksum(buffer: &[u8], src_ip: &Ipv4Addr, dest_ip: &Ipv4Addr, protocol: u8, length: u16) -> u16 {
+   0      7 8     15 16    23 24    31
+   +--------+--------+--------+--------+
+   |          source address           |
+   +--------+--------+--------+--------+
+   |        destination address        |
+   +--------+--------+--------+--------+
+   |  zero  |protocol|       length    |
+   +--------+--------+--------+--------+
+*/
+pub fn ipv4_cal_checksum(
+    buffer: &[u8],
+    src_ip: &Ipv4Addr,
+    dest_ip: &Ipv4Addr,
+    protocol: u8,
+    length: u16,
+) -> u16 {
     use std::io::Cursor;
     let mut sum = 0;
     let src_ip = src_ip.octets();
@@ -129,11 +131,6 @@ pub fn ipv4_cal_checksum(buffer: &[u8], src_ip: &Ipv4Addr, dest_ip: &Ipv4Addr, p
 #[inline]
 fn u32c(x: u8, y: u8) -> u32 {
     ((x as u32) << 8) | y as u32
-}
-
-
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
 }
 
 #[cfg(test)]
