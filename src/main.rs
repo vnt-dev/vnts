@@ -33,6 +33,7 @@ fn main() {
     log_init();
     let udp = UdpSocket::bind("0.0.0.0:29871").unwrap();
     log::info!("启动:{:?}",udp.local_addr().unwrap());
+    println!("启动成功:{:?}",udp.local_addr().unwrap());
     let num = if let Ok(num) = thread::available_parallelism() {
         num.get() * 2
     } else {
