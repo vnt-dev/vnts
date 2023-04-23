@@ -11,6 +11,7 @@ use packet::ip::ipv4::packet::IpV4Packet;
 use parking_lot::Mutex;
 use protobuf::Message;
 
+use crate::ConfigInfo;
 use crate::error::*;
 use crate::proto::message;
 use crate::proto::message::{DeviceList, RegistrationRequest, RegistrationResponse};
@@ -102,12 +103,12 @@ impl From<u8> for PeerDeviceStatus {
     }
 }
 
-pub fn handle_loop(udp: UdpSocket) {
+pub fn handle_loop(udp: UdpSocket, config: ConfigInfo) {
     let mut buf = [0u8; 65536];
     loop {
         match udp.recv_from(&mut buf) {
             Ok((len, addr)) => {
-                match handle(&udp, &mut buf[..len], addr) {
+                match handle(&udp, &mut buf[..len], addr, &config) {
                     Ok(_) => {}
                     Err(e) => {
                         log::error!("{:?}", e)
@@ -121,7 +122,7 @@ pub fn handle_loop(udp: UdpSocket) {
     }
 }
 
-fn handle(udp: &UdpSocket, buf: &mut [u8], addr: SocketAddr) -> Result<()> {
+fn handle(udp: &UdpSocket, buf: &mut [u8], addr: SocketAddr, config: &ConfigInfo) -> Result<()> {
     let net_packet = NetPacket::new(buf)?;
     if net_packet.protocol() == Protocol::Service
         && net_packet.transport_protocol()
@@ -131,6 +132,20 @@ fn handle(udp: &UdpSocket, buf: &mut [u8], addr: SocketAddr) -> Result<()> {
     {
         let request = RegistrationRequest::parse_from_bytes(net_packet.payload())?;
         log::info!("register:{:?}",request);
+        if let Some(white_token) = &config.white_token {
+            if !white_token.contains(&request.token) {
+                log::info!("token不在白名单，white_token={:?}，token={:?}",white_token,request.token);
+                let mut net_packet = NetPacket::new([0u8; 12])?;
+                net_packet.set_version(Version::V1);
+                net_packet.set_protocol(Protocol::Error);
+                net_packet
+                    .set_transport_protocol(error_packet::Protocol::TokenError.into());
+                net_packet.first_set_ttl(MAX_TTL);
+                net_packet.set_source(config.gateway);
+                udp.send_to(net_packet.buffer(), addr)?;
+                return Ok(());
+            }
+        }
         let mut response = RegistrationResponse::new();
         match addr.ip() {
             IpAddr::V4(ipv4) => {
@@ -142,9 +157,8 @@ fn handle(udp: &UdpSocket, buf: &mut [u8], addr: SocketAddr) -> Result<()> {
                 return Ok(());
             }
         }
-        //todo 暂时写死地址 考虑验证token,比如从数据库根据token读出网关
-        response.virtual_netmask = u32::from_be_bytes(NETMASK.octets());
-        response.virtual_gateway = u32::from_be_bytes(GATE_WAY.octets());
+        response.virtual_netmask = u32::from_be_bytes(config.netmask.octets());
+        response.virtual_gateway = u32::from_be_bytes(config.gateway.octets());
         if let Some(v) = VIRTUAL_NETWORK.optionally_get_with(request.token.clone(), || {
             Some(Arc::new(parking_lot::const_mutex(VirtualNetwork {
                 epoch: 0,
@@ -169,7 +183,10 @@ fn handle(udp: &UdpSocket, buf: &mut [u8], addr: SocketAddr) -> Result<()> {
                     .iter()
                     .map(|(_, device_info)| device_info.ip)
                     .collect();
-                for ip in response.virtual_gateway + 1..response.virtual_gateway + 128 {
+                for ip in (response.virtual_gateway & response.virtual_netmask) + 1..response.virtual_gateway | (!response.virtual_netmask) {
+                    if ip == response.virtual_gateway {
+                        continue;
+                    }
                     if !set.contains(&ip) {
                         virtual_ip = ip;
                         break;
@@ -183,7 +200,7 @@ fn handle(udp: &UdpSocket, buf: &mut [u8], addr: SocketAddr) -> Result<()> {
                     net_packet
                         .set_transport_protocol(error_packet::Protocol::AddressExhausted.into());
                     net_packet.first_set_ttl(MAX_TTL);
-                    net_packet.set_source(GATE_WAY);
+                    net_packet.set_source(config.gateway);
                     udp.send_to(net_packet.buffer(), addr)?;
                     return Ok(());
                 }
@@ -226,7 +243,7 @@ fn handle(udp: &UdpSocket, buf: &mut [u8], addr: SocketAddr) -> Result<()> {
         let mut net_packet = NetPacket::new(vec![0u8; 12 + bytes.len()])?;
         net_packet.set_version(Version::V1);
         net_packet.set_protocol(Protocol::Service);
-        net_packet.set_source(GATE_WAY);
+        net_packet.set_source(config.gateway);
         net_packet.set_destination(Ipv4Addr::from(response.virtual_ip));
         net_packet.set_transport_protocol(service_packet::Protocol::RegistrationResponse.into());
         net_packet.first_set_ttl(MAX_TTL);
@@ -242,7 +259,7 @@ fn handle(udp: &UdpSocket, buf: &mut [u8], addr: SocketAddr) -> Result<()> {
                 .get(&(context.token.clone(), context.device_id.clone()))
                 .is_some()
             {
-                handle_(udp, addr, net_packet, context)?;
+                handle_(udp, addr, net_packet, context, config)?;
                 return Ok(());
             }
         }
@@ -253,29 +270,27 @@ fn handle(udp: &UdpSocket, buf: &mut [u8], addr: SocketAddr) -> Result<()> {
     net_packet.set_protocol(Protocol::Error);
     net_packet.set_transport_protocol(error_packet::Protocol::Disconnect.into());
     net_packet.first_set_ttl(MAX_TTL);
-    net_packet.set_source(GATE_WAY);
+    net_packet.set_source(config.gateway);
     net_packet.set_destination(source);
     udp.send_to(net_packet.buffer(), addr)?;
     Ok(())
 }
 
-const GATE_WAY: Ipv4Addr = Ipv4Addr::new(10, 26, 0, 1);
-const BROADCAST: Ipv4Addr = Ipv4Addr::new(10, 26, 0, 255);
-const NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
 
 fn handle_(
     udp: &UdpSocket,
     addr: SocketAddr,
     mut net_packet: NetPacket<&mut [u8]>,
     context: Context,
+    config: &ConfigInfo,
 ) -> Result<()> {
     let source = net_packet.source();
     let destination = net_packet.destination();
-    if destination != GATE_WAY {
+    if destination != config.gateway {
         // 转发
         if net_packet.ttl() > 1 {
             net_packet.set_ttl(net_packet.ttl() - 1);
-            if destination.is_broadcast() || (destination.octets()[3] == 255 && BROADCAST == destination) {
+            if destination.is_broadcast() || (destination.octets()[3] == 255 && config.broadcast == destination) {
                 //本地广播和直接广播
                 if let Some(v) = VIRTUAL_NETWORK.get(&context.token) {
                     if let Some(lock) = v.try_lock() {
