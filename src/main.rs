@@ -107,7 +107,7 @@ fn main() {
         netmask,
     };
     log_init();
-    let udp = UdpSocket::bind("0.0.0.0:29871").unwrap();
+    let udp = UdpSocket::bind(format!("0.0.0.0:{}",port)).unwrap();
     log::info!("启动成功,udp:{:?}",udp.local_addr().unwrap());
     println!("启动成功,udp:{:?}", udp.local_addr().unwrap());
     log::info!("config:{:?}",config);
