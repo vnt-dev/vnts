@@ -12,7 +12,8 @@ pub mod service;
 /// 默认网关信息
 const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 26, 0, 1);
 const NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
-
+/// switch服务端
+/// 服务日志输出在 home/.switch_server 目录下
 #[derive(Parser, Debug, Clone)]
 pub struct StartArgs {
     /// 指定端口
