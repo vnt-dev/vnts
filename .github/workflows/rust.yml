@@ -2,7 +2,8 @@ name: Rust
 
 on:
   push:
-  pull_request:
+    tags:
+      - '*'
 
 env:
   CARGO_TERM_COLOR: always
@@ -128,6 +129,10 @@ jobs:
       - name: List
         run: find ./artifacts
       - name: Release
-        uses: softprops/action-gh-release@v1
+        uses: svenstaro/upload-release-action@v2
         with:
-          files: ./artifacts/*.tar.gz
+          repo_token: ${{ secrets.YOURTOKEN }}
+          file: ./artifacts/*.tar.gz
+          tag: ${{ github.ref }}
+          overwrite: true
+          file_glob: true
