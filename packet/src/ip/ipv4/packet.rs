@@ -1,10 +1,8 @@
-use std::fmt;
+use std::{fmt, io};
 use std::net::Ipv4Addr;
 
-use byteorder::{BigEndian, ReadBytesExt};
 
 use crate::cal_checksum;
-use crate::error::*;
 use crate::ip::ipv4::protocol::Protocol;
 
 /// ip协议
@@ -39,16 +37,16 @@ impl<B: AsRef<[u8]>> IpV4Packet<B> {
     pub fn unchecked(buffer: B) -> Self {
         Self { buffer }
     }
-    pub fn new(buffer: B) -> Result<Self> {
+    pub fn new(buffer: B) -> io::Result<Self> {
         if buffer.as_ref()[0] >> 4 != 4 {
-            Err(Error::Unimplemented)?
+            Err(io::Error::from(io::ErrorKind::InvalidData))?;
         }
         if buffer.as_ref().len() < 20 {
-            Err(Error::SmallBuffer)?
+            Err(io::Error::from(io::ErrorKind::InvalidData))?;
         }
         let packet = Self::unchecked(buffer);
         if packet.buffer.as_ref().len() < packet.header_len() as usize * 4 {
-            Err(Error::SmallBuffer)?
+            Err(io::Error::from(io::ErrorKind::InvalidData))?;
         }
         Ok(packet)
     }
@@ -60,17 +58,6 @@ impl<B: AsRef<[u8]>> IpV4Packet<B> {
     }
     pub fn payload(&self) -> &[u8] {
         &self.buffer.as_ref()[(self.header_len() as usize * 4)..]
-        // match self.protocol() {
-        //     Protocol::Udp => {
-        //         let udp = UdpPacket::new(IpAddr::V4(self.source_ip()),
-        //                                  IpAddr::V4(self.destination_ip()),
-        //                                  &self.buffer.as_ref()[(self.header_len() as usize * 4)..])?;
-        //         Ok(crate::IpUpperLayer::UDP(udp))
-        //     }
-        //     _ => {
-        //         Ok(crate::IpUpperLayer::Unknown(self.buffer.as_ref()));
-        //     }
-        // }
     }
 }
 
@@ -83,12 +70,17 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> IpV4Packet<B> {
         let len = self.header_len() as usize * 4;
         &mut self.buffer.as_mut()[len..]
     }
-
+    pub fn set_protocol(&mut self, value: Protocol) {
+        self.header_mut()[9] = value.into();
+    }
     pub fn set_source_ip(&mut self, value: Ipv4Addr) {
         self.header_mut()[12..16].copy_from_slice(&value.octets());
     }
     pub fn set_destination_ip(&mut self, value: Ipv4Addr) {
         self.header_mut()[16..20].copy_from_slice(&value.octets());
+    }
+    pub fn set_flags(&mut self, flags: u8) {
+        self.buffer.as_mut()[6] = (self.buffer.as_ref()[6] & 0b11100000) | (flags << 5)
     }
     fn set_checksum(&mut self, value: u16) {
         self.header_mut()[10..12].copy_from_slice(&value.to_be_bytes())
@@ -141,16 +133,12 @@ impl<B: AsRef<[u8]>> IpV4Packet<B> {
 
     /// ip报总字节数
     pub fn length(&self) -> u16 {
-        (&self.buffer.as_ref()[2..])
-            .read_u16::<BigEndian>()
-            .unwrap()
+        u16::from_be_bytes(self.buffer.as_ref()[2..4].try_into().unwrap())
     }
 
     /// 标识. ip报文在数据链路层可能会被拆分，同一报文的不同分组标识字段相同
     pub fn id(&self) -> u16 {
-        (&self.buffer.as_ref()[4..])
-            .read_u16::<BigEndian>()
-            .unwrap()
+        u16::from_be_bytes(self.buffer.as_ref()[4..6].try_into().unwrap())
     }
 
     /// 标志 3位.
@@ -170,10 +158,7 @@ impl<B: AsRef<[u8]>> IpV4Packet<B> {
     /// 以字节为单位,用于指明分段起始点相对于包头起始点的偏移量
     /// 由于分段到达时可能错序，所以分段的偏移字段可以使接收者按照正确的顺序重组数据包
     pub fn offset(&self) -> u16 {
-        (&self.buffer.as_ref()[6..])
-            .read_u16::<BigEndian>()
-            .unwrap()
-            & 0x1fff
+        u16::from_be_bytes(self.buffer.as_ref()[6..8].try_into().unwrap()) & 0x1fff
     }
 
     /// 生存时间.
@@ -189,9 +174,7 @@ impl<B: AsRef<[u8]>> IpV4Packet<B> {
 
     /// 首部校验和
     pub fn checksum(&self) -> u16 {
-        (&self.buffer.as_ref()[10..])
-            .read_u16::<BigEndian>()
-            .unwrap()
+        u16::from_be_bytes(self.buffer.as_ref()[10..12].try_into().unwrap())
     }
     /// 验证校验和
     ///
