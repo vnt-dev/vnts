@@ -8,24 +8,27 @@ use moka::sync::Cache;
 use packet::icmp::{icmp, Kind};
 use packet::ip::ipv4;
 use packet::ip::ipv4::packet::IpV4Packet;
-use parking_lot::Mutex;
+use parking_lot::RwLock;
 use protobuf::Message;
 
 use crate::ConfigInfo;
 use crate::error::*;
 use crate::proto::message;
 use crate::proto::message::{DeviceList, RegistrationRequest, RegistrationResponse};
-use crate::protocol::{control_packet, error_packet, MAX_TTL, NetPacket, Protocol, service_packet, Version};
+use crate::protocol::{control_packet, error_packet, ip_turn_packet, MAX_TTL, NetPacket, Protocol, service_packet, Version};
+use crate::protocol::ip_turn_packet::BroadcastPacketEnd;
+use crate::service::igmp_server::Multicast;
 
 lazy_static::lazy_static! {
+    //七天不连接则回收ip
      static ref DEVICE_ID_SESSION:Cache<(String,String),()> = Cache::builder()
         .time_to_idle(Duration::from_secs(60*60*24*7)).eviction_listener(|k:Arc<(String,String)>,_,cause|{
 			if cause!=moka::notification::RemovalCause::Expired{
 				return;
 			}
-            log::info!("eviction {:?}", k);
+            log::info!("DEVICE_ID_SESSION eviction {:?}", k);
             if let Some(v) = VIRTUAL_NETWORK.get(&k.0){
-                let mut lock = v.lock();
+                let mut lock = v.write();
                 lock.virtual_ip_map.remove(&k.1);
                 lock.epoch+=1;
             }
@@ -37,9 +40,9 @@ lazy_static::lazy_static! {
 			if cause!=moka::notification::RemovalCause::Expired{
 				return;
 			}
-            log::info!("eviction {:?}", context);
+            log::info!("SESSION eviction {:?}", context);
             if let Some(v) = VIRTUAL_NETWORK.get(&context.token){
-                let mut lock = v.lock();
+                let mut lock = v.write();
                 if let Some(mut item) = lock.virtual_ip_map.get_mut(&context.device_id){
                     if item.id!=context.id{
                         return;
@@ -53,9 +56,14 @@ lazy_static::lazy_static! {
     // (token,ip) ->地址
     static ref DEVICE_ADDRESS:Cache<(String,u32), SocketAddr> = Cache::builder()
         .time_to_idle(Duration::from_secs(2 * 61)).build();
-    static ref VIRTUAL_NETWORK:Cache<String, Arc<Mutex<VirtualNetwork>>> = Cache::builder()
+    //七天没有用户则回收网段缓存
+    static ref VIRTUAL_NETWORK:Cache<String, Arc<RwLock<VirtualNetwork>>> = Cache::builder()
         .time_to_idle(Duration::from_secs(60*60*24*7)).build();
 }
+
+
+
+
 #[derive(Clone, Debug)]
 struct Context {
     token: String,
@@ -160,12 +168,12 @@ fn handle(udp: &UdpSocket, buf: &mut [u8], addr: SocketAddr, config: &ConfigInfo
         response.virtual_netmask = u32::from_be_bytes(config.netmask.octets());
         response.virtual_gateway = u32::from_be_bytes(config.gateway.octets());
         if let Some(v) = VIRTUAL_NETWORK.optionally_get_with(request.token.clone(), || {
-            Some(Arc::new(parking_lot::const_mutex(VirtualNetwork {
+            Some(Arc::new(parking_lot::const_rwlock(VirtualNetwork {
                 epoch: 0,
                 virtual_ip_map: HashMap::new(),
             })))
         }) {
-            let mut lock = v.lock();
+            let mut lock = v.write();
             lock.epoch += 1;
             response.epoch = lock.epoch;
             let (id, mut virtual_ip) =
@@ -276,6 +284,50 @@ fn handle(udp: &UdpSocket, buf: &mut [u8], addr: SocketAddr, config: &ConfigInfo
     Ok(())
 }
 
+fn broadcast(udp: &UdpSocket, context: &Context, buf: &[u8], exclude: &[Ipv4Addr]) -> Result<()> {
+    if let Some(v) = VIRTUAL_NETWORK.get(&context.token) {
+        let lock = v.read();
+        let ips: Vec<u32> = lock
+            .virtual_ip_map
+            .iter()
+            .map(|(_, device_info)| device_info.ip)
+            .filter(|ip| ip != &context.virtual_ip)
+            .collect();
+        drop(lock);
+        for ip in ips {
+            if !exclude.contains(&Ipv4Addr::from(ip)) {
+                if let Some(peer) = DEVICE_ADDRESS.get(&(context.token.clone(), ip)) {
+                    let _ = udp.send_to(buf, peer);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn multicast(udp: &UdpSocket, context: &Context, buf: &[u8], multicast_info: &RwLock<Multicast>, exclude: &[Ipv4Addr]) -> Result<()> {
+    if let Some(v) = VIRTUAL_NETWORK.get(&context.token) {
+        let lock = v.read();
+        let ips: Vec<u32> = lock
+            .virtual_ip_map
+            .iter()
+            .map(|(_, device_info)| device_info.ip)
+            .filter(|ip| ip != &context.virtual_ip)
+            .collect();
+        drop(lock);
+        let info = multicast_info.read();
+        for ip in ips {
+            let ipv4 = Ipv4Addr::from(ip);
+            if !exclude.contains(&ipv4) && info.is_send(&ipv4) {
+                if let Some(peer) = DEVICE_ADDRESS.get(&(context.token.clone(), ip)) {
+                    let _ = udp.send_to(buf, peer);
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 fn handle_(
     udp: &UdpSocket,
@@ -290,25 +342,44 @@ fn handle_(
         // 转发
         if net_packet.ttl() > 1 {
             net_packet.set_ttl(net_packet.ttl() - 1);
-            if destination.is_broadcast() || (destination.octets()[3] == 255 && config.broadcast == destination) {
-                //本地广播和直接广播
-                if let Some(v) = VIRTUAL_NETWORK.get(&context.token) {
-                    if let Some(lock) = v.try_lock() {
-                        let ips: Vec<u32> = lock
-                            .virtual_ip_map
-                            .iter()
-                            .map(|(_, device_info)| device_info.ip)
-                            .filter(|ip| ip != &context.virtual_ip)
-                            .collect();
-                        drop(lock);
-                        for ip in ips {
-                            if let Some(peer) = DEVICE_ADDRESS.get(&(context.token.clone(), ip)) {
-                                udp.send_to(net_packet.buffer(), peer)?;
+            match net_packet.protocol() {
+                Protocol::IpTurn => {
+                    match ip_turn_packet::Protocol::from(net_packet.transport_protocol()) {
+                        ip_turn_packet::Protocol::Ipv4Broadcast => {
+                            net_packet.set_transport_protocol(ip_turn_packet::Protocol::Ipv4.into());
+                            return change_broadcast(udp, &context, config.broadcast, destination, net_packet.buffer());
+                        }
+                        ip_turn_packet::Protocol::Ipv4 => {
+                            if ip_turn_packet::Protocol::from(net_packet.transport_protocol())
+                                == ip_turn_packet::Protocol::Ipv4 {
+                                let ipv4 = IpV4Packet::new(net_packet.payload())?;
+                                if ipv4.protocol() == ipv4::protocol::Protocol::Igmp {
+                                    crate::service::igmp_server::handle(ipv4.payload(), &context.token, source)?;
+                                    //Igmp数据也会广播出去，让大家都知道谁加入什么组播
+                                    broadcast(udp, &context, net_packet.buffer(), &[])?;
+                                    return Ok(());
+                                }
+                            }
+                            //处理广播
+                            if destination.is_broadcast() || config.broadcast == destination {
+                                broadcast(udp, &context, net_packet.buffer(), &[])?;
+                                return Ok(());
+                            } else if destination.is_multicast() {
+                                if let Some(multicast_info) = crate::service::igmp_server
+                                ::load(&context.token, destination) {
+                                    multicast(udp, &context, net_packet.buffer(), &multicast_info, &[])?;
+                                }
+                                return Ok(());
                             }
                         }
+                        _ => {}
                     }
                 }
-            } else if let Some(peer) =
+                Protocol::OtherTurn => {}
+                _ => {}
+            }
+            //其他的直接转发
+            if let Some(peer) =
                 DEVICE_ADDRESS.get(&(context.token, destination.into()))
             {
                 udp.send_to(net_packet.buffer(), peer)?;
@@ -321,11 +392,11 @@ fn handle_(
             match service_packet::Protocol::from(net_packet.transport_protocol()) {
                 service_packet::Protocol::RegistrationRequest => {}
                 service_packet::Protocol::RegistrationResponse => {}
-                service_packet::Protocol::UnKnow(_) => {}
+                service_packet::Protocol::Unknown(_) => {}
                 service_packet::Protocol::PollDeviceList => {
                     if let Some(v) = VIRTUAL_NETWORK.get(&context.token) {
                         //优先级较低，获取不到锁也问题不大
-                        if let Some(lock) = v.try_lock() {
+                        if let Some(lock) = v.try_read() {
                             let ips: Vec<message::DeviceInfo> = lock
                                 .virtual_ip_map
                                 .iter()
@@ -375,7 +446,7 @@ fn handle_(
                     net_packet.set_destination(source);
                     if let Some(v) = VIRTUAL_NETWORK.get(&context.token) {
                         //优先级较低，获取不到锁也问题不大
-                        if let Some(lock) = v.try_lock() {
+                        if let Some(lock) = v.try_read() {
                             let mut pong_packet = control_packet::PongPacket::new(net_packet.payload_mut())?;
                             pong_packet.set_epoch(lock.epoch as u16);
                         }
@@ -387,25 +458,53 @@ fn handle_(
         }
         Protocol::Error => {}
         Protocol::OtherTurn => {}
-        Protocol::Ipv4Turn => {
-            let mut ipv4 = IpV4Packet::new(net_packet.payload_mut())?;
-            if ipv4.protocol() == ipv4::protocol::Protocol::Icmp {
-                let mut icmp_packet = icmp::IcmpPacket::new(ipv4.payload_mut())?;
-                if icmp_packet.kind() == Kind::EchoRequest {
-                    //开启ping
-                    icmp_packet.set_kind(Kind::EchoReply);
-                    icmp_packet.update_checksum();
-                    ipv4.set_source_ip(destination);
-                    ipv4.set_destination_ip(source);
-                    ipv4.update_checksum();
-                    net_packet.set_source(destination);
-                    net_packet.set_destination(source);
-                    udp.send_to(net_packet.buffer(), addr)?;
-                    return Ok(());
+        Protocol::IpTurn => {
+            match ip_turn_packet::Protocol::from(net_packet.transport_protocol()) {
+                ip_turn_packet::Protocol::Ipv4 => {
+                    let mut ipv4 = IpV4Packet::new(net_packet.payload_mut())?;
+                    match ipv4.protocol() {
+                        ipv4::protocol::Protocol::Icmp => {
+                            let mut icmp_packet = icmp::IcmpPacket::new(ipv4.payload_mut())?;
+                            if icmp_packet.kind() == Kind::EchoRequest {
+                                //开启ping
+                                icmp_packet.set_kind(Kind::EchoReply);
+                                icmp_packet.update_checksum();
+                                ipv4.set_source_ip(destination);
+                                ipv4.set_destination_ip(source);
+                                ipv4.update_checksum();
+                                net_packet.set_source(destination);
+                                net_packet.set_destination(source);
+                                udp.send_to(net_packet.buffer(), addr)?;
+                                return Ok(());
+                            }
+                        }
+                        ipv4::protocol::Protocol::Igmp => {
+                            crate::service::igmp_server::handle(ipv4.payload(), &context.token, source)?;
+                        }
+                        _ => {}
+                    }
                 }
+                _ => {}
             }
         }
         Protocol::UnKnow(_) => {}
+    }
+    Ok(())
+}
+
+/// 选择性转发广播/组播，并且去除尾部
+fn change_broadcast(udp: &UdpSocket, context: &Context, broadcast_addr: Ipv4Addr, destination: Ipv4Addr, buf: &[u8]) -> Result<()> {
+    let packet_end = BroadcastPacketEnd::new(buf)?;
+    let end_len = packet_end.len();
+    let exclude = packet_end.addresses();
+    let buf = &buf[..buf.len() - end_len];
+    if destination.is_broadcast() || broadcast_addr == destination {
+        broadcast(udp, context, buf, &exclude)?;
+    } else if destination.is_multicast() {
+        if let Some(multicast_info) = crate::service::igmp_server
+        ::load(&context.token, destination) {
+            multicast(udp, context, buf, &multicast_info, &exclude)?;
+        }
     }
     Ok(())
 }

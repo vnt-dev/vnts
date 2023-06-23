@@ -1,6 +1,5 @@
 use std::{fmt, io};
 
-
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
 pub enum Protocol {
     /// ping请求
@@ -18,7 +17,7 @@ pub enum Protocol {
     PunchRequest,
     /// 打洞响应
     PunchResponse,
-    UnKnow(u8),
+    Unknown(u8),
 }
 
 impl From<u8> for Protocol {
@@ -28,7 +27,7 @@ impl From<u8> for Protocol {
             2 => Protocol::Pong,
             3 => Protocol::PunchRequest,
             4 => Protocol::PunchResponse,
-            val => Protocol::UnKnow(val),
+            val => Protocol::Unknown(val),
         }
     }
 }
@@ -40,7 +39,7 @@ impl Into<u8> for Protocol {
             Protocol::Pong => 2,
             Protocol::PunchRequest => 3,
             Protocol::PunchResponse => 4,
-            Protocol::UnKnow(val) => val,
+            Protocol::Unknown(val) => val,
         }
     }
 }
@@ -59,19 +58,17 @@ impl<B: AsRef<[u8]>> ControlPacket<B> {
             Protocol::Pong => Ok(ControlPacket::PongPacket(PongPacket::new(buffer)?)),
             Protocol::PunchRequest => Ok(ControlPacket::PunchRequest),
             Protocol::PunchResponse => Ok(ControlPacket::PunchResponse),
-            Protocol::UnKnow(_) => Err(io::Error::new(io::ErrorKind::InvalidData, "Unsupported")),
+            Protocol::Unknown(_) => Err(io::Error::new(io::ErrorKind::InvalidData, "Unsupported")),
         }
     }
 }
 
 /// 网络探针
-#[derive(Copy, Clone)]
 pub struct PingPacket<B> {
     buffer: B,
 }
 
 pub type PongPacket<B> = PingPacket<B>;
-
 
 impl<B: AsRef<[u8]>> PingPacket<B> {
     pub fn new(buffer: B) -> io::Result<PingPacket<B>> {

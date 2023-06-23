@@ -1,24 +1,25 @@
-use std::{fmt, io};
 use std::net::Ipv4Addr;
+use std::{fmt, io};
 
 /*
-    0                                            15                                              31
-    0  1  2  3  4  5  6  7  8  9  0  1  2  3  4  5  6  7  8  9  0  1  2  3  4  5  6  7  8  9  0  1
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |        版本(8)       |      协议(8)          |      上层协议(8)        | 初始ttl(4) | 生存时间(4) |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |                                          源ip地址(32)                                         |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |                                          目的ip地址(32)                                       |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |                                           数据体                                              |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- */
+   0                                            15                                              31
+   0  1  2  3  4  5  6  7  8  9  0  1  2  3  4  5  6  7  8  9  0  1  2  3  4  5  6  7  8  9  0  1
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |        版本(8)       |      协议(8)          |      上层协议(8)        | 初始ttl(4) | 生存时间(4) |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                                          源ip地址(32)                                         |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                                          目的ip地址(32)                                       |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  |                                           数据体                                              |
+  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+*/
 
 pub mod control_packet;
 pub mod error_packet;
 pub mod service_packet;
-pub mod turn_packet;
+pub mod ip_turn_packet;
+pub mod other_turn_packet;
 
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
 pub enum Version {
@@ -52,8 +53,8 @@ pub enum Protocol {
     Error,
     /// 控制协议
     Control,
-    /// 转发ipv4数据
-    Ipv4Turn,
+    /// 转发ip数据
+    IpTurn,
     /// 转发其他数据
     OtherTurn,
     UnKnow(u8),
@@ -65,7 +66,7 @@ impl From<u8> for Protocol {
             1 => Protocol::Service,
             2 => Protocol::Error,
             3 => Protocol::Control,
-            4 => Protocol::Ipv4Turn,
+            4 => Protocol::IpTurn,
             5 => Protocol::OtherTurn,
             val => Protocol::UnKnow(val),
         }
@@ -78,7 +79,7 @@ impl Into<u8> for Protocol {
             Protocol::Service => 1,
             Protocol::Error => 2,
             Protocol::Control => 3,
-            Protocol::Ipv4Turn => 4,
+            Protocol::IpTurn => 4,
             Protocol::OtherTurn => 5,
             Protocol::UnKnow(val) => val,
         }
@@ -98,7 +99,10 @@ impl<B: AsRef<[u8]>> NetPacket<B> {
         let len = buffer.as_ref().len();
         // 不能大于udp最大载荷长度
         if len < 12 || len > 65535 - 20 - 8 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "length overflow"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "length overflow",
+            ));
         }
         Ok(NetPacket { buffer })
     }
@@ -140,6 +144,9 @@ impl<B: AsRef<[u8]>> NetPacket<B> {
 }
 
 impl<B: AsRef<[u8]> + AsMut<[u8]>> NetPacket<B> {
+    pub fn buffer_mut(&mut self)->&mut [u8]{
+        self.buffer.as_mut()
+    }
     pub fn set_version(&mut self, version: Version) {
         self.buffer.as_mut()[0] = version.into();
     }

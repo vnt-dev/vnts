@@ -12,6 +12,7 @@ pub mod service;
 /// 默认网关信息
 const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 26, 0, 1);
 const NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
+
 /// switch服务端
 /// 服务日志输出在 home/.switch_server 目录下
 #[derive(Parser, Debug, Clone)]
@@ -71,19 +72,27 @@ fn main() {
     } else {
         None
     };
-    println!("白名单：{:?}", white_token);
+    println!("token白名单：{:?}", white_token);
     let gateway = if let Some(gateway) = args.gateway {
         gateway.parse::<Ipv4Addr>().expect("网关错误，必须为有效的ipv4地址")
     } else {
         GATEWAY
     };
     println!("网关：{:?}", gateway);
-    if gateway.is_broadcast() || gateway.is_unspecified() {
-        println!("网关错误");
+    if gateway.is_unspecified() {
+        println!("网关地址无效");
+        return;
+    }
+    if gateway.is_broadcast() {
+        println!("网关错误，不能为广播地址");
+        return;
+    }
+    if gateway.is_multicast() {
+        println!("网关错误，不能为组播地址");
         return;
     }
     if !gateway.is_private() {
-        println!("Warning 网关不是一个私有地址：{:?}", gateway);
+        println!("Warning 不是一个私有地址：{:?}，将有可能和公网ip冲突", gateway);
     }
     let netmask = if let Some(netmask) = args.netmask {
         netmask.parse::<Ipv4Addr>().expect("子网掩码错误，必须为有效的ipv4地址")
@@ -107,7 +116,7 @@ fn main() {
         netmask,
     };
     log_init();
-    let udp = UdpSocket::bind(format!("0.0.0.0:{}",port)).unwrap();
+    let udp = UdpSocket::bind(format!("0.0.0.0:{}", port)).unwrap();
     log::info!("启动成功,udp:{:?}",udp.local_addr().unwrap());
     println!("启动成功,udp:{:?}", udp.local_addr().unwrap());
     log::info!("config:{:?}",config);
