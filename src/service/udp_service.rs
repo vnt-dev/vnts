@@ -232,9 +232,9 @@ fn handle(udp: &UdpSocket, buf: &mut [u8], addr: SocketAddr, config: &ConfigInfo
                     response.device_info_list.push(dev);
                 }
             }
-            DEVICE_ID_SESSION.insert((request.token.clone(), request.device_id.clone()), ());
             DEVICE_ADDRESS.insert((request.token.clone(), virtual_ip), addr);
             drop(lock);
+            DEVICE_ID_SESSION.insert((request.token.clone(), request.device_id.clone()), ());
             response.virtual_ip = virtual_ip;
             SESSION.insert(
                 addr,
