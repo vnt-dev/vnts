@@ -349,17 +349,17 @@ fn handle_(
                             net_packet.set_transport_protocol(ip_turn_packet::Protocol::Ipv4.into());
                             return change_broadcast(udp, &context, config.broadcast, destination, net_packet.buffer());
                         }
-                        ip_turn_packet::Protocol::Ipv4 => {
-                            if ip_turn_packet::Protocol::from(net_packet.transport_protocol())
-                                == ip_turn_packet::Protocol::Ipv4 {
-                                let ipv4 = IpV4Packet::new(net_packet.payload())?;
-                                if ipv4.protocol() == ipv4::protocol::Protocol::Igmp {
-                                    crate::service::igmp_server::handle(ipv4.payload(), &context.token, source)?;
-                                    //Igmp数据也会广播出去，让大家都知道谁加入什么组播
-                                    broadcast(udp, &context, net_packet.buffer(), &[])?;
-                                    return Ok(());
-                                }
+                        ip_turn_packet::Protocol::Icmp => {}
+                        ip_turn_packet::Protocol::Igmp => {
+                            let ipv4 = IpV4Packet::new(net_packet.payload())?;
+                            if ipv4.protocol() == ipv4::protocol::Protocol::Igmp {
+                                crate::service::igmp_server::handle(ipv4.payload(), &context.token, source)?;
+                                //Igmp数据也会广播出去，让大家都知道谁加入什么组播
+                                broadcast(udp, &context, net_packet.buffer(), &[])?;
                             }
+                            return Ok(());
+                        }
+                        ip_turn_packet::Protocol::Ipv4 => {
                             //处理广播
                             if destination.is_broadcast() || config.broadcast == destination {
                                 broadcast(udp, &context, net_packet.buffer(), &[])?;
@@ -372,7 +372,7 @@ fn handle_(
                                 return Ok(());
                             }
                         }
-                        _ => {}
+                        ip_turn_packet::Protocol::Unknown(_) => {}
                     }
                 }
                 Protocol::OtherTurn => {}
@@ -460,30 +460,26 @@ fn handle_(
         Protocol::OtherTurn => {}
         Protocol::IpTurn => {
             match ip_turn_packet::Protocol::from(net_packet.transport_protocol()) {
-                ip_turn_packet::Protocol::Ipv4 => {
+                ip_turn_packet::Protocol::Icmp => {
                     let mut ipv4 = IpV4Packet::new(net_packet.payload_mut())?;
-                    match ipv4.protocol() {
-                        ipv4::protocol::Protocol::Icmp => {
-                            let mut icmp_packet = icmp::IcmpPacket::new(ipv4.payload_mut())?;
-                            if icmp_packet.kind() == Kind::EchoRequest {
-                                //开启ping
-                                icmp_packet.set_kind(Kind::EchoReply);
-                                icmp_packet.update_checksum();
-                                ipv4.set_source_ip(destination);
-                                ipv4.set_destination_ip(source);
-                                ipv4.update_checksum();
-                                net_packet.set_source(destination);
-                                net_packet.set_destination(source);
-                                udp.send_to(net_packet.buffer(), addr)?;
-                                return Ok(());
-                            }
+                    if ipv4.protocol() == ipv4::protocol::Protocol::Icmp {
+                        let mut icmp_packet = icmp::IcmpPacket::new(ipv4.payload_mut())?;
+                        if icmp_packet.kind() == Kind::EchoRequest {
+                            //开启ping
+                            icmp_packet.set_kind(Kind::EchoReply);
+                            icmp_packet.update_checksum();
+                            ipv4.set_source_ip(destination);
+                            ipv4.set_destination_ip(source);
+                            ipv4.update_checksum();
+                            net_packet.set_source(destination);
+                            net_packet.set_destination(source);
+                            udp.send_to(net_packet.buffer(), addr)?;
+                            return Ok(());
                         }
-                        ipv4::protocol::Protocol::Igmp => {
-                            crate::service::igmp_server::handle(ipv4.payload(), &context.token, source)?;
-                        }
-                        _ => {}
                     }
                 }
+                ip_turn_packet::Protocol::Igmp => {}
+                ip_turn_packet::Protocol::Ipv4 => {}
                 _ => {}
             }
         }
