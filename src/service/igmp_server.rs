@@ -10,12 +10,12 @@ use std::time::Duration;
 use crate::error::*;
 
 lazy_static::lazy_static! {
-    //组播缓存 10分钟 (token,group_address) -> members
+    //组播缓存 30分钟 (token,group_address) -> members
     static ref MULTICAST:Cache<(String,Ipv4Addr), Arc<RwLock<Multicast>>> = Cache::builder()
-        .time_to_idle(Duration::from_secs(10*60)).build();
+        .time_to_idle(Duration::from_secs(30*60)).build();
     // (token,group_address,member_ip)
     static ref MULTICAST_MEMBER:Cache<(String,Ipv4Addr,Ipv4Addr), ()> = Cache::builder()
-        .time_to_idle(Duration::from_secs(10*60)).eviction_listener(|k:Arc<(String,Ipv4Addr,Ipv4Addr)>,_,cause|{
+        .time_to_idle(Duration::from_secs(20*60)).eviction_listener(|k:Arc<(String,Ipv4Addr,Ipv4Addr)>,_,cause|{
 			if cause==moka::notification::RemovalCause::Replaced{
 				return;
 			}
