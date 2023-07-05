@@ -369,13 +369,6 @@ fn handle_(
                                 broadcast(addr, udp, &context, net_packet.buffer(), &[])?;
                                 return Ok(());
                             } else if destination.is_multicast() {
-                                let ipv4 = IpV4Packet::new(net_packet.payload())?;
-                                if ipv4.protocol() == ipv4::protocol::Protocol::Igmp {
-                                    crate::service::igmp_server::handle(ipv4.payload(), &context.token, source)?;
-                                    //Igmp数据也会广播出去，让大家都知道谁加入什么组播
-                                    broadcast(addr, udp, &context, net_packet.buffer(), &[])?;
-                                    return Ok(());
-                                }
                                 if let Some(multicast_info) = crate::service::igmp_server
                                 ::load(&context.token, destination) {
                                     multicast(addr, udp, &context, net_packet.buffer(), &multicast_info, &[])?;
@@ -406,43 +399,41 @@ fn handle_(
                 service_packet::Protocol::Unknown(_) => {}
                 service_packet::Protocol::PollDeviceList => {
                     if let Some(v) = VIRTUAL_NETWORK.get(&context.token) {
-                        //优先级较低，获取不到锁也问题不大
-                        if let Some(lock) = v.try_read() {
-                            let ips: Vec<message::DeviceInfo> = lock
-                                .virtual_ip_map
-                                .iter()
-                                .filter(|&(_, dev)| {
-                                    dev.ip != context.virtual_ip
-                                })
-                                .map(|(_, device_info)| {
-                                    let mut dev = message::DeviceInfo::new();
-                                    dev.virtual_ip = device_info.ip;
-                                    dev.name = device_info.name.clone();
-                                    let status: u8 = device_info.status.into();
-                                    dev.device_status = status as u32;
-                                    dev
-                                })
-                                .collect();
-                            let epoch = lock.epoch;
-                            drop(lock);
-                            let mut device_list = DeviceList::new();
-                            device_list.epoch = epoch;
-                            device_list.device_info_list = ips;
-                            log::info!("context:{:?},device_list:{:?}",context,device_list);
-                            let bytes = device_list.write_to_bytes()?;
-                            let mut device_list_packet =
-                                NetPacket::new(vec![0u8; 12 + bytes.len()])?;
-                            device_list_packet.set_version(Version::V1);
-                            device_list_packet.set_protocol(Protocol::Service);
-                            device_list_packet.set_transport_protocol(
-                                service_packet::Protocol::PushDeviceList.into(),
-                            );
-                            device_list_packet.first_set_ttl(MAX_TTL);
-                            device_list_packet.set_source(destination);
-                            device_list_packet.set_destination(source);
-                            device_list_packet.set_payload(&bytes);
-                            udp.send_to(device_list_packet.buffer(), addr)?;
-                        }
+                        let lock = v.read();
+                        let ips: Vec<message::DeviceInfo> = lock
+                            .virtual_ip_map
+                            .iter()
+                            .filter(|&(_, dev)| {
+                                dev.ip != context.virtual_ip
+                            })
+                            .map(|(_, device_info)| {
+                                let mut dev = message::DeviceInfo::new();
+                                dev.virtual_ip = device_info.ip;
+                                dev.name = device_info.name.clone();
+                                let status: u8 = device_info.status.into();
+                                dev.device_status = status as u32;
+                                dev
+                            })
+                            .collect();
+                        let epoch = lock.epoch;
+                        drop(lock);
+                        let mut device_list = DeviceList::new();
+                        device_list.epoch = epoch;
+                        device_list.device_info_list = ips;
+                        log::info!("context:{:?},device_list:{:?}",context,device_list);
+                        let bytes = device_list.write_to_bytes()?;
+                        let mut device_list_packet =
+                            NetPacket::new(vec![0u8; 12 + bytes.len()])?;
+                        device_list_packet.set_version(Version::V1);
+                        device_list_packet.set_protocol(Protocol::Service);
+                        device_list_packet.set_transport_protocol(
+                            service_packet::Protocol::PushDeviceList.into(),
+                        );
+                        device_list_packet.first_set_ttl(MAX_TTL);
+                        device_list_packet.set_source(destination);
+                        device_list_packet.set_destination(source);
+                        device_list_packet.set_payload(&bytes);
+                        udp.send_to(device_list_packet.buffer(), addr)?;
                     }
                 }
                 service_packet::Protocol::PushDeviceList => {}
@@ -456,11 +447,9 @@ fn handle_(
                     net_packet.set_source(destination);
                     net_packet.set_destination(source);
                     if let Some(v) = VIRTUAL_NETWORK.get(&context.token) {
-                        //优先级较低，获取不到锁也问题不大
-                        if let Some(lock) = v.try_read() {
-                            let mut pong_packet = control_packet::PongPacket::new(net_packet.payload_mut())?;
-                            pong_packet.set_epoch(lock.epoch as u16);
-                        }
+                        let epoch = v.read().epoch;
+                        let mut pong_packet = control_packet::PongPacket::new(net_packet.payload_mut())?;
+                        pong_packet.set_epoch(epoch as u16);
                     }
                     udp.send_to(net_packet.buffer(), addr)?;
                 }
@@ -470,27 +459,29 @@ fn handle_(
         Protocol::Error => {}
         Protocol::OtherTurn => {}
         Protocol::IpTurn => {
-            match ip_turn_packet::Protocol::from(net_packet.transport_protocol()) {
-                ip_turn_packet::Protocol::Icmp => {
-                    let mut ipv4 = IpV4Packet::new(net_packet.payload_mut())?;
-                    if ipv4.protocol() == ipv4::protocol::Protocol::Icmp {
-                        let mut icmp_packet = icmp::IcmpPacket::new(ipv4.payload_mut())?;
-                        if icmp_packet.kind() == Kind::EchoRequest {
-                            //开启ping
-                            icmp_packet.set_kind(Kind::EchoReply);
-                            icmp_packet.update_checksum();
-                            ipv4.set_source_ip(destination);
-                            ipv4.set_destination_ip(source);
-                            ipv4.update_checksum();
-                            net_packet.set_source(destination);
-                            net_packet.set_destination(source);
-                            udp.send_to(net_packet.buffer(), addr)?;
-                            return Ok(());
-                        }
+            let mut ipv4 = IpV4Packet::new(net_packet.payload_mut())?;
+            match ipv4.protocol() {
+                ipv4::protocol::Protocol::Icmp => {
+                    let mut icmp_packet = icmp::IcmpPacket::new(ipv4.payload_mut())?;
+                    if icmp_packet.kind() == Kind::EchoRequest {
+                        //开启ping
+                        icmp_packet.set_kind(Kind::EchoReply);
+                        icmp_packet.update_checksum();
+                        ipv4.set_source_ip(destination);
+                        ipv4.set_destination_ip(source);
+                        ipv4.update_checksum();
+                        net_packet.set_source(destination);
+                        net_packet.set_destination(source);
+                        udp.send_to(net_packet.buffer(), addr)?;
+                        return Ok(());
                     }
                 }
-                ip_turn_packet::Protocol::Igmp => {}
-                ip_turn_packet::Protocol::Ipv4 => {}
+                ipv4::protocol::Protocol::Igmp => {
+                    crate::service::igmp_server::handle(ipv4.payload(), &context.token, source)?;
+                    //Igmp数据也会广播出去，让大家都知道谁加入什么组播
+                    net_packet.set_destination(Ipv4Addr::new(224, 0, 0, 1));
+                    broadcast(addr, udp, &context, net_packet.buffer(), &[])?;
+                }
                 _ => {}
             }
         }
@@ -501,7 +492,8 @@ fn handle_(
 
 /// 选择性转发广播/组播，并且去除尾部
 fn change_broadcast(source_addr: SocketAddr, udp: &UdpSocket, context: &Context, broadcast_addr: Ipv4Addr, destination: Ipv4Addr, buf: &[u8]) -> Result<()> {
-    let packet_end = BroadcastPacketEnd::new(buf)?;
+    let end_len = buf[buf.len() - 1] as usize * 4 + 1;
+    let packet_end = BroadcastPacketEnd::new(&buf[buf.len() - end_len..])?;
     let end_len = packet_end.len();
     let exclude = packet_end.addresses();
     let buf = &buf[..buf.len() - end_len];
