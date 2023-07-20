@@ -8,4 +8,4 @@ Options:
       --netmask <NETMASK>          子网掩码，例如 --netmask 255.255.255.0
   -h, --help                       Print help
 ```
-
+默认情况服务日志输出在 './log/'下,可通过编写'./log/log4rs.yaml'文件自定义日志配置,参考[log4rs](https://github.com/estk/log4rs)
