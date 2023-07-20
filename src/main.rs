@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, UdpSocket};
+use std::path::PathBuf;
 use std::thread;
 
 use clap::Parser;
@@ -13,8 +14,8 @@ pub mod service;
 const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 26, 0, 1);
 const NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
 
-/// switch服务端
-/// 服务日志输出在 home/.switch_server 目录下
+/// switch服务端,
+/// 默认情况服务日志输出在 './log/'下,可通过编写'./log/log4rs.yaml'文件自定义日志配置
 #[derive(Parser, Debug, Clone)]
 pub struct StartArgs {
     /// 指定端口
@@ -41,26 +42,28 @@ pub struct ConfigInfo {
 }
 
 fn log_init() {
-    let home = dirs::home_dir().unwrap().join(".switch_server");
-    if !home.exists() {
-        std::fs::create_dir(&home).expect(" Failed to create '.switch' directory");
+    let cur = PathBuf::from("log");
+    if log4rs::init_file(cur.join("log4rs.yaml"), Default::default()).is_err() {
+        if !cur.exists() {
+            std::fs::create_dir(&cur).expect(" Failed to create 'log' directory");
+        }
+        let logfile = log4rs::append::file::FileAppender::builder()
+            // Pattern: https://docs.rs/log4rs/*/log4rs/encode/pattern/index.html
+            .encoder(Box::new(log4rs::encode::pattern::PatternEncoder::new(
+                "{d(%+)(utc)} [{f}:{L}] {h({l})} {M}:{m}{n}\n",
+            )))
+            .build(cur.join("switch_server_v1.0.7.log"))
+            .unwrap();
+        let config = log4rs::Config::builder()
+            .appender(log4rs::config::Appender::builder().build("logfile", Box::new(logfile)))
+            .build(
+                log4rs::config::Root::builder()
+                    .appender("logfile")
+                    .build(log::LevelFilter::Info),
+            )
+            .unwrap();
+        let _ = log4rs::init_config(config);
     }
-    let logfile = log4rs::append::file::FileAppender::builder()
-        // Pattern: https://docs.rs/log4rs/*/log4rs/encode/pattern/index.html
-        .encoder(Box::new(log4rs::encode::pattern::PatternEncoder::new(
-            "{d(%+)(utc)} [{f}:{L}] {h({l})} {M}:{m}{n}\n",
-        )))
-        .build(home.join("switch_server_v1.0.6.log"))
-        .unwrap();
-    let config = log4rs::Config::builder()
-        .appender(log4rs::config::Appender::builder().build("logfile", Box::new(logfile)))
-        .build(
-            log4rs::config::Root::builder()
-                .appender("logfile")
-                .build(log::LevelFilter::Info),
-        )
-        .unwrap();
-    let _ = log4rs::init_config(config);
 }
 
 fn main() {
@@ -116,7 +119,13 @@ fn main() {
         netmask,
     };
     log_init();
-    let udp = UdpSocket::bind(format!("0.0.0.0:{}", port)).unwrap();
+    let udp = match UdpSocket::bind(format!("0.0.0.0:{}", port)) {
+        Ok(udp) => {udp}
+        Err(e) => {
+            log::warn!("启动失败:{:?}",e);
+            panic!("{:?}",e);
+        }
+    };
     log::info!("启动成功,udp:{:?}",udp.local_addr().unwrap());
     println!("启动成功,udp:{:?}", udp.local_addr().unwrap());
     log::info!("config:{:?}",config);
