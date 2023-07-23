@@ -1,9 +1,11 @@
 use std::collections::HashSet;
-use std::net::{Ipv4Addr, UdpSocket};
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use std::thread;
+use std::sync::Arc;
 
 use clap::Parser;
+use tokio::net::{TcpListener, UdpSocket};
+use crate::service::{start_tcp, start_udp};
 
 pub mod error;
 pub mod proto;
@@ -14,7 +16,7 @@ pub mod service;
 const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 26, 0, 1);
 const NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
 
-/// switch服务端,
+/// vnt服务端,
 /// 默认情况服务日志输出在 './log/'下,可通过编写'./log/log4rs.yaml'文件自定义日志配置
 #[derive(Parser, Debug, Clone)]
 pub struct StartArgs {
@@ -52,7 +54,7 @@ fn log_init() {
             .encoder(Box::new(log4rs::encode::pattern::PatternEncoder::new(
                 "{d(%+)(utc)} [{f}:{L}] {h({l})} {M}:{m}{n}\n",
             )))
-            .build(cur.join("switch_server_v1.0.7.log"))
+            .build(cur.join("vnts_v1.0.7.log"))
             .unwrap();
         let config = log4rs::Config::builder()
             .appender(log4rs::config::Appender::builder().build("logfile", Box::new(logfile)))
@@ -66,7 +68,8 @@ fn log_init() {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args = StartArgs::parse();
     let port = args.port.unwrap_or(29871);
     println!("端口：{}", port);
@@ -119,28 +122,32 @@ fn main() {
         netmask,
     };
     log_init();
-    let udp = match UdpSocket::bind(format!("0.0.0.0:{}", port)) {
-        Ok(udp) => {udp}
+    log::info!("config:{:?}",config);
+    let udp = match UdpSocket::bind(format!("0.0.0.0:{}", port)).await {
+        Ok(udp) => { Arc::new(udp) }
         Err(e) => {
-            log::warn!("启动失败:{:?}",e);
-            panic!("{:?}",e);
+            log::warn!("udp启动失败:{:?}",e);
+            panic!("{:?}", e);
         }
     };
-    log::info!("启动成功,udp:{:?}",udp.local_addr().unwrap());
-    println!("启动成功,udp:{:?}", udp.local_addr().unwrap());
-    log::info!("config:{:?}",config);
-    let num = if let Ok(num) = thread::available_parallelism() {
-        num.get() * 2
-    } else {
-        2
+    log::info!("监听udp端口:{:?}",udp.local_addr().unwrap());
+    println!("监听udp端口:{:?}", udp.local_addr().unwrap());
+    let tcp = match TcpListener::bind(format!("0.0.0.0:{}", port)).await {
+        Ok(tcp) => { tcp }
+        Err(e) => {
+            log::warn!("tcp启动失败:{:?}",e);
+            panic!("{:?}", e);
+        }
     };
-    for _ in 0..num {
-        let udp = udp.try_clone().unwrap();
-        let config = config.clone();
-        thread::spawn(move || {
-            service::handle_loop(udp, config);
-        });
-    }
-
-    service::handle_loop(udp, config);
+    log::info!("监听tcp端口:{:?}",tcp.local_addr().unwrap());
+    println!("监听tcp端口:{:?}", tcp.local_addr().unwrap());
+    let config = config.clone();
+    let main_udp = udp.clone();
+    let tcp_config = config.clone();
+    tokio::spawn(async move {
+        if let Err(e) = start_tcp(tcp, main_udp, tcp_config).await {
+            log::warn!("tcp任务结束:{:?}",e);
+        }
+    });
+    start_udp(udp, config).await;
 }

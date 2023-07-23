@@ -1,4 +1,4 @@
-# switch-server
+# vnts
 查看参数
 ```
 Options:

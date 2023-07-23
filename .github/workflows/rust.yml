@@ -56,6 +56,8 @@ jobs:
             OS: ubuntu-latest
           - TARGET: x86_64-apple-darwin # tested on a mac, is not properly signed so there are security warnings
             OS: macos-latest
+          - TARGET: aarch64-apple-darwin # tested on a mac, is not properly signed so there are security warnings
+            OS: macos-latest
           - TARGET: i686-pc-windows-msvc # tested on a windows machine
             OS: windows-latest
           - TARGET: x86_64-pc-windows-msvc # tested on a windows machine
@@ -63,7 +65,7 @@ jobs:
     # needs: test
     runs-on: ${{ matrix.OS }}
     env:
-      NAME: switch-server # change with the name of your project
+      NAME: vnts # change with the name of your project
       TARGET: ${{ matrix.TARGET }}
       OS: ${{ matrix.OS }}
     steps:
@@ -125,7 +127,7 @@ jobs:
       - name: Archive artifact
         uses: actions/upload-artifact@v2
         with:
-          name: switch-server
+          name: vnts
           path: |
             ./artifacts
 
@@ -138,7 +140,7 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v2
         with:
-          name: switch-server
+          name: vnts
           path: ./artifacts
       - name: List
         run: find ./artifacts

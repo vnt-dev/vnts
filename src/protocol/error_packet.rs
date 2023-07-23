@@ -5,6 +5,8 @@ pub enum Protocol {
     TokenError,
     Disconnect,
     AddressExhausted,
+    IpAlreadyExists,
+    InvalidIp,
     Other(u8),
 }
 
@@ -14,6 +16,8 @@ impl From<u8> for Protocol {
             1 => Self::TokenError,
             2 => Self::Disconnect,
             3 => Self::AddressExhausted,
+            4 => Self::IpAlreadyExists,
+            5 => Self::InvalidIp,
             val => Self::Other(val),
         }
     }
@@ -25,6 +29,8 @@ impl Into<u8> for Protocol {
             Protocol::TokenError => 1,
             Protocol::Disconnect => 2,
             Protocol::AddressExhausted => 3,
+            Protocol::IpAlreadyExists => 4,
+            Protocol::InvalidIp => 5,
             Protocol::Other(val) => val,
         }
     }
@@ -34,6 +40,8 @@ pub enum InErrorPacket<B> {
     TokenError,
     Disconnect,
     AddressExhausted,
+    IpAlreadyExists,
+    InvalidIp,
     OtherError(ErrorPacket<B>),
 }
 
@@ -43,6 +51,8 @@ impl<B: AsRef<[u8]>> InErrorPacket<B> {
             Protocol::TokenError => Ok(InErrorPacket::TokenError),
             Protocol::Disconnect => Ok(InErrorPacket::Disconnect),
             Protocol::AddressExhausted => Ok(InErrorPacket::AddressExhausted),
+            Protocol::IpAlreadyExists => Ok(InErrorPacket::IpAlreadyExists),
+            Protocol::InvalidIp => Ok(InErrorPacket::InvalidIp),
             Protocol::Other(_) => Ok(InErrorPacket::OtherError(ErrorPacket::new(buffer)?)),
         }
     }

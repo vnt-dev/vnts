@@ -15,10 +15,14 @@ pub enum Error {
     InvalidPacket,
     #[error("Not support")]
     NotSupport,
-    #[error("Stop")]
-    Stop(String),
-    #[error("Warn")]
-    Warn(String),
+    #[error("Address Exhausted")]
+    AddressExhausted,
+    #[error("Token Error")]
+    TokenError,
+    #[error("Ip Already Exists")]
+    IpAlreadyExists,
+    #[error("Invalid Ip")]
+    InvalidIp,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
