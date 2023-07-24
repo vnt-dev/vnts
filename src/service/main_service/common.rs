@@ -199,8 +199,11 @@ pub async fn change_broadcast(source_addr: SocketAddr, udp: &UdpSocket, context:
 
 pub async fn handle(context: &mut Context, main_udp: &UdpSocket, buf: &mut [u8], addr: SocketAddr, config: &ConfigInfo, sender: Option<&Sender<Vec<u8>>>) -> crate::error::Result<()> {
     let reg: u8 = service_packet::Protocol::RegistrationRequest.into();
+    let addr_req: u8 = control_packet::Protocol::AddrRequest.into();
     match NetPacket::new(&mut buf[4..]) {
         Ok(mut net_packet) => {
+            let source = net_packet.source();
+            let destination = net_packet.destination();
             if net_packet.protocol() == Protocol::Service
                 && net_packet.transport_protocol() == reg {
                 let link = sender.map(|v| PeerLink::Tcp(v.clone())).unwrap_or(PeerLink::Udp(addr));
@@ -267,66 +270,92 @@ pub async fn handle(context: &mut Context, main_udp: &UdpSocket, buf: &mut [u8],
                         }
                     }
                 }
-            } else {
-                if context.virtual_ip != 0 {
-                    let source = net_packet.source();
-                    let destination = net_packet.destination();
-                    if destination == config.gateway {
-                        //给网关的消息
-                        match net_packet.protocol() {
-                            Protocol::Service => {
-                                if service_packet::Protocol::PollDeviceList == service_packet::Protocol::from(net_packet.transport_protocol()) {
-                                    if let Some(v) = VIRTUAL_NETWORK.get(&context.token) {
-                                        let (ips, epoch) = {
-                                            let lock = v.read();
-                                            let ips: Vec<message::DeviceInfo> = lock
-                                                .virtual_ip_map
-                                                .iter()
-                                                .filter(|&(_, dev)| {
-                                                    dev.ip != context.virtual_ip
-                                                })
-                                                .map(|(_, device_info)| {
-                                                    let mut dev = message::DeviceInfo::new();
-                                                    dev.virtual_ip = device_info.ip;
-                                                    dev.name = device_info.name.clone();
-                                                    let status: u8 = device_info.status.into();
-                                                    dev.device_status = status as u32;
-                                                    dev
-                                                })
-                                                .collect();
-                                            let epoch = lock.epoch;
-                                            (ips, epoch)
-                                        };
-                                        let mut device_list = DeviceList::new();
-                                        device_list.epoch = epoch;
-                                        device_list.device_info_list = ips;
-                                        log::info!("context:{:?},device_list:{:?}",context,device_list);
-                                        let bytes = device_list.write_to_bytes()?;
-                                        let mut vec = vec![0u8; 4 + 12 + bytes.len()];
-                                        let mut device_list_packet =
-                                            NetPacket::new(&mut vec[4..])?;
-                                        device_list_packet.set_version(Version::V1);
-                                        device_list_packet.set_protocol(Protocol::Service);
-                                        device_list_packet.set_transport_protocol(
-                                            service_packet::Protocol::PushDeviceList.into(),
-                                        );
-                                        device_list_packet.first_set_ttl(MAX_TTL);
-                                        device_list_packet.set_source(destination);
-                                        device_list_packet.set_destination(source);
-                                        device_list_packet.set_payload(&bytes);
-                                        match sender {
-                                            None => {
-                                                main_udp.send_to(device_list_packet.buffer(), addr).await?;
-                                            }
-                                            Some(sender) => {
-                                                let _ = sender.send(vec).await;
-                                            }
+            } else if net_packet.protocol() == Protocol::Control
+                && net_packet.transport_protocol() == addr_req {
+                match addr.ip() {
+                    IpAddr::V4(ipv4) => {
+                        let mut vec = vec![0u8; 4 + 12 + 6];
+                        let mut packet = NetPacket::new(&mut vec[4..])?;
+                        packet.set_version(Version::V1);
+                        packet.set_protocol(Protocol::Control);
+                        packet.set_transport_protocol(
+                            control_packet::Protocol::AddrResponse.into(),
+                        );
+                        packet.first_set_ttl(MAX_TTL);
+                        packet.set_source(destination);
+                        packet.set_destination(source);
+                        let mut addr_packet = control_packet::AddrPacket::new(packet.payload_mut())?;
+                        addr_packet.set_ipv4(ipv4);
+                        addr_packet.set_port(addr.port());
+                        match sender {
+                            None => {
+                                main_udp.send_to(packet.buffer(), addr).await?;
+                            }
+                            Some(sender) => {
+                                let _ = sender.send(vec).await;
+                            }
+                        }
+                    }
+                    IpAddr::V6(_) => {}
+                }
+            } else if context.virtual_ip != 0 {
+                if destination == config.gateway {
+                    //给网关的消息
+                    match net_packet.protocol() {
+                        Protocol::Service => {
+                            if service_packet::Protocol::PollDeviceList == service_packet::Protocol::from(net_packet.transport_protocol()) {
+                                if let Some(v) = VIRTUAL_NETWORK.get(&context.token) {
+                                    let (ips, epoch) = {
+                                        let lock = v.read();
+                                        let ips: Vec<message::DeviceInfo> = lock
+                                            .virtual_ip_map
+                                            .iter()
+                                            .filter(|&(_, dev)| {
+                                                dev.ip != context.virtual_ip
+                                            })
+                                            .map(|(_, device_info)| {
+                                                let mut dev = message::DeviceInfo::new();
+                                                dev.virtual_ip = device_info.ip;
+                                                dev.name = device_info.name.clone();
+                                                let status: u8 = device_info.status.into();
+                                                dev.device_status = status as u32;
+                                                dev
+                                            })
+                                            .collect();
+                                        let epoch = lock.epoch;
+                                        (ips, epoch)
+                                    };
+                                    let mut device_list = DeviceList::new();
+                                    device_list.epoch = epoch;
+                                    device_list.device_info_list = ips;
+                                    log::info!("context:{:?},device_list:{:?}",context,device_list);
+                                    let bytes = device_list.write_to_bytes()?;
+                                    let mut vec = vec![0u8; 4 + 12 + bytes.len()];
+                                    let mut device_list_packet =
+                                        NetPacket::new(&mut vec[4..])?;
+                                    device_list_packet.set_version(Version::V1);
+                                    device_list_packet.set_protocol(Protocol::Service);
+                                    device_list_packet.set_transport_protocol(
+                                        service_packet::Protocol::PushDeviceList.into(),
+                                    );
+                                    device_list_packet.first_set_ttl(MAX_TTL);
+                                    device_list_packet.set_source(destination);
+                                    device_list_packet.set_destination(source);
+                                    device_list_packet.set_payload(&bytes);
+                                    match sender {
+                                        None => {
+                                            main_udp.send_to(device_list_packet.buffer(), addr).await?;
+                                        }
+                                        Some(sender) => {
+                                            let _ = sender.send(vec).await;
                                         }
                                     }
                                 }
                             }
-                            Protocol::Control => {
-                                if control_packet::Protocol::Ping == control_packet::Protocol::from(net_packet.transport_protocol()) {
+                        }
+                        Protocol::Control => {
+                            match control_packet::Protocol::from(net_packet.transport_protocol()) {
+                                control_packet::Protocol::Ping => {
                                     let _ = DEVICE_ADDRESS.get(&(context.token.clone(), context.virtual_ip));
                                     let _ = DEVICE_ID_SESSION.get(&(context.token.clone(), context.device_id.clone()));
                                     if let Some(v) = VIRTUAL_NETWORK.get(&context.token) {
@@ -347,111 +376,112 @@ pub async fn handle(context: &mut Context, main_udp: &UdpSocket, buf: &mut [u8],
                                         }
                                     }
                                 }
-                            }
-                            Protocol::IpTurn => {
-                                let mut ipv4 = IpV4Packet::new(net_packet.payload_mut())?;
-                                match ipv4.protocol() {
-                                    ipv4::protocol::Protocol::Icmp => {
-                                        let mut icmp_packet = icmp::IcmpPacket::new(ipv4.payload_mut())?;
-                                        if icmp_packet.kind() == Kind::EchoRequest {
-                                            //开启ping
-                                            icmp_packet.set_kind(Kind::EchoReply);
-                                            icmp_packet.update_checksum();
-                                            ipv4.set_source_ip(destination);
-                                            ipv4.set_destination_ip(source);
-                                            ipv4.update_checksum();
-                                            net_packet.set_source(destination);
-                                            net_packet.set_destination(source);
-                                            match sender {
-                                                None => {
-                                                    main_udp.send_to(net_packet.buffer(), addr).await?;
-                                                }
-                                                Some(sender) => {
-                                                    let _ = sender.send(buf.to_vec()).await;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    ipv4::protocol::Protocol::Igmp => {
-                                        crate::service::igmp_server::handle(ipv4.payload(), &context.token, source)?;
-                                        //Igmp数据也会广播出去，让大家都知道谁加入什么组播
-                                        net_packet.set_destination(Ipv4Addr::new(224, 0, 0, 1));
-                                        broadcast(addr, main_udp, &context, net_packet.buffer(), None, &[]).await?;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            _ => {
-                                log::info!("无效数据类型:{:?},Protocol={:?}",addr,net_packet.protocol())
+                                _ => {}
                             }
                         }
-                    } else {
-                        //需要转发的数据
-                        if net_packet.ttl() > 1 {
-                            net_packet.set_ttl(net_packet.ttl() - 1);
-                            if Protocol::IpTurn == net_packet.protocol() {
-                                //处理广播
-                                match ip_turn_packet::Protocol::from(net_packet.transport_protocol()) {
-                                    ip_turn_packet::Protocol::Icmp => {}
-                                    ip_turn_packet::Protocol::Igmp => {
-                                        let ipv4 = IpV4Packet::new(net_packet.payload())?;
-                                        if ipv4.protocol() == ipv4::protocol::Protocol::Igmp {
-                                            crate::service::igmp_server::handle(ipv4.payload(), &context.token, source)?;
-                                            //Igmp数据也会广播出去，让大家都知道谁加入什么组播
-                                            broadcast(addr, main_udp, &context, buf, None, &[]).await?;
-                                        }
-                                        return Ok(());
-                                    }
-                                    ip_turn_packet::Protocol::Ipv4 => {
-                                        //处理广播
-                                        if destination.is_broadcast() || config.broadcast == destination {
-                                            broadcast(addr, main_udp, &context, buf, None, &[]).await?;
-                                            return Ok(());
-                                        } else if destination.is_multicast() {
-                                            if let Some(multicast_info) = crate::service::igmp_server
-                                            ::load(&context.token, destination) {
-                                                broadcast(addr, main_udp, &context, buf, Some(&multicast_info), &[]).await?;
+                        Protocol::IpTurn => {
+                            let mut ipv4 = IpV4Packet::new(net_packet.payload_mut())?;
+                            match ipv4.protocol() {
+                                ipv4::protocol::Protocol::Icmp => {
+                                    let mut icmp_packet = icmp::IcmpPacket::new(ipv4.payload_mut())?;
+                                    if icmp_packet.kind() == Kind::EchoRequest {
+                                        //开启ping
+                                        icmp_packet.set_kind(Kind::EchoReply);
+                                        icmp_packet.update_checksum();
+                                        ipv4.set_source_ip(destination);
+                                        ipv4.set_destination_ip(source);
+                                        ipv4.update_checksum();
+                                        net_packet.set_source(destination);
+                                        net_packet.set_destination(source);
+                                        match sender {
+                                            None => {
+                                                main_udp.send_to(net_packet.buffer(), addr).await?;
                                             }
-                                            return Ok(());
+                                            Some(sender) => {
+                                                let _ = sender.send(buf.to_vec()).await;
+                                            }
                                         }
                                     }
-                                    ip_turn_packet::Protocol::Ipv4Broadcast => {
-                                        net_packet.set_transport_protocol(ip_turn_packet::Protocol::Ipv4.into());
-                                        return change_broadcast(addr, main_udp, &context, config.broadcast, destination, buf).await;
-                                    }
-                                    ip_turn_packet::Protocol::Unknown(_) => {}
                                 }
-                            }
-                            //其他的直接转发
-                            if let Some(peer) =
-                                DEVICE_ADDRESS.get(&(context.token.clone(), destination.into()))
-                            {
-                                match peer {
-                                    PeerLink::Tcp(sender) => {
-                                        let _ = sender.send(buf.to_vec()).await;
-                                    }
-                                    PeerLink::Udp(addr) => {
-                                        main_udp.send_to(net_packet.buffer(), addr).await?;
-                                    }
+                                ipv4::protocol::Protocol::Igmp => {
+                                    crate::service::igmp_server::handle(ipv4.payload(), &context.token, source)?;
+                                    //Igmp数据也会广播出去，让大家都知道谁加入什么组播
+                                    net_packet.set_destination(Ipv4Addr::new(224, 0, 0, 1));
+                                    broadcast(addr, main_udp, &context, net_packet.buffer(), None, &[]).await?;
                                 }
+                                _ => {}
                             }
+                        }
+                        _ => {
+                            log::info!("无效数据类型:{:?},Protocol={:?}",addr,net_packet.protocol())
                         }
                     }
                 } else {
-                    let source = net_packet.source();
-                    let mut rs = vec![0u8; 4 + 12];
-                    let mut net_packet = NetPacket::new(&mut rs[4..])?;
-                    net_packet.set_version(Version::V1);
-                    net_packet.set_protocol(Protocol::Error);
-                    net_packet.set_transport_protocol(error_packet::Protocol::Disconnect.into());
-                    net_packet.first_set_ttl(MAX_TTL);
-                    net_packet.set_source(config.gateway);
-                    net_packet.set_destination(source);
-                    if let Some(sender) = sender {
-                        let _ = sender.send(rs).await;
-                    } else {
-                        main_udp.send_to(net_packet.buffer(), addr).await?;
+                    //需要转发的数据
+                    if net_packet.ttl() > 1 {
+                        net_packet.set_ttl(net_packet.ttl() - 1);
+                        if Protocol::IpTurn == net_packet.protocol() {
+                            //处理广播
+                            match ip_turn_packet::Protocol::from(net_packet.transport_protocol()) {
+                                ip_turn_packet::Protocol::Icmp => {}
+                                ip_turn_packet::Protocol::Igmp => {
+                                    let ipv4 = IpV4Packet::new(net_packet.payload())?;
+                                    if ipv4.protocol() == ipv4::protocol::Protocol::Igmp {
+                                        crate::service::igmp_server::handle(ipv4.payload(), &context.token, source)?;
+                                        //Igmp数据也会广播出去，让大家都知道谁加入什么组播
+                                        broadcast(addr, main_udp, &context, buf, None, &[]).await?;
+                                    }
+                                    return Ok(());
+                                }
+                                ip_turn_packet::Protocol::Ipv4 => {
+                                    //处理广播
+                                    if destination.is_broadcast() || config.broadcast == destination {
+                                        broadcast(addr, main_udp, &context, buf, None, &[]).await?;
+                                        return Ok(());
+                                    } else if destination.is_multicast() {
+                                        if let Some(multicast_info) = crate::service::igmp_server
+                                        ::load(&context.token, destination) {
+                                            broadcast(addr, main_udp, &context, buf, Some(&multicast_info), &[]).await?;
+                                        }
+                                        return Ok(());
+                                    }
+                                }
+                                ip_turn_packet::Protocol::Ipv4Broadcast => {
+                                    net_packet.set_transport_protocol(ip_turn_packet::Protocol::Ipv4.into());
+                                    return change_broadcast(addr, main_udp, &context, config.broadcast, destination, buf).await;
+                                }
+                                ip_turn_packet::Protocol::Unknown(_) => {}
+                            }
+                        }
+                        //其他的直接转发
+                        if let Some(peer) =
+                            DEVICE_ADDRESS.get(&(context.token.clone(), destination.into()))
+                        {
+                            match peer {
+                                PeerLink::Tcp(sender) => {
+                                    let _ = sender.send(buf.to_vec()).await;
+                                }
+                                PeerLink::Udp(addr) => {
+                                    main_udp.send_to(net_packet.buffer(), addr).await?;
+                                }
+                            }
+                        }
                     }
+                }
+            } else {
+                let source = net_packet.source();
+                let mut rs = vec![0u8; 4 + 12];
+                let mut net_packet = NetPacket::new(&mut rs[4..])?;
+                net_packet.set_version(Version::V1);
+                net_packet.set_protocol(Protocol::Error);
+                net_packet.set_transport_protocol(error_packet::Protocol::Disconnect.into());
+                net_packet.first_set_ttl(MAX_TTL);
+                net_packet.set_source(config.gateway);
+                net_packet.set_destination(source);
+                if let Some(sender) = sender {
+                    let _ = sender.send(rs).await;
+                } else {
+                    main_udp.send_to(net_packet.buffer(), addr).await?;
                 }
             }
         }
