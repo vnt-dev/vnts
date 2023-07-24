@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::io::Write;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -44,28 +45,39 @@ pub struct ConfigInfo {
 }
 
 fn log_init() {
-    let cur = PathBuf::from("log");
-    if log4rs::init_file(cur.join("log4rs.yaml"), Default::default()).is_err() {
-        if !cur.exists() {
-            std::fs::create_dir(&cur).expect(" Failed to create 'log' directory");
-        }
-        let logfile = log4rs::append::file::FileAppender::builder()
-            // Pattern: https://docs.rs/log4rs/*/log4rs/encode/pattern/index.html
-            .encoder(Box::new(log4rs::encode::pattern::PatternEncoder::new(
-                "{d(%+)(utc)} [{f}:{L}] {h({l})} {M}:{m}{n}\n",
-            )))
-            .build(cur.join("vnts_v1.0.7.log"))
-            .unwrap();
-        let config = log4rs::Config::builder()
-            .appender(log4rs::config::Appender::builder().build("logfile", Box::new(logfile)))
-            .build(
-                log4rs::config::Root::builder()
-                    .appender("logfile")
-                    .build(log::LevelFilter::Info),
-            )
-            .unwrap();
-        let _ = log4rs::init_config(config);
+    let log_path = PathBuf::from("log");
+    if !log_path.exists() {
+        let _ = std::fs::create_dir(&log_path);
     }
+    let log_config = log_path.join("log4rs.yaml");
+    if !log_config.exists() {
+        if let Ok(mut f) = std::fs::File::create(&log_config) {
+            let _ = f.write_all(b"refresh_rate: 30 seconds
+appenders:
+  rolling_file:
+    kind: rolling_file
+    path: log/vnts.log
+    append: true
+    encoder:
+      pattern: \"{d(%+)(utc)} [{f}:{L}] {h({l})} {M}:{m}{n}\"
+    policy:
+      kind: compound
+      trigger:
+        kind: size
+        limit: 10 mb
+      roller:
+        kind: fixed_window
+        pattern: log/vnts.{}.log
+        base: 1
+        count: 5
+
+root:
+  level: info
+  appenders:
+    - rolling_file");
+        }
+    }
+    let _ = log4rs::init_file(log_config, Default::default());
 }
 
 #[tokio::main]
