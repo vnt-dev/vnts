@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use moka::sync::Cache;
 use std::time::Duration;
 use std::sync::Arc;
+use crossbeam_skiplist::SkipMap;
 use parking_lot::RwLock;
 use tokio::sync::mpsc::Sender;
 
@@ -31,8 +32,7 @@ lazy_static::lazy_static! {
     //七天没有用户则回收网段缓存
     static ref VIRTUAL_NETWORK:Cache<String, Arc<RwLock<VirtualNetwork>>> = Cache::builder()
         .time_to_idle(Duration::from_secs(60*60*24*7)).build();
-    static ref DEVICE_ADDRESS:Cache<(String,u32), PeerLink> = Cache::builder()
-        .time_to_idle(Duration::from_secs(10 * 61)).build();
+    static ref DEVICE_ADDRESS:SkipMap<(String,u32), PeerLink> = SkipMap::new();
     //udp专用 10秒钟没有收到消息则判定为掉线
     // 地址 -> 注册信息
     static ref UDP_SESSION:Cache<SocketAddr,Context> = Cache::builder()
@@ -48,7 +48,7 @@ lazy_static::lazy_static! {
                         return;
                     }
                     item.status = PeerDeviceStatus::Offline;
-                    DEVICE_ADDRESS.invalidate(&(context.token,context.virtual_ip));
+                    DEVICE_ADDRESS.remove(&(context.token,context.virtual_ip));
                 }
                 lock.epoch+=1;
             }

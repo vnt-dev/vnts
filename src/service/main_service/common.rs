@@ -52,10 +52,11 @@ pub fn register(data: &[u8], config: &ConfigInfo, addr: SocketAddr, link: PeerLi
     let (id, mut virtual_ip) = if let Some(mut device_info) = lock.virtual_ip_map.get_mut(&request.device_id) {
         device_info.status = PeerDeviceStatus::Online;
         device_info.name = request.name.clone();
+        device_info.id = Local::now().timestamp_millis();
         if request.virtual_ip != 0 && device_info.ip != request.virtual_ip {
             (Local::now().timestamp_millis(), 0)
         } else {
-            (Local::now().timestamp_millis(), device_info.ip)
+            (device_info.id, device_info.ip)
         }
     } else {
         (Local::now().timestamp_millis(), 0)
@@ -65,6 +66,7 @@ pub fn register(data: &[u8], config: &ConfigInfo, addr: SocketAddr, link: PeerLi
         let set: HashSet<u32> = lock
             .virtual_ip_map
             .iter()
+            .filter(|(key, _)| *key != &request.device_id)
             .map(|(_, device_info)| device_info.ip)
             .collect();
         let ip_range = (response.virtual_gateway & response.virtual_netmask) + 1..response.virtual_gateway | (!response.virtual_netmask);
@@ -159,12 +161,12 @@ pub async fn broadcast(source_addr: SocketAddr, main_udp: &UdpSocket, context: &
             }
             if !exclude.contains(&ipv4) {
                 if let Some(peer) = DEVICE_ADDRESS.get(&(context.token.clone(), ip)) {
-                    match peer {
+                    match peer.value() {
                         PeerLink::Tcp(sender) => {
                             let _ = sender.send(buf.to_vec()).await;
                         }
                         PeerLink::Udp(addr) => {
-                            if addr != source_addr {
+                            if addr != &source_addr {
                                 let _ = main_udp.send_to(&buf[4..], addr).await;
                             }
                         }
@@ -356,7 +358,6 @@ pub async fn handle(context: &mut Context, main_udp: &UdpSocket, buf: &mut [u8],
                         Protocol::Control => {
                             match control_packet::Protocol::from(net_packet.transport_protocol()) {
                                 control_packet::Protocol::Ping => {
-                                    let _ = DEVICE_ADDRESS.get(&(context.token.clone(), context.virtual_ip));
                                     let _ = DEVICE_ID_SESSION.get(&(context.token.clone(), context.device_id.clone()));
                                     if let Some(v) = VIRTUAL_NETWORK.get(&context.token) {
                                         let epoch = v.read().epoch;
@@ -457,7 +458,7 @@ pub async fn handle(context: &mut Context, main_udp: &UdpSocket, buf: &mut [u8],
                         if let Some(peer) =
                             DEVICE_ADDRESS.get(&(context.token.clone(), destination.into()))
                         {
-                            match peer {
+                            match peer.value() {
                                 PeerLink::Tcp(sender) => {
                                     let _ = sender.send(buf.to_vec()).await;
                                 }

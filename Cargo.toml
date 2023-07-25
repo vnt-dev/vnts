@@ -14,6 +14,7 @@ dirs = "4.0.0"
 dashmap = "5.4.0"
 crossbeam = "0.8.2"
 parking_lot = "0.12.1"
+crossbeam-skiplist = "0.1"
 
 rsa = "0.7.2"
 rand = "0.8.5"

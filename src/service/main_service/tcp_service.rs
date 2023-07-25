@@ -58,7 +58,7 @@ pub async fn start_tcp(tcp: TcpListener, main_udp: Arc<UdpSocket>, config: Confi
                             return;
                         }
                         item.status = PeerDeviceStatus::Offline;
-                        DEVICE_ADDRESS.invalidate(&(context.token, context.virtual_ip));
+                        DEVICE_ADDRESS.remove(&(context.token, context.virtual_ip));
                     }
                     lock.epoch += 1;
                 }
