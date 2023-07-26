@@ -38,15 +38,15 @@ impl<B: AsRef<[u8]>> IpV4Packet<B> {
         Self { buffer }
     }
     pub fn new(buffer: B) -> io::Result<Self> {
-        if buffer.as_ref()[0] >> 4 != 4 {
-            Err(io::Error::from(io::ErrorKind::InvalidData))?;
-        }
         if buffer.as_ref().len() < 20 {
-            Err(io::Error::from(io::ErrorKind::InvalidData))?;
+            Err(io::Error::new(io::ErrorKind::InvalidData, "len < 20"))?;
+        }
+        if buffer.as_ref()[0] >> 4 != 4 {
+            Err(io::Error::new(io::ErrorKind::InvalidData, "not ipv4"))?;
         }
         let packet = Self::unchecked(buffer);
         if packet.buffer.as_ref().len() < packet.header_len() as usize * 4 {
-            Err(io::Error::from(io::ErrorKind::InvalidData))?;
+            Err(io::Error::new(io::ErrorKind::InvalidData, "head_len err"))?;
         }
         Ok(packet)
     }
