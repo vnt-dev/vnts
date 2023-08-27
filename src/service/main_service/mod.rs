@@ -1,9 +1,9 @@
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossbeam_skiplist::SkipMap;
 use moka::sync::Cache;
 use parking_lot::RwLock;
 use tokio::sync::mpsc::Sender;
@@ -38,8 +38,8 @@ lazy_static::lazy_static! {
     //七天没有用户则回收网段缓存
     static ref VIRTUAL_NETWORK:Cache<String, Arc<RwLock<VirtualNetwork>>> = Cache::builder()
         .time_to_idle(Duration::from_secs(60*60*24*7)).build();
-    static ref DEVICE_ADDRESS:SkipMap<(String,u32), (PeerLink,Context)> = SkipMap::new();
-    static ref TCP_AES:SkipMap<SocketAddr,Aes256GcmCipher> = SkipMap::new();
+    static ref DEVICE_ADDRESS:DashMap<(String,u32), (PeerLink,Context)> = DashMap::new();
+    static ref TCP_AES:DashMap<SocketAddr,Aes256GcmCipher> = DashMap::new();
     static ref UDP_AES:Cache<SocketAddr,Aes256GcmCipher> = Cache::builder()
         .time_to_idle(Duration::from_secs(20)).build();
     //udp专用 10秒钟没有收到消息则判定为掉线

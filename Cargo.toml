@@ -11,10 +11,9 @@ clap = { version = "4.0.32", features = ["derive"] }
 log = "0.4.17"
 log4rs = "1.2.0"
 dirs = "4.0.0"
-dashmap = "5.4.0"
 crossbeam = "0.8.2"
 parking_lot = "0.12.1"
-crossbeam-skiplist = "0.1"
+dashmap = "5.5.1"
 
 rsa = {version="0.7.2", features = [] }
 spki = {version="0.6.0",features=["fingerprint","alloc"]}

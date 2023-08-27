@@ -285,7 +285,8 @@ async fn broadcast(
             }
             if !exclude.contains(&ipv4) {
                 if let Some(peer) = DEVICE_ADDRESS.get(&(context.token.clone(), ip)) {
-                    let (peer_link, peer_context) = peer.value();
+                    let (peer_link, peer_context) = peer.value().clone();
+                    drop(peer);
                     if peer_context.client_secret == client_secret {
                         match peer_link {
                             PeerLink::Tcp(sender) => {
@@ -326,12 +327,14 @@ async fn broadcast_igmp(
             .collect();
         for ip in ips {
             if let Some(peer) = DEVICE_ADDRESS.get(&(context.token.clone(), ip)) {
-                let (peer_link, peer_context) = peer.value();
+                let (peer_link, peer_context) = peer.value().clone();
+                drop(peer);
                 match peer_link {
                     PeerLink::Tcp(sender) => {
                         if let Some(aes) = TCP_AES.get(&peer_context.address) {
                             let mut packet = NetPacket::new_encrypt(buf.clone())?;
                             aes.value().encrypt_ipv4(&mut packet)?;
+                            drop(aes);
                             let _ = sender.send(packet.buffer().to_vec()).await;
                         } else {
                             let mut packet = NetPacket::new_encrypt(&buf)?;
@@ -694,7 +697,8 @@ async fn transmit_handle(
         }
         //其他的直接转发
         if let Some(peer) = DEVICE_ADDRESS.get(&(context.token.clone(), destination.into())) {
-            let (peer_link, peer_context) = peer.value();
+            let (peer_link, peer_context) = peer.value().clone();
+            drop(peer);
             if peer_context.client_secret == client_secret {
                 match peer_link {
                     PeerLink::Tcp(sender) => {
