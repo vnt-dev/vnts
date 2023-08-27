@@ -4,14 +4,16 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::cipher::RsaCipher;
+use crate::service::{start_tcp, start_udp};
 use clap::Parser;
 use tokio::net::{TcpListener, UdpSocket};
-use crate::service::{start_tcp, start_udp};
 
-pub mod error;
-pub mod proto;
-pub mod protocol;
-pub mod service;
+mod cipher;
+mod error;
+mod proto;
+mod protocol;
+mod service;
 
 /// 默认网关信息
 const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 26, 0, 1);
@@ -52,7 +54,8 @@ fn log_init() {
     let log_config = log_path.join("log4rs.yaml");
     if !log_config.exists() {
         if let Ok(mut f) = std::fs::File::create(&log_config) {
-            let _ = f.write_all(b"refresh_rate: 30 seconds
+            let _ = f.write_all(
+                b"refresh_rate: 30 seconds
 appenders:
   rolling_file:
     kind: rolling_file
@@ -74,7 +77,8 @@ appenders:
 root:
   level: info
   appenders:
-    - rolling_file");
+    - rolling_file",
+            );
         }
     }
     let _ = log4rs::init_file(log_config, Default::default());
@@ -82,49 +86,76 @@ root:
 
 #[tokio::main]
 async fn main() {
+    log_init();
     let args = StartArgs::parse();
-    let port = args.port.unwrap_or(29871);
-    println!("端口：{}", port);
+    let port = args.port.unwrap_or(29872);
+    println!("端口: {}", port);
     let white_token = if let Some(white_token) = args.white_token {
         Some(HashSet::from_iter(white_token.into_iter()))
     } else {
         None
     };
-    println!("token白名单：{:?}", white_token);
+    println!("token白名单: {:?}", white_token);
     let gateway = if let Some(gateway) = args.gateway {
-        gateway.parse::<Ipv4Addr>().expect("网关错误，必须为有效的ipv4地址")
+        match gateway.parse::<Ipv4Addr>() {
+            Ok(ip) => ip,
+            Err(e) => {
+                log::error!("网关错误，必须为有效的ipv4地址 gateway={},e={}", gateway, e);
+                panic!("网关错误，必须为有效的ipv4地址")
+            }
+        }
     } else {
         GATEWAY
     };
-    println!("网关：{:?}", gateway);
+    println!("网关: {:?}", gateway);
     if gateway.is_unspecified() {
         println!("网关地址无效");
+        log::error!("网关错误，必须为有效的ipv4地址 gateway={}", gateway);
         return;
     }
     if gateway.is_broadcast() {
         println!("网关错误，不能为广播地址");
+        log::error!("网关错误，不能为广播地址 gateway={}", gateway);
         return;
     }
     if gateway.is_multicast() {
         println!("网关错误，不能为组播地址");
+        log::error!("网关错误，不能为组播地址 gateway={}", gateway);
         return;
     }
     if !gateway.is_private() {
-        println!("Warning 不是一个私有地址：{:?}，将有可能和公网ip冲突", gateway);
+        println!(
+            "Warning 不是一个私有地址：{:?}，将有可能和公网ip冲突",
+            gateway
+        );
+        log::warn!("网关错误，不是一个私有地址 gateway={}", gateway);
     }
     let netmask = if let Some(netmask) = args.netmask {
-        netmask.parse::<Ipv4Addr>().expect("子网掩码错误，必须为有效的ipv4地址")
+        match netmask.parse::<Ipv4Addr>() {
+            Ok(ip) => ip,
+            Err(e) => {
+                log::error!(
+                    "子网掩码错误，必须为有效的ipv4地址 netmask={},e={}",
+                    netmask,
+                    e
+                );
+                panic!("子网掩码错误，必须为有效的ipv4地址")
+            }
+        }
     } else {
         NETMASK
     };
-    println!("子网掩码：{:?}", netmask);
-    if netmask.is_broadcast() || netmask.is_unspecified() || !(!u32::from_be_bytes(netmask.octets()) + 1).is_power_of_two() {
+    println!("子网掩码: {:?}", netmask);
+    if netmask.is_broadcast()
+        || netmask.is_unspecified()
+        || !(!u32::from_be_bytes(netmask.octets()) + 1).is_power_of_two()
+    {
         println!("子网掩码错误");
+        log::error!("子网掩码错误 netmask={}", netmask);
         return;
     }
 
-    let broadcast = (!u32::from_be_bytes(netmask.octets()))
-        | u32::from_be_bytes(gateway.octets());
+    let broadcast = (!u32::from_be_bytes(netmask.octets())) | u32::from_be_bytes(gateway.octets());
     let broadcast = Ipv4Addr::from(broadcast);
     let config = ConfigInfo {
         port,
@@ -133,33 +164,38 @@ async fn main() {
         broadcast,
         netmask,
     };
-    log_init();
-    log::info!("config:{:?}",config);
+    let rsa = match RsaCipher::new() {
+        Ok(rsa) => {
+            println!("密钥指纹: {}", rsa.finger().unwrap());
+            Some(rsa)
+        }
+        Err(e) => {
+            log::error!("获取密钥错误：{:?}", e);
+            panic!("获取密钥错误:{}", e);
+        }
+    };
+    log::info!("config:{:?}", config);
     let udp = match UdpSocket::bind(format!("0.0.0.0:{}", port)).await {
-        Ok(udp) => { Arc::new(udp) }
+        Ok(udp) => Arc::new(udp),
         Err(e) => {
-            log::warn!("udp启动失败:{:?}",e);
-            panic!("{:?}", e);
+            log::warn!("udp启动失败:{:?}", e);
+            panic!("udp启动失败:{}", e);
         }
     };
-    log::info!("监听udp端口:{:?}",udp.local_addr().unwrap());
-    println!("监听udp端口:{:?}", udp.local_addr().unwrap());
+    log::info!("监听udp端口: {:?}", udp.local_addr().unwrap());
+    println!("监听udp端口: {:?}", udp.local_addr().unwrap());
     let tcp = match TcpListener::bind(format!("0.0.0.0:{}", port)).await {
-        Ok(tcp) => { tcp }
+        Ok(tcp) => tcp,
         Err(e) => {
-            log::warn!("tcp启动失败:{:?}",e);
-            panic!("{:?}", e);
+            log::warn!("tcp启动失败:{:?}", e);
+            panic!("tcp启动失败:{:?}", e);
         }
     };
-    log::info!("监听tcp端口:{:?}",tcp.local_addr().unwrap());
-    println!("监听tcp端口:{:?}", tcp.local_addr().unwrap());
+    log::info!("监听tcp端口: {:?}", tcp.local_addr().unwrap());
+    println!("监听tcp端口: {:?}", tcp.local_addr().unwrap());
     let config = config.clone();
     let main_udp = udp.clone();
     let tcp_config = config.clone();
-    tokio::spawn(async move {
-        if let Err(e) = start_tcp(tcp, main_udp, tcp_config).await {
-            log::warn!("tcp任务结束:{:?}",e);
-        }
-    });
-    start_udp(udp, config).await;
+    tokio::spawn(start_tcp(tcp, main_udp, tcp_config, rsa.clone()));
+    start_udp(udp, config, rsa.clone()).await;
 }

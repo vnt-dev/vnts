@@ -1,13 +1,13 @@
-use std::collections::{HashMap, HashSet};
-use std::net::Ipv4Addr;
-use std::sync::Arc;
+use crate::error::*;
+use moka::sync::Cache;
 use packet::igmp::igmp_v2::IgmpV2Packet;
 use packet::igmp::igmp_v3::{IgmpV3RecordType, IgmpV3ReportPacket};
 use packet::igmp::IgmpType;
 use parking_lot::RwLock;
-use moka::sync::Cache;
+use std::collections::{HashMap, HashSet};
+use std::net::Ipv4Addr;
+use std::sync::Arc;
 use std::time::Duration;
-use crate::error::*;
 
 lazy_static::lazy_static! {
     //组播缓存 30分钟 (token,group_address) -> members
@@ -16,9 +16,9 @@ lazy_static::lazy_static! {
     // (token,group_address,member_ip)
     static ref MULTICAST_MEMBER:Cache<(String,Ipv4Addr,Ipv4Addr), ()> = Cache::builder()
         .time_to_idle(Duration::from_secs(20*60)).eviction_listener(|k:Arc<(String,Ipv4Addr,Ipv4Addr)>,_,cause|{
-			if cause==moka::notification::RemovalCause::Replaced{
-				return;
-			}
+            if cause==moka::notification::RemovalCause::Replaced{
+                return;
+            }
             log::info!("MULTICAST_MEMBER eviction {:?}", k);
             if let Some(v) = MULTICAST.get(&(k.0.clone(),k.1)){
                 let mut lock = v.write();
@@ -116,7 +116,8 @@ pub fn handle(buf: &[u8], token: &String, source: Ipv4Addr) -> Result<()> {
                                     guard.members.insert(source);
                                     guard.map.insert(source, (true, HashSet::from_iter(src)));
                                     drop(guard);
-                                    MULTICAST_MEMBER.insert((token.clone(), multicast_addr, source), ());
+                                    MULTICAST_MEMBER
+                                        .insert((token.clone(), multicast_addr, source), ());
                                 }
                             }
                         }
@@ -140,20 +141,18 @@ pub fn handle(buf: &[u8], token: &String, source: Ipv4Addr) -> Result<()> {
                             //在已有源的基础上，接收目标源，如果是排除模式，则删除；是包含模式则添加
                             match group_record.source_addresses() {
                                 None => {}
-                                Some(src) => {
-                                    match guard.map.get_mut(&source) {
-                                        None => {}
-                                        Some((is_include, set)) => {
-                                            for ip in src {
-                                                if *is_include {
-                                                    set.insert(ip);
-                                                } else {
-                                                    set.remove(&ip);
-                                                }
+                                Some(src) => match guard.map.get_mut(&source) {
+                                    None => {}
+                                    Some((is_include, set)) => {
+                                        for ip in src {
+                                            if *is_include {
+                                                set.insert(ip);
+                                            } else {
+                                                set.remove(&ip);
                                             }
                                         }
                                     }
-                                }
+                                },
                             }
                             drop(guard);
                             MULTICAST_MEMBER.insert((token.clone(), multicast_addr, source), ());
@@ -162,20 +161,18 @@ pub fn handle(buf: &[u8], token: &String, source: Ipv4Addr) -> Result<()> {
                             //在已有源的基础上，不接收目标源
                             match group_record.source_addresses() {
                                 None => {}
-                                Some(src) => {
-                                    match guard.map.get_mut(&source) {
-                                        None => {}
-                                        Some((is_include, set)) => {
-                                            for ip in src {
-                                                if *is_include {
-                                                    set.remove(&ip);
-                                                } else {
-                                                    set.insert(ip);
-                                                }
+                                Some(src) => match guard.map.get_mut(&source) {
+                                    None => {}
+                                    Some((is_include, set)) => {
+                                        for ip in src {
+                                            if *is_include {
+                                                set.remove(&ip);
+                                            } else {
+                                                set.insert(ip);
                                             }
                                         }
                                     }
-                                }
+                                },
                             }
                             drop(guard);
                             MULTICAST_MEMBER.insert((token.clone(), multicast_addr, source), ());
