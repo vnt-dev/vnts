@@ -772,17 +772,13 @@ pub async fn handle(
             }
             let p = net_packet.transport_protocol();
             if net_packet.is_gateway() {
-                if p != handshake && p != secret_handshake {
+                if !(net_packet.protocol() == Protocol::Service
+                    && (p == handshake || p == secret_handshake))
+                {
                     //解密数据
                     if let Some(aes) = aes_gcm_cipher {
                         aes.decrypt_ipv4(&mut net_packet)?;
                     } else if net_packet.is_encrypt() {
-                        log::warn!(
-                            "没有密钥={},src={},dest={}",
-                            addr,
-                            net_packet.source(),
-                            net_packet.destination()
-                        );
                         let source = net_packet.source();
                         let mut rs = vec![0u8; 12 + ENCRYPTION_RESERVED];
                         let mut packet = NetPacket::new_encrypt(&mut rs)?;
@@ -804,8 +800,10 @@ pub async fn handle(
                     finger.check_finger(&net_packet)?;
                 }
             }
-            if net_packet.protocol() == Protocol::Service
-                && (p == reg || p == handshake || p == secret_handshake || p == addr_req)
+            if net_packet.is_gateway()
+                && ((net_packet.protocol() == Protocol::Service
+                    && (p == reg || p == handshake || p == secret_handshake))
+                    || (net_packet.protocol() == Protocol::Control && p == addr_req))
             {
                 server_packet_pre_handle(
                     context,

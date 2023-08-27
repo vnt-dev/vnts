@@ -62,7 +62,7 @@ appenders:
     path: log/vnts.log
     append: true
     encoder:
-      pattern: \"{d(%+)(utc)} [{f}:{L}] {h({l})} {M}:{m}{n}\"
+      pattern: \"{d} [{f}:{L}] {h({l})} {M}:{m}{n}\"
     policy:
       kind: compound
       trigger:
