@@ -34,6 +34,7 @@ tokio-util = { version = "0.7.8", features = ["full"] }
 
 [features]
 default=["aes-gcm"]
+normal=["aes-gcm"]
 ring-cipher=["ring"]
 
 [build-dependencies]
