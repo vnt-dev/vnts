@@ -467,7 +467,7 @@ async fn server_packet_pre_handle(
                             if sync_secret.key.len() == 32 {
                                 let c = Aes256GcmCipher::new(
                                     sync_secret.key.try_into().unwrap(),
-                                    Finger::new(sync_secret.token.clone()),
+                                    Finger::new(&sync_secret.token),
                                 );
                                 if sender.is_none() {
                                     UDP_AES.insert(addr, c.clone());
@@ -800,7 +800,7 @@ pub async fn handle(
             } else if let Some(context) = context {
                 //不是服务端的包虽然不能解密，但是可以验证数据合法性
                 if net_packet.is_encrypt() {
-                    let finger = Finger::new(context.token.clone());
+                    let finger = Finger::new(&context.token);
                     finger.check_finger(&net_packet)?;
                 }
             }
