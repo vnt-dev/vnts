@@ -1,12 +1,12 @@
 [package]
 name = "vnts"
-version = "1.2.1"
+version = "1.2.2"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-packet = {path = "./packet"}
+packet = { path = "./packet" }
 clap = { version = "4.0.32", features = ["derive"] }
 log = "0.4.17"
 log4rs = "1.2.0"
@@ -15,12 +15,12 @@ crossbeam = "0.8.2"
 parking_lot = "0.12.1"
 dashmap = "5.5.1"
 
-rsa = {version="0.7.2", features = [] }
-spki = {version="0.6.0",features=["fingerprint","alloc"]}
-aes-gcm = {version="0.10.2", optional = true}
-ring = {version="0.16.20", optional = true}
+rsa = { version = "0.7.2", features = [] }
+spki = { version = "0.6.0", features = ["fingerprint", "alloc"] }
+aes-gcm = { version = "0.10.2", optional = true }
+ring = { version = "0.16.20", optional = true }
 rand = "0.8.5"
-sha2 ={version="0.10.6",features=["oid"]}
+sha2 = { version = "0.10.6", features = ["oid"] }
 colored = "2.0.0"
 
 thiserror = "1.0.37"
@@ -33,9 +33,9 @@ async-trait = "0.1.71"
 tokio-util = { version = "0.7.8", features = ["full"] }
 
 [features]
-default=["aes-gcm"]
-normal=["aes-gcm"]
-ring-cipher=["ring"]
+default = ["aes-gcm"]
+normal = ["aes-gcm"]
+ring-cipher = ["ring"]
 
 [build-dependencies]
 protobuf-codegen = "3.2.0"

@@ -797,11 +797,13 @@ pub async fn handle(
                         return Ok(());
                     }
                 }
-            } else if let Some(context) = context {
-                //不是服务端的包虽然不能解密，但是可以验证数据合法性
-                if net_packet.is_encrypt() {
-                    let finger = Finger::new(&context.token);
-                    finger.check_finger(&net_packet)?;
+            } else if config.check_finger {
+                if let Some(context) = context {
+                    //不是服务端的包虽然不能解密，但是可以验证数据合法性
+                    if net_packet.is_encrypt() {
+                        let finger = Finger::new(&context.token);
+                        finger.check_finger(&net_packet)?;
+                    }
                 }
             }
             if net_packet.is_gateway()

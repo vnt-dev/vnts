@@ -23,7 +23,7 @@ const NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
 /// 默认情况服务日志输出在 './log/'下,可通过编写'./log/log4rs.yaml'文件自定义日志配置
 #[derive(Parser, Debug, Clone)]
 pub struct StartArgs {
-    /// 指定端口
+    /// 指定端口，默认29872
     #[arg(long)]
     port: Option<u16>,
     /// token白名单，例如 --white-token 1234 --white-token 123
@@ -35,6 +35,9 @@ pub struct StartArgs {
     /// 子网掩码，例如 --netmask 255.255.255.0
     #[arg(long)]
     netmask: Option<String>,
+    ///开启指纹校验，开启后只会转发指纹正确的客户端数据包，增强安全性，这会损失一部分性能
+    #[arg(long)]
+    finger: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +47,7 @@ pub struct ConfigInfo {
     pub gateway: Ipv4Addr,
     pub broadcast: Ipv4Addr,
     pub netmask: Ipv4Addr,
+    pub check_finger: bool,
 }
 
 fn log_init() {
@@ -157,12 +161,17 @@ async fn main() {
 
     let broadcast = (!u32::from_be_bytes(netmask.octets())) | u32::from_be_bytes(gateway.octets());
     let broadcast = Ipv4Addr::from(broadcast);
+    let check_finger = args.finger;
+    if check_finger {
+        println!("转发校验数据指纹，客户端必须增加--finger参数");
+    }
     let config = ConfigInfo {
         port,
         white_token,
         gateway,
         broadcast,
         netmask,
+        check_finger,
     };
     let rsa = match RsaCipher::new() {
         Ok(rsa) => {
