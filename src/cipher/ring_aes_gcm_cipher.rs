@@ -63,7 +63,7 @@ impl Aes256GcmCipher {
         nonce_raw[10] = net_packet.is_gateway() as u8;
         nonce_raw[11] = net_packet.source_ttl();
         let nonce = aead::Nonce::assume_unique_for_key(nonce_raw);
-        let mut secret_body = SecretBody::new(net_packet.payload_mut())?;
+        let mut secret_body = SecretBody::new(net_packet.payload_mut(), true)?;
         let tag = secret_body.tag();
         let finger = self
             .finger
@@ -107,7 +107,7 @@ impl Aes256GcmCipher {
         let nonce = aead::Nonce::assume_unique_for_key(nonce_raw);
         let data_len = net_packet.data_len() + ENCRYPTION_RESERVED;
         net_packet.set_data_len(data_len)?;
-        let mut secret_body = SecretBody::new(net_packet.payload_mut())?;
+        let mut secret_body = SecretBody::new(net_packet.payload_mut(), true)?;
         secret_body.set_random(rand::thread_rng().next_u32());
 
         let rs = match &self.cipher {

@@ -44,7 +44,7 @@ impl Aes256GcmCipher {
         nonce_raw[11] = net_packet.source_ttl();
         let nonce: &GenericArray<u8, U12> = Nonce::from_slice(&nonce_raw);
 
-        let mut secret_body = SecretBody::new(net_packet.payload_mut())?;
+        let mut secret_body = SecretBody::new(net_packet.payload_mut(), true)?;
         let tag = secret_body.tag();
         let finger = self
             .finger
@@ -86,7 +86,7 @@ impl Aes256GcmCipher {
         nonce_raw[11] = net_packet.source_ttl();
         let nonce: &GenericArray<u8, U12> = Nonce::from_slice(&nonce_raw);
         net_packet.set_data_len(net_packet.data_len() + ENCRYPTION_RESERVED)?;
-        let mut secret_body = SecretBody::new(net_packet.payload_mut())?;
+        let mut secret_body = SecretBody::new(net_packet.payload_mut(), true)?;
         secret_body.set_random(rand::thread_rng().next_u32());
         return match self
             .cipher
