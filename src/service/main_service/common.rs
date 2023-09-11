@@ -310,9 +310,8 @@ async fn broadcast_igmp(
     net_packet: NetPacket<&mut [u8]>,
 ) -> crate::error::Result<()> {
     let buf = if net_packet.reserve() != ENCRYPTION_RESERVED {
-        let mut buf_packet = Vec::with_capacity(net_packet.data_len() + ENCRYPTION_RESERVED);
-        buf_packet.clone_from_slice(net_packet.buffer());
-        buf_packet.resize(net_packet.data_len() + ENCRYPTION_RESERVED, 0);
+        let mut buf_packet = vec![0; net_packet.data_len() + ENCRYPTION_RESERVED];
+        buf_packet.copy_from_slice(net_packet.buffer());
         buf_packet
     } else {
         net_packet.buffer().to_vec()
