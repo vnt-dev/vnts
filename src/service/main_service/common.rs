@@ -701,13 +701,33 @@ async fn transmit_handle(
             if peer_context.client_secret == client_secret {
                 match peer_link {
                     PeerLink::Tcp(sender) => {
-                        let _ = sender.send(net_packet.buffer().to_vec()).await;
+                        if let Err(e) = sender.send(net_packet.buffer().to_vec()).await {
+                            log::warn!(
+                                "src={},to={},err:{:?}",
+                                net_packet.source(),
+                                destination,
+                                e
+                            );
+                        }
                     }
                     PeerLink::Udp(addr) => {
-                        main_udp.send_to(net_packet.buffer(), addr).await?;
+                        if let Err(e) = main_udp.send_to(net_packet.buffer(), addr).await {
+                            log::warn!(
+                                "src={},to={},err:{:?}",
+                                net_packet.source(),
+                                destination,
+                                e
+                            );
+                        }
                     }
                 }
             }
+        } else {
+            log::warn!(
+                "目标不存在:src={},dest={}",
+                net_packet.source(),
+                destination
+            );
         }
     }
     Ok(())
@@ -723,12 +743,16 @@ async fn reply_vec(
     if let Some(aes) = aes_gcm_cipher {
         let mut packet = NetPacket::new_encrypt(&mut buf)?;
         aes.encrypt_ipv4(&mut packet)?;
+        let len = packet.data_len();
+        buf.truncate(len);
     } else {
         let len = buf.len();
         buf.truncate(len - ENCRYPTION_RESERVED);
     }
     if let Some(sender) = sender {
-        let _ = sender.send(buf).await;
+        if let Err(e) = sender.send(buf).await {
+            log::warn!("回复失败：{},err={:?}", addr, e);
+        }
     } else {
         main_udp.send_to(&buf, addr).await?;
     }
@@ -747,7 +771,9 @@ async fn reply_buf(
         aes.encrypt_ipv4(&mut packet)?;
     }
     if let Some(sender) = sender {
-        let _ = sender.send(buf.to_vec()).await;
+        if let Err(e) = sender.send(buf.to_vec()).await {
+            log::warn!("回复失败：{},err={:?}", addr, e);
+        }
     } else {
         main_udp.send_to(buf, addr).await?;
     }

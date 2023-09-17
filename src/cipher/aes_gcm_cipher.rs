@@ -6,7 +6,7 @@ use aes_gcm::{AeadInPlace, Aes256Gcm, Key, KeyInit, Nonce, Tag};
 use rand::RngCore;
 
 use crate::cipher::finger::Finger;
-use crate::protocol::{body::SecretBody, body::ENCRYPTION_RESERVED, NetPacket};
+use crate::protocol::{body::SecretBody, body::AES_GCM_ENCRYPTION_RESERVED, NetPacket};
 
 #[derive(Clone)]
 pub struct Aes256GcmCipher {
@@ -31,8 +31,8 @@ impl Aes256GcmCipher {
             //未加密的数据直接丢弃
             return Err(io::Error::new(io::ErrorKind::Other, "not encrypt"));
         }
-        if net_packet.payload().len() < ENCRYPTION_RESERVED {
-            log::error!("数据异常,长度小于{}", ENCRYPTION_RESERVED);
+        if net_packet.payload().len() < AES_GCM_ENCRYPTION_RESERVED {
+            log::error!("数据异常,长度小于{}", AES_GCM_ENCRYPTION_RESERVED);
             return Err(io::Error::new(io::ErrorKind::Other, "data err"));
         }
         let mut nonce_raw = [0; 12];
@@ -64,7 +64,7 @@ impl Aes256GcmCipher {
             ));
         }
         net_packet.set_encrypt_flag(false);
-        net_packet.set_data_len(net_packet.data_len() - ENCRYPTION_RESERVED)?;
+        net_packet.set_data_len(net_packet.data_len() - AES_GCM_ENCRYPTION_RESERVED)?;
         return Ok(());
     }
     /// net_packet 必须预留足够长度
@@ -74,7 +74,7 @@ impl Aes256GcmCipher {
         &self,
         net_packet: &mut NetPacket<B>,
     ) -> io::Result<()> {
-        if net_packet.reserve() < ENCRYPTION_RESERVED {
+        if net_packet.reserve() < AES_GCM_ENCRYPTION_RESERVED {
             return Err(io::Error::new(io::ErrorKind::Other, "too short"));
         }
         let mut nonce_raw = [0; 12];
@@ -85,7 +85,7 @@ impl Aes256GcmCipher {
         nonce_raw[10] = net_packet.is_gateway() as u8;
         nonce_raw[11] = net_packet.source_ttl();
         let nonce: &GenericArray<u8, U12> = Nonce::from_slice(&nonce_raw);
-        net_packet.set_data_len(net_packet.data_len() + ENCRYPTION_RESERVED)?;
+        net_packet.set_data_len(net_packet.data_len() + AES_GCM_ENCRYPTION_RESERVED)?;
         let mut secret_body = SecretBody::new(net_packet.payload_mut(), true)?;
         secret_body.set_random(rand::thread_rng().next_u32());
         return match self

@@ -75,6 +75,9 @@ jobs:
           - TARGET: x86_64-pc-windows-msvc # tested on a windows machine
             OS: windows-latest
             FEATURES: ring-cipher
+          - TARGET: mipsel-unknown-linux-musl # openwrt
+            OS: ubuntu-latest
+            FEATURES: normal
     # needs: test
     runs-on: ${{ matrix.OS }}
     env:
