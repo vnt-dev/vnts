@@ -41,11 +41,11 @@ lazy_static::lazy_static! {
     static ref DEVICE_ADDRESS:DashMap<(String,u32), (PeerLink,Context)> = DashMap::new();
     static ref TCP_AES:DashMap<SocketAddr,Aes256GcmCipher> = DashMap::new();
     static ref UDP_AES:Cache<SocketAddr,Aes256GcmCipher> = Cache::builder()
-        .time_to_idle(Duration::from_secs(20)).build();
-    //udp专用 10秒钟没有收到消息则判定为掉线
+        .time_to_idle(Duration::from_secs(30)).build();
+    //udp专用 20秒钟没有收到消息则判定为掉线
     // 地址 -> 注册信息
     static ref UDP_SESSION:Cache<SocketAddr,Context> = Cache::builder()
-        .time_to_idle(Duration::from_secs(10)).eviction_listener(|_,context:Context,cause|{
+        .time_to_idle(Duration::from_secs(20)).eviction_listener(|_,context:Context,cause|{
             if cause!=moka::notification::RemovalCause::Expired{
                 return;
             }
