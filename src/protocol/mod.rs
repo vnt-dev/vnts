@@ -108,7 +108,7 @@ impl<B: AsRef<[u8]>> NetPacket<B> {
         if 12 + ENCRYPTION_RESERVED > buffer.as_ref().len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "length overflow",
+                format!("new_encrypt length overflow {}", buffer.as_ref().len()),
             ));
         }
         //加密需要预留ENCRYPTION_RESERVED字节
@@ -119,14 +119,14 @@ impl<B: AsRef<[u8]>> NetPacket<B> {
         if data_len > buffer.as_ref().len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "length overflow",
+                format!("new0 length overflow {}", buffer.as_ref().len()),
             ));
         }
         // 不能大于udp最大载荷长度
         if data_len < 12 || buffer.as_ref().len() > 65535 - 20 - 8 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "length overflow",
+                format!("new0 length overflow {}", buffer.as_ref().len()),
             ));
         }
         Ok(NetPacket { data_len, buffer })
