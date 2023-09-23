@@ -578,14 +578,7 @@ async fn server_packet_handle(
                         let mut pong_packet =
                             control_packet::PongPacket::new(net_packet.payload_mut())?;
                         pong_packet.set_epoch(epoch as u16);
-                        reply_buf(
-                            aes_gcm_cipher,
-                            &sender,
-                            main_udp,
-                            addr,
-                            net_packet.into_buffer(),
-                        )
-                        .await?;
+                        reply_buf(aes_gcm_cipher, &sender, main_udp, addr, net_packet).await?;
                     }
                 }
                 _ => {}
@@ -620,14 +613,8 @@ async fn server_packet_handle(
                                 net_packet.set_source(destination);
                                 net_packet.set_destination(source);
                                 net_packet.set_gateway_flag(true);
-                                reply_buf(
-                                    aes_gcm_cipher,
-                                    &sender,
-                                    main_udp,
-                                    addr,
-                                    net_packet.into_buffer(),
-                                )
-                                .await?;
+                                reply_buf(aes_gcm_cipher, &sender, main_udp, addr, net_packet)
+                                    .await?;
                             }
                         }
                         ipv4::protocol::Protocol::Igmp => {
@@ -764,18 +751,17 @@ async fn reply_buf(
     sender: &Option<&Sender<Vec<u8>>>,
     main_udp: &UdpSocket,
     addr: SocketAddr,
-    buf: &mut [u8],
+    mut net_packet: NetPacket<&mut [u8]>,
 ) -> crate::error::Result<()> {
     if let Some(aes) = aes_gcm_cipher {
-        let mut packet = NetPacket::new_encrypt(&mut buf[..])?;
-        aes.encrypt_ipv4(&mut packet)?;
+        aes.encrypt_ipv4(&mut net_packet)?;
     }
     if let Some(sender) = sender {
-        if let Err(e) = sender.send(buf.to_vec()).await {
+        if let Err(e) = sender.send(net_packet.buffer().to_vec()).await {
             log::warn!("回复失败：{},err={:?}", addr, e);
         }
     } else {
-        main_udp.send_to(buf, addr).await?;
+        main_udp.send_to(net_packet.buffer(), addr).await?;
     }
     Ok(())
 }
@@ -809,6 +795,12 @@ pub async fn handle(
                         aes.decrypt_ipv4(&mut net_packet)?;
                     } else if net_packet.is_encrypt() {
                         let source = net_packet.source();
+                        log::info!(
+                            "NoKey,source={},dest={},addr={}",
+                            source,
+                            net_packet.destination(),
+                            addr
+                        );
                         let mut rs = vec![0u8; 12 + ENCRYPTION_RESERVED];
                         let mut packet = NetPacket::new_encrypt(&mut rs)?;
                         packet.set_version(Version::V1);
@@ -867,6 +859,12 @@ pub async fn handle(
                 }
             } else {
                 let source = net_packet.source();
+                log::info!(
+                    "Disconnect,source={},dest={},addr={}",
+                    source,
+                    net_packet.destination(),
+                    addr
+                );
                 let mut rs = vec![0u8; 12 + ENCRYPTION_RESERVED];
                 let mut packet = NetPacket::new_encrypt(&mut rs)?;
                 packet.set_version(Version::V1);
