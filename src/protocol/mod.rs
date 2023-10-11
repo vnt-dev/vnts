@@ -155,7 +155,7 @@ impl<B: AsRef<[u8]>> NetPacket<B> {
     }
     /// 网关通信的标识
     pub fn is_gateway(&self) -> bool {
-        self.buffer.as_ref()[0] & 0x50 == 0x50
+        self.buffer.as_ref()[0] & 0x40 == 0x40
     }
     pub fn version(&self) -> Version {
         Version::from(self.buffer.as_ref()[0] & 0x0F)
