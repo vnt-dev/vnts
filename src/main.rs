@@ -184,7 +184,19 @@ async fn main() {
         }
     };
     log::info!("config:{:?}", config);
-    let udp = match UdpSocket::bind(format!("0.0.0.0:{}", port)).await {
+    let address: std::net::SocketAddr = format!("[::]:{}", port).parse().unwrap();
+
+    let socket = socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::DGRAM, None).unwrap();
+    socket.set_only_v6(false).unwrap();
+    socket.set_nonblocking(true).unwrap();
+    match socket.bind(&address.into()) {
+        Ok(_) => {}
+        Err(e) => {
+            log::warn!("udp bind失败:{:?}", e);
+            panic!("udp bind失败:{}", e);
+        }
+    }
+    let udp = match UdpSocket::from_std(socket.into()) {
         Ok(udp) => Arc::new(udp),
         Err(e) => {
             log::warn!("udp启动失败:{:?}", e);
@@ -193,7 +205,19 @@ async fn main() {
     };
     log::info!("监听udp端口: {:?}", udp.local_addr().unwrap());
     println!("监听udp端口: {:?}", udp.local_addr().unwrap());
-    let tcp = match TcpListener::bind(format!("0.0.0.0:{}", port)).await {
+    let socket = socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::STREAM, None).unwrap();
+    socket.set_only_v6(false).unwrap();
+    match socket.bind(&address.into()) {
+        Ok(_) => {}
+        Err(e) => {
+            log::warn!("tcp bind失败:{:?}", e);
+            panic!("tcp bind失败:{}", e);
+        }
+    }
+    socket.set_nodelay(true).unwrap();
+    socket.set_nonblocking(true).unwrap();
+    socket.listen(1024).unwrap();
+    let tcp = match TcpListener::from_std(socket.into()) {
         Ok(tcp) => tcp,
         Err(e) => {
             log::warn!("tcp启动失败:{:?}", e);

@@ -10,7 +10,7 @@ packet = { path = "./packet" }
 clap = { version = "4.0.32", features = ["derive"] }
 log = "0.4.17"
 log4rs = "1.2.0"
-dirs = "4.0.0"
+dirs = "5.0.1"
 crossbeam = "0.8.2"
 parking_lot = "0.12.1"
 dashmap = "5.5.1"
@@ -18,7 +18,7 @@ dashmap = "5.5.1"
 rsa = { version = "0.7.2", features = [] }
 spki = { version = "0.6.0", features = ["fingerprint", "alloc"] }
 aes-gcm = { version = "0.10.2", optional = true }
-ring = { version = "0.16.20", optional = true }
+ring = { version = "0.17.7", optional = true }
 rand = "0.8.5"
 sha2 = { version = "0.10.6", features = ["oid"] }
 colored = "2.0.0"
@@ -26,12 +26,12 @@ colored = "2.0.0"
 thiserror = "1.0.37"
 chrono = "0.4.23"
 lazy_static = "1.4.0"
-moka = { version = "0.11.3", default-features = false, features = ["sync"] }
+moka = { version = "0.12.1", default-features = false, features = ["sync"] }
 protobuf = "3.2.0"
 tokio = { version = "1.32.0", features = ["full"] }
 async-trait = "0.1.71"
 tokio-util = { version = "0.7.8", features = ["full"] }
-
+socket2 = { version = "0.5.5",features = ["all"] }
 [features]
 default = ["aes-gcm"]
 normal = ["aes-gcm"]
