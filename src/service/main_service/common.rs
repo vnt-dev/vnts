@@ -435,7 +435,7 @@ async fn server_packet_pre_handle(
                 service_packet::Protocol::HandshakeRequest => {
                     // 握手请求,有加密的话回应公钥
                     let mut res = message::HandshakeResponse::new();
-                    res.version = "1.1.3".to_string();
+                    res.version = "1.2.8".to_string();
                     if let Some(rsp_cipher) = rsa_cipher {
                         res.public_key.extend_from_slice(rsp_cipher.public_key());
                         res.secret = true;
