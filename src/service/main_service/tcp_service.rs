@@ -28,6 +28,9 @@ pub async fn start_tcp(
                 continue;
             }
         };
+        if let Err(e) = stream.set_nodelay(true) {
+            log::info!("set_nodelay:{:?}", e);
+        }
         log::info!("tcp连接 {}", addr);
         let (r, mut w) = stream.into_split();
 
