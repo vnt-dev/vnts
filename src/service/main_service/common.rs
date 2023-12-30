@@ -29,13 +29,13 @@ use crate::service::main_service::{
 use crate::ConfigInfo;
 
 fn check_reg(request: &RegistrationRequest) -> crate::error::Result<()> {
-    if request.token.len() == 0 || request.token.len() > 64 {
+    if request.token.len() == 0 || request.token.len() > 128 {
         return Err(Error::InvalidPacket);
     }
-    if request.device_id.len() == 0 || request.device_id.len() > 64 {
+    if request.device_id.len() == 0 || request.device_id.len() > 128 {
         return Err(Error::InvalidPacket);
     }
-    if request.name.len() == 0 || request.name.len() > 64 {
+    if request.name.len() == 0 || request.name.len() > 128 {
         return Err(Error::InvalidPacket);
     }
     Ok(())
