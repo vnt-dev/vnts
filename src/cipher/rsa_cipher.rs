@@ -17,6 +17,7 @@ pub struct RsaCipher {
 struct Inner {
     private_key: RsaPrivateKey,
     public_key_der: Vec<u8>,
+    finger: String,
 }
 
 impl RsaCipher {
@@ -80,16 +81,18 @@ impl RsaCipher {
                 ));
             }
         };
+        let finger = Self::finger_(&public_key_der)?;
         let inner = Inner {
             private_key,
             public_key_der,
+            finger,
         };
         Ok(Self {
             inner: Arc::new(inner),
         })
     }
-    pub fn finger(&self) -> io::Result<String> {
-        match rsa::pkcs8::SubjectPublicKeyInfo::from_der(&self.inner.public_key_der) {
+    pub fn finger_(public_key_der: &Vec<u8>) -> io::Result<String> {
+        match rsa::pkcs8::SubjectPublicKeyInfo::from_der(public_key_der) {
             Ok(spki) => match spki.fingerprint_base64() {
                 Ok(finger) => Ok(finger),
                 Err(e) => Err(io::Error::new(
@@ -102,6 +105,9 @@ impl RsaCipher {
                 format!("from_der error {}", e),
             )),
         }
+    }
+    pub fn finger(&self) -> String {
+        self.inner.finger.clone()
     }
 
     pub fn public_key(&self) -> &[u8] {

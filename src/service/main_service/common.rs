@@ -439,7 +439,7 @@ async fn server_packet_pre_handle(
                     if let Some(rsp_cipher) = rsa_cipher {
                         res.public_key.extend_from_slice(rsp_cipher.public_key());
                         res.secret = true;
-                        res.key_finger = rsp_cipher.finger()?;
+                        res.key_finger = rsp_cipher.finger();
                     }
                     let bytes = res.write_to_bytes()?;
                     let mut vec = vec![0u8; 12 + bytes.len() + ENCRYPTION_RESERVED];

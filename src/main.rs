@@ -22,6 +22,7 @@ const NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
 /// vnt服务端,
 /// 默认情况服务日志输出在 './log/'下,可通过编写'./log/log4rs.yaml'文件自定义日志配置
 #[derive(Parser, Debug, Clone)]
+#[command(version)]
 pub struct StartArgs {
     /// 指定端口，默认29872
     #[arg(long)]
@@ -175,7 +176,7 @@ async fn main() {
     };
     let rsa = match RsaCipher::new() {
         Ok(rsa) => {
-            println!("密钥指纹: {}", rsa.finger().unwrap());
+            println!("密钥指纹: {}", rsa.finger());
             Some(rsa)
         }
         Err(e) => {
