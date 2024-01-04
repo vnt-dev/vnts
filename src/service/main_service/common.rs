@@ -309,13 +309,6 @@ async fn broadcast_igmp(
     context: &Context,
     net_packet: NetPacket<&mut [u8]>,
 ) -> crate::error::Result<()> {
-    let buf = if net_packet.reserve() != ENCRYPTION_RESERVED {
-        let mut buf_packet = vec![0; net_packet.data_len() + ENCRYPTION_RESERVED];
-        buf_packet.copy_from_slice(net_packet.buffer());
-        buf_packet
-    } else {
-        net_packet.buffer().to_vec()
-    };
     if let Some(v) = VIRTUAL_NETWORK.get(&context.token) {
         let ips: Vec<u32> = v
             .read()
@@ -331,23 +324,31 @@ async fn broadcast_igmp(
                 match peer_link {
                     PeerLink::Tcp(sender) => {
                         if let Some(aes) = TCP_AES.get(&peer_context.address) {
-                            let mut packet = NetPacket::new_encrypt(buf.clone())?;
+                            let mut packet = NetPacket::new_encrypt(vec![
+                                0;
+                                net_packet.data_len()
+                                    + ENCRYPTION_RESERVED
+                            ])?;
+                            packet.buffer_mut().copy_from_slice(net_packet.buffer());
                             aes.value().encrypt_ipv4(&mut packet)?;
                             drop(aes);
-                            let _ = sender.send(packet.buffer().to_vec()).await;
+                            let _ = sender.send(packet.into_buffer()).await;
                         } else {
-                            let mut packet = NetPacket::new_encrypt(&buf)?;
-                            let _ = sender.send(packet.buffer().to_vec()).await;
+                            let _ = sender.send(net_packet.buffer().to_vec()).await;
                         }
                     }
                     PeerLink::Udp(addr) => {
                         if let Some(aes) = UDP_AES.get(&peer_context.address) {
-                            let mut packet = NetPacket::new_encrypt(buf.clone())?;
+                            let mut packet = NetPacket::new_encrypt(vec![
+                                0;
+                                net_packet.data_len()
+                                    + ENCRYPTION_RESERVED
+                            ])?;
+                            packet.buffer_mut().copy_from_slice(net_packet.buffer());
                             aes.encrypt_ipv4(&mut packet)?;
                             let _ = main_udp.send_to(packet.buffer(), addr).await;
                         } else {
-                            let mut packet = NetPacket::new_encrypt(&buf)?;
-                            let _ = main_udp.send_to(packet.buffer(), addr).await;
+                            let _ = main_udp.send_to(net_packet.buffer(), addr).await;
                         }
                     }
                 }
