@@ -39,6 +39,9 @@ pub struct StartArgs {
     ///开启指纹校验，开启后只会转发指纹正确的客户端数据包，增强安全性，这会损失一部分性能
     #[arg(long)]
     finger: bool,
+    /// log路径，默认为当前程序路径，为/dev/null时表示不输出log
+    #[arg(long)]
+    log_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,23 +54,33 @@ pub struct ConfigInfo {
     pub check_finger: bool,
 }
 
-fn log_init() {
-    let log_path = PathBuf::from("log");
+fn log_init(log_path: Option<String>) {
+    let log_path = match log_path {
+        None => PathBuf::from("log"),
+        Some(log_path) => {
+            if &log_path == "/dev/null" {
+                return;
+            }
+            PathBuf::from(log_path)
+        }
+    };
     if !log_path.exists() {
         let _ = std::fs::create_dir(&log_path);
     }
+
     let log_config = log_path.join("log4rs.yaml");
     if !log_config.exists() {
         if let Ok(mut f) = std::fs::File::create(&log_config) {
-            let _ = f.write_all(
-                b"refresh_rate: 30 seconds
+            let log_path = log_path.to_str().unwrap();
+            let c = format!(
+                "refresh_rate: 30 seconds
 appenders:
   rolling_file:
     kind: rolling_file
-    path: log/vnts.log
+    path: {}/vnts.log
     append: true
     encoder:
-      pattern: \"{d} [{f}:{L}] {h({l})} {M}:{m}{n}\"
+      pattern: \"{{d}} [{{f}}:{{L}}] {{h({{l}})}} {{M}}:{{m}}{{n}}\"
     policy:
       kind: compound
       trigger:
@@ -75,7 +88,7 @@ appenders:
         limit: 10 mb
       roller:
         kind: fixed_window
-        pattern: log/vnts.{}.log
+        pattern: {}/vnts.{{}}.log
         base: 1
         count: 5
 
@@ -83,7 +96,9 @@ root:
   level: info
   appenders:
     - rolling_file",
+                log_path, log_path
             );
+            let _ = f.write_all(c.as_bytes());
         }
     }
     let _ = log4rs::init_file(log_config, Default::default());
@@ -91,8 +106,8 @@ root:
 
 #[tokio::main]
 async fn main() {
-    log_init();
     let args = StartArgs::parse();
+    log_init(args.log_path);
     let port = args.port.unwrap_or(29872);
     println!("端口: {}", port);
     let white_token = if let Some(white_token) = args.white_token {
