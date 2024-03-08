@@ -77,7 +77,11 @@ fn register0(
             response.public_ip = ipv4.into();
         }
         IpAddr::V6(ipv6) => {
-            response.public_ipv6 = ipv6.octets().to_vec();
+            if let Some(ipv4) = ipv6.to_ipv4_mapped() {
+                response.public_ip = ipv4.into();
+            } else {
+                response.public_ipv6 = ipv6.octets().to_vec();
+            }
         }
     }
     response.virtual_netmask = config.netmask.into();
@@ -386,25 +390,29 @@ async fn request_addr(
     net_packet: NetPacket<&mut [u8]>,
     sender: Option<&Sender<Vec<u8>>>,
 ) -> crate::error::Result<()> {
-    match addr.ip() {
-        IpAddr::V4(ipv4) => {
-            let mut vec = vec![0u8; 12 + 6 + ENCRYPTION_RESERVED];
-            let mut packet = NetPacket::new_encrypt(&mut vec)?;
-            packet.set_version(Version::V1);
-            packet.set_protocol(Protocol::Control);
-            packet.set_transport_protocol(control_packet::Protocol::AddrResponse.into());
-            packet.first_set_ttl(MAX_TTL);
-            packet.set_source(net_packet.destination());
-            packet.set_destination(net_packet.source());
-            packet.set_gateway_flag(true);
-            let mut addr_packet = control_packet::AddrPacket::new(packet.payload_mut())?;
-            addr_packet.set_ipv4(ipv4);
-            addr_packet.set_port(addr.port());
-            reply_vec(aes_gcm_cipher, &sender, main_udp, addr, vec).await?;
+    let ipv4 = match addr.ip() {
+        IpAddr::V4(ipv4) => ipv4,
+        IpAddr::V6(ip) => {
+            if let Some(ipv4) = ip.to_ipv4_mapped() {
+                ipv4
+            } else {
+                return Ok(());
+            }
         }
-        IpAddr::V6(_) => {}
-    }
-    Ok(())
+    };
+    let mut vec = vec![0u8; 12 + 6 + ENCRYPTION_RESERVED];
+    let mut packet = NetPacket::new_encrypt(&mut vec)?;
+    packet.set_version(Version::V1);
+    packet.set_protocol(Protocol::Control);
+    packet.set_transport_protocol(control_packet::Protocol::AddrResponse.into());
+    packet.first_set_ttl(MAX_TTL);
+    packet.set_source(net_packet.destination());
+    packet.set_destination(net_packet.source());
+    packet.set_gateway_flag(true);
+    let mut addr_packet = control_packet::AddrPacket::new(packet.payload_mut())?;
+    addr_packet.set_ipv4(ipv4);
+    addr_packet.set_port(addr.port());
+    reply_vec(aes_gcm_cipher, &sender, main_udp, addr, vec).await
 }
 async fn server_packet_pre_handle(
     context: &mut Option<Context>,
