@@ -11,10 +11,10 @@ pub enum Error {
     Channel(#[from] RecvError),
     #[error("Protobuf error")]
     Protobuf(#[from] protobuf::Error),
-    #[error("Invalid packet")]
-    InvalidPacket,
-    #[error("Not support")]
-    NotSupport,
+    #[error("Disconnect")]
+    Disconnect,
+    #[error("No Key")]
+    NoKey,
     #[error("Address Exhausted")]
     AddressExhausted,
     #[error("Token Error")]
@@ -23,6 +23,8 @@ pub enum Error {
     IpAlreadyExists,
     #[error("Invalid Ip")]
     InvalidIp,
+    #[error("Other")]
+    Other(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

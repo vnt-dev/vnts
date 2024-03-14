@@ -5,15 +5,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::cipher::RsaCipher;
-use crate::service::{start_tcp, start_udp};
+// use crate::service::{start_tcp, start_udp};
 use clap::Parser;
 use tokio::net::{TcpListener, UdpSocket};
 
 mod cipher;
+mod core;
 mod error;
 mod proto;
 mod protocol;
-mod service;
 
 /// 默认网关信息
 const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 26, 0, 1);
@@ -205,6 +205,7 @@ async fn main() {
     let socket = socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::DGRAM, None).unwrap();
     socket.set_only_v6(false).unwrap();
     socket.set_nonblocking(true).unwrap();
+    socket.set_reuse_address(true).unwrap();
     match socket.bind(&address.into()) {
         Ok(_) => {}
         Err(e) => {
@@ -223,6 +224,9 @@ async fn main() {
     println!("监听udp端口: {:?}", udp.local_addr().unwrap());
     let socket = socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::STREAM, None).unwrap();
     socket.set_only_v6(false).unwrap();
+    socket.set_reuse_address(true).unwrap();
+    socket.set_nodelay(true).unwrap();
+    socket.set_nonblocking(true).unwrap();
     match socket.bind(&address.into()) {
         Ok(_) => {}
         Err(e) => {
@@ -230,8 +234,7 @@ async fn main() {
             panic!("tcp bind失败:{}", e);
         }
     }
-    socket.set_nodelay(true).unwrap();
-    socket.set_nonblocking(true).unwrap();
+
     socket.listen(1024).unwrap();
     let tcp = match TcpListener::from_std(socket.into()) {
         Ok(tcp) => tcp,
@@ -243,8 +246,5 @@ async fn main() {
     log::info!("监听tcp端口: {:?}", tcp.local_addr().unwrap());
     println!("监听tcp端口: {:?}", tcp.local_addr().unwrap());
     let config = config.clone();
-    let main_udp = udp.clone();
-    let tcp_config = config.clone();
-    tokio::spawn(start_tcp(tcp, main_udp, tcp_config, rsa.clone()));
-    start_udp(udp, config, rsa.clone()).await;
+    core::start(udp, tcp, config, rsa).await;
 }
