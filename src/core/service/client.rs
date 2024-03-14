@@ -3,11 +3,11 @@ use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 
 use crate::cipher::RsaCipher;
-use crate::ConfigInfo;
 use crate::core::entity::ClientInfo;
 use crate::core::store::cache::{AppCache, Context};
 use crate::error::*;
 use crate::protocol::NetPacket;
+use crate::ConfigInfo;
 
 #[derive(Clone)]
 pub struct ClientPacketHandler {
@@ -17,9 +17,7 @@ pub struct ClientPacketHandler {
 }
 
 impl ClientPacketHandler {
-    pub fn new(cache: AppCache,
-               config: ConfigInfo,
-               rsa_cipher: Option<RsaCipher>, ) -> Self {
+    pub fn new(cache: AppCache, config: ConfigInfo, rsa_cipher: Option<RsaCipher>) -> Self {
         Self {
             cache,
             config,

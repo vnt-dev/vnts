@@ -1,3 +1,4 @@
+use crate::cipher::RsaCipher;
 use crate::core::service::client::ClientPacketHandler;
 use crate::core::service::server::ServerPacketHandler;
 use crate::core::store::cache::AppCache;
@@ -8,7 +9,6 @@ use crate::ConfigInfo;
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::Sender;
-use crate::cipher::RsaCipher;
 
 pub mod client;
 pub mod server;
@@ -21,12 +21,10 @@ pub struct PacketHandler {
     server: ServerPacketHandler,
 }
 impl PacketHandler {
-    pub fn new(cache: AppCache,
-                   config: ConfigInfo,
-                   rsa_cipher: Option<RsaCipher>,)->Self{
-        let client = ClientPacketHandler::new(cache.clone(),config.clone(),rsa_cipher.clone());
-        let server = ServerPacketHandler::new(cache.clone(),config.clone(),rsa_cipher.clone());
-        Self{
+    pub fn new(cache: AppCache, config: ConfigInfo, rsa_cipher: Option<RsaCipher>) -> Self {
+        let client = ClientPacketHandler::new(cache.clone(), config.clone(), rsa_cipher.clone());
+        let server = ServerPacketHandler::new(cache.clone(), config.clone(), rsa_cipher.clone());
+        Self {
             config,
             cache,
             client,
@@ -40,12 +38,12 @@ impl PacketHandler {
         udp_socket: &UdpSocket,
         net_packet: NetPacket<B>,
         addr: SocketAddr,
-        tcp_sender:&Option<Sender<Vec<u8>>>,
+        tcp_sender: &Option<Sender<Vec<u8>>>,
     ) -> Option<NetPacket<Vec<u8>>> {
         let source = net_packet.source();
-        println!("read={:?}",net_packet);
+        println!("read={:?}", net_packet);
         let mut rs = self
-            .handle0(udp_socket, net_packet, addr,tcp_sender)
+            .handle0(udp_socket, net_packet, addr, tcp_sender)
             .unwrap_or_else(|e| {
                 let rs = vec![0u8; 12 + ENCRYPTION_RESERVED];
                 let mut packet = NetPacket::new_encrypt(rs).unwrap();
@@ -97,7 +95,7 @@ impl PacketHandler {
             packet.set_source(self.config.gateway);
             packet.first_set_ttl(MAX_TTL);
             packet.set_gateway_flag(true);
-            println!("rs={:?}",packet);
+            println!("rs={:?}", packet);
             if let Some(aes) = self.cache.cipher_session.get(&addr) {
                 // 加密
                 if let Err(e) = aes.decrypt_ipv4(packet) {
@@ -113,10 +111,10 @@ impl PacketHandler {
         udp_socket: &UdpSocket,
         net_packet: NetPacket<B>,
         addr: SocketAddr,
-        tcp_sender:&Option<Sender<Vec<u8>>>,
+        tcp_sender: &Option<Sender<Vec<u8>>>,
     ) -> Result<Option<NetPacket<Vec<u8>>>> {
         if net_packet.is_gateway() {
-            self.server.handle(net_packet, addr,tcp_sender)
+            self.server.handle(net_packet, addr, tcp_sender)
         } else {
             self.client.handle(udp_socket, net_packet, addr)?;
             Ok(None)

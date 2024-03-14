@@ -6,7 +6,7 @@ use tokio::net::UdpSocket;
 use crate::core::service::PacketHandler;
 use crate::protocol::NetPacket;
 
-pub async fn start(main_udp: Arc<UdpSocket>, handler: PacketHandler){
+pub async fn start(main_udp: Arc<UdpSocket>, handler: PacketHandler) {
     loop {
         let mut buf = vec![0u8; 65536];
         match main_udp.recv_from(&mut buf).await {
