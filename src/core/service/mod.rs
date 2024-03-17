@@ -20,6 +20,7 @@ pub struct PacketHandler {
     client: ClientPacketHandler,
     server: ServerPacketHandler,
 }
+
 impl PacketHandler {
     pub fn new(cache: AppCache, config: ConfigInfo, rsa_cipher: Option<RsaCipher>) -> Self {
         let client = ClientPacketHandler::new(cache.clone(), config.clone(), rsa_cipher.clone());
@@ -32,6 +33,7 @@ impl PacketHandler {
         }
     }
 }
+
 impl PacketHandler {
     pub fn handle<B: AsRef<[u8]> + AsMut<[u8]>>(
         &self,
@@ -41,7 +43,6 @@ impl PacketHandler {
         tcp_sender: &Option<Sender<Vec<u8>>>,
     ) -> Option<NetPacket<Vec<u8>>> {
         let source = net_packet.source();
-        println!("read={:?}", net_packet);
         let mut rs = self
             .handle0(udp_socket, net_packet, addr, tcp_sender)
             .unwrap_or_else(|e| {
@@ -95,7 +96,7 @@ impl PacketHandler {
             packet.set_source(self.config.gateway);
             packet.first_set_ttl(MAX_TTL);
             packet.set_gateway_flag(true);
-            println!("rs={:?}", packet);
+            // println!("rs={:?}", packet);
             if let Some(aes) = self.cache.cipher_session.get(&addr) {
                 // 加密
                 if let Err(e) = aes.decrypt_ipv4(packet) {

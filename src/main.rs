@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use std::fmt::Display;
+use std::io;
 use std::io::Write;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
@@ -42,6 +44,9 @@ pub struct StartArgs {
     /// log路径，默认为当前程序路径，为/dev/null时表示不输出log
     #[arg(long)]
     log_path: Option<String>,
+    ///web后台端口，默认29870
+    #[arg(long)]
+    web_port: Option<u16>,
 }
 
 #[derive(Debug, Clone)]
@@ -109,7 +114,12 @@ async fn main() {
     let args = StartArgs::parse();
     log_init(args.log_path);
     let port = args.port.unwrap_or(29872);
+    let web_port = args.port.unwrap_or(29870);
     println!("端口: {}", port);
+    println!("web端口: {}", web_port);
+    if web_port == port {
+        panic!("web-port == port");
+    }
     let white_token = if let Some(white_token) = args.white_token {
         Some(HashSet::from_iter(white_token.into_iter()))
     } else {
@@ -200,51 +210,72 @@ async fn main() {
         }
     };
     log::info!("config:{:?}", config);
-    let address: std::net::SocketAddr = format!("[::]:{}", port).parse().unwrap();
-
-    let socket = socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::DGRAM, None).unwrap();
-    socket.set_only_v6(false).unwrap();
-    socket.set_nonblocking(true).unwrap();
-    socket.set_reuse_address(true).unwrap();
-    match socket.bind(&address.into()) {
-        Ok(_) => {}
-        Err(e) => {
-            log::warn!("udp bind失败:{:?}", e);
-            panic!("udp bind失败:{}", e);
-        }
-    }
-    let udp = match UdpSocket::from_std(socket.into()) {
-        Ok(udp) => Arc::new(udp),
-        Err(e) => {
-            log::warn!("udp启动失败:{:?}", e);
-            panic!("udp启动失败:{}", e);
-        }
-    };
-    log::info!("监听udp端口: {:?}", udp.local_addr().unwrap());
-    println!("监听udp端口: {:?}", udp.local_addr().unwrap());
-    let socket = socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::STREAM, None).unwrap();
-    socket.set_only_v6(false).unwrap();
-    socket.set_reuse_address(true).unwrap();
-    socket.set_nodelay(true).unwrap();
-    socket.set_nonblocking(true).unwrap();
-    match socket.bind(&address.into()) {
-        Ok(_) => {}
-        Err(e) => {
-            log::warn!("tcp bind失败:{:?}", e);
-            panic!("tcp bind失败:{}", e);
-        }
-    }
-
-    socket.listen(1024).unwrap();
-    let tcp = match TcpListener::from_std(socket.into()) {
-        Ok(tcp) => tcp,
-        Err(e) => {
-            log::warn!("tcp启动失败:{:?}", e);
-            panic!("tcp启动失败:{:?}", e);
-        }
-    };
-    log::info!("监听tcp端口: {:?}", tcp.local_addr().unwrap());
-    println!("监听tcp端口: {:?}", tcp.local_addr().unwrap());
+    let udp = create_udp(port).unwrap();
+    log::info!("监听udp端口: {:?}", port);
+    println!("监听udp端口: {:?}", port);
+    let tcp = create_tcp(port).unwrap();
+    log::info!("监听tcp端口: {:?}", port);
+    println!("监听tcp端口: {:?}", port);
+    let http = create_tcp(web_port).unwrap();
+    log::info!("监听http端口: {:?}", web_port);
+    println!("监听http端口: {:?}", web_port);
     let config = config.clone();
-    core::start(udp, tcp, config, rsa).await;
+    if let Err(e) = core::start(udp, tcp, http, config, rsa).await {
+        log::error!("{:?}", e)
+    }
+}
+
+fn create_tcp(port: u16) -> io::Result<std::net::TcpListener> {
+    let address: std::net::SocketAddr = format!("[::]:{}", port).parse().unwrap();
+    let socket = io_convert(
+        socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::STREAM, None),
+        |e| format!("new IPV6 STREAM {:?}", e),
+    )?;
+
+    io_convert(socket.set_only_v6(false), |e| {
+        format!("set_only_v6 {:?}", e)
+    })?;
+    io_convert(socket.set_reuse_address(true), |e| {
+        format!("set_reuse_address {:?}", e)
+    })?;
+    io_convert(socket.set_nonblocking(true), |e| {
+        format!("set_nonblocking {:?}", e)
+    })?;
+    io_convert(socket.bind(&address.into()), |e| {
+        format!("bind {:?},{:?}", address, e)
+    })?;
+    io_convert(socket.listen(1024), |e| {
+        format!("listen {:?},{:?}", address, e)
+    })?;
+    Ok(socket.into())
+}
+
+fn create_udp(port: u16) -> io::Result<std::net::UdpSocket> {
+    let address: std::net::SocketAddr = format!("[::]:{}", port).parse().unwrap();
+    let socket = io_convert(
+        socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::DGRAM, None),
+        |e| format!("new IPV6 DGRAM {:?}", e),
+    )?;
+
+    io_convert(socket.set_only_v6(false), |e| {
+        format!("set_only_v6 {:?}", e)
+    })?;
+    io_convert(socket.set_reuse_address(true), |e| {
+        format!("set_reuse_address {:?}", e)
+    })?;
+    io_convert(socket.set_nonblocking(true), |e| {
+        format!("set_nonblocking {:?}", e)
+    })?;
+    io_convert(socket.bind(&address.into()), |e| {
+        format!("bind {:?},{:?}", address, e)
+    })?;
+    Ok(socket.into())
+}
+
+#[inline]
+pub fn io_convert<T, R: Display, F: FnOnce(&io::Error) -> R>(
+    rs: io::Result<T>,
+    f: F,
+) -> io::Result<T> {
+    rs.map_err(|e| io::Error::new(e.kind(), format!("{},internal error:{:?}", f(&e), e)))
 }

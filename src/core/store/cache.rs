@@ -54,16 +54,19 @@ impl AppCache {
         let virtual_network_ = virtual_network.clone();
         // 20秒钟没有收到消息则判定为掉线
         let addr_session = Cache::builder()
-            .time_to_idle(Duration::from_secs(20))
+            .time_to_idle(Duration::from_secs(10))
             .eviction_listener(move |addr: Arc<SocketAddr>, (group, virtual_ip), cause| {
+                log::info!(
+                    "addr_session eviction group={},virtual_ip={},cause={:?}",
+                    group,
+                    virtual_ip,
+                    cause
+                );
+
                 if cause != moka::notification::RemovalCause::Expired {
                     return;
                 }
-                log::info!(
-                    "addr_session eviction group={},virtual_ip={}",
-                    group,
-                    virtual_ip
-                );
+
                 if let Some(v) = virtual_network_.get(&group) {
                     let mut lock = v.write();
                     if let Some(item) = lock.clients.get_mut(&virtual_ip) {

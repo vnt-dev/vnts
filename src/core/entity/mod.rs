@@ -19,6 +19,19 @@ pub struct NetworkInfo {
     // 网段下的客户端列表 ip->ClientInfo
     pub clients: HashMap<u32, ClientInfo>,
 }
+
+impl NetworkInfo {
+    pub fn new(network_ip: u32, mask_ip: u32, gateway_ip: u32) -> Self {
+        Self {
+            network_ip,
+            mask_ip,
+            gateway_ip,
+            epoch: 0,
+            clients: Default::default(),
+        }
+    }
+}
+
 /// 客户端信息
 pub struct ClientInfo {
     // 设备ID
@@ -38,6 +51,7 @@ pub struct ClientInfo {
     // 建立的tcp连接发送端
     pub tcp_sender: Option<Sender<Vec<u8>>>,
 }
+
 impl Default for ClientInfo {
     fn default() -> Self {
         Self {

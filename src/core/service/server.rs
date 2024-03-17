@@ -208,13 +208,19 @@ impl ServerPacketHandler {
             }
         }
         //固定网段
-        response.virtual_netmask = config.netmask.into();
-        response.virtual_gateway = config.gateway.into();
+        let gateway: u32 = config.gateway.into();
+        let netmask: u32 = config.netmask.into();
+        let network: u32 = gateway & netmask;
+
+        response.virtual_netmask = netmask;
+        response.virtual_gateway = gateway;
 
         let v = cache
             .virtual_network
             .optionally_get_with(group_id.clone(), || {
-                Some(Arc::new(parking_lot::const_rwlock(NetworkInfo::default())))
+                Some(Arc::new(parking_lot::const_rwlock(NetworkInfo::new(
+                    network, netmask, gateway,
+                ))))
             })
             .unwrap();
         // 可分配的ip段

@@ -31,7 +31,11 @@ protobuf = "3.2.0"
 tokio = { version = "1.32.0", features = ["full"] }
 async-trait = "0.1.71"
 tokio-util = { version = "0.7.8", features = ["full"] }
-socket2 = { version = "0.5.5",features = ["all"] }
+socket2 = { version = "0.5.5", features = ["all"] }
+
+actix-web = "4.5.1"
+actix-files = "0.6.5"
+serde = { version = "1.0.193", features = ["derive"] }
 [features]
 default = ["aes-gcm"]
 normal = ["aes-gcm"]
