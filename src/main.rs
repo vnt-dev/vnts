@@ -205,6 +205,7 @@ async fn main() {
     let socket = socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::DGRAM, None).unwrap();
     socket.set_only_v6(false).unwrap();
     socket.set_nonblocking(true).unwrap();
+    socket.set_reuse_address(true).unwrap();
     match socket.bind(&address.into()) {
         Ok(_) => {}
         Err(e) => {
@@ -223,6 +224,7 @@ async fn main() {
     println!("监听udp端口: {:?}", udp.local_addr().unwrap());
     let socket = socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::STREAM, None).unwrap();
     socket.set_only_v6(false).unwrap();
+    socket.set_reuse_address(true).unwrap();
     match socket.bind(&address.into()) {
         Ok(_) => {}
         Err(e) => {
