@@ -4,6 +4,33 @@ use std::net::{Ipv4Addr, SocketAddr};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct ResponseMessage<V> {
+    data: V,
+    message: Option<String>,
+    code: u32,
+}
+
+impl<V> ResponseMessage<V> {
+    pub fn success(data: V) -> ResponseMessage<V> {
+        Self {
+            data,
+            message: None,
+            code: 200,
+        }
+    }
+}
+
+impl ResponseMessage<Option<String>> {
+    pub fn fail(message: String) -> ResponseMessage<Option<String>> {
+        Self {
+            data: Option::<String>::None,
+            message: Some(message),
+            code: 400,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ClientInfo {
     // 设备ID
     pub device_id: String,
@@ -29,8 +56,8 @@ pub struct NetworkInfo {
     pub mask_ip: Ipv4Addr,
     // 网关
     pub gateway_ip: Ipv4Addr,
-    // 网段下的客户端列表 ip->ClientInfo
-    pub clients: HashMap<Ipv4Addr, ClientInfo>,
+    // 网段下的客户端列表
+    pub clients: Vec<ClientInfo>,
 }
 
 impl NetworkInfo {
@@ -42,6 +69,11 @@ impl NetworkInfo {
             clients: Default::default(),
         }
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GroupList {
+    pub group_list: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

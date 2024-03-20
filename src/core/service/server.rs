@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::result;
 use std::sync::Arc;
+use std::time::Duration;
 
 use protobuf::Message;
 use tokio::sync::mpsc::Sender;
@@ -34,7 +35,7 @@ impl ServerPacketHandler {
 }
 
 impl ServerPacketHandler {
-    pub fn handle<B: AsRef<[u8]> + AsMut<[u8]>>(
+    pub async fn handle<B: AsRef<[u8]> + AsMut<[u8]>>(
         &self,
         mut net_packet: NetPacket<B>,
         addr: SocketAddr,
@@ -49,7 +50,7 @@ impl ServerPacketHandler {
                 }
                 service_packet::Protocol::SecretHandshakeRequest => {
                     // 加密握手
-                    return self.secret_handshake(net_packet, addr);
+                    return self.secret_handshake(net_packet, addr).await;
                 }
                 _ => {}
             }
@@ -63,7 +64,7 @@ impl ServerPacketHandler {
             }
         }
         // 处理不需要连接上下文的请求
-        let net_packet = match self.not_context(net_packet, addr, tcp_sender) {
+        let net_packet = match self.not_context(net_packet, addr, tcp_sender).await {
             Ok(rs) => {
                 return rs;
             }
@@ -102,7 +103,7 @@ impl ServerPacketHandler {
 }
 
 impl ServerPacketHandler {
-    fn not_context<B: AsRef<[u8]>>(
+    async fn not_context<B: AsRef<[u8]>>(
         &self,
         net_packet: NetPacket<B>,
         addr: SocketAddr,
@@ -112,7 +113,7 @@ impl ServerPacketHandler {
             match protocol::service_packet::Protocol::from(net_packet.transport_protocol()) {
                 service_packet::Protocol::RegistrationRequest => {
                     //注册
-                    return Ok(self.register(net_packet, addr, tcp_sender));
+                    return Ok(self.register(net_packet, addr, tcp_sender).await);
                 }
                 _ => {}
             }
@@ -161,7 +162,7 @@ impl ServerPacketHandler {
 }
 
 impl ServerPacketHandler {
-    fn register<B: AsRef<[u8]>>(
+    async fn register<B: AsRef<[u8]>>(
         &self,
         net_packet: NetPacket<B>,
         addr: SocketAddr,
@@ -172,7 +173,8 @@ impl ServerPacketHandler {
         let request = RegistrationRequest::parse_from_bytes(net_packet.payload())?;
         check_reg(&request)?;
         log::info!(
-            "register,id={:?},name={:?},version={:?},virtual_ip={},client_secret={},allow_ip_change={},is_fast={}",
+            "register,{},id={:?},name={:?},version={:?},virtual_ip={},client_secret={},allow_ip_change={},is_fast={}",
+            addr,
             request.device_id,
             request.name,
             request.version,
@@ -218,73 +220,85 @@ impl ServerPacketHandler {
         let v = cache
             .virtual_network
             .optionally_get_with(group_id.clone(), || {
-                Some(Arc::new(parking_lot::const_rwlock(NetworkInfo::new(
-                    network, netmask, gateway,
-                ))))
+                (
+                    Duration::from_secs(7 * 24 * 3600),
+                    Arc::new(parking_lot::const_rwlock(NetworkInfo::new(
+                        network, netmask, gateway,
+                    ))),
+                )
             })
-            .unwrap();
+            .await;
+        let mut virtual_ip = request.virtual_ip;
         // 可分配的ip段
         let ip_range = (response.virtual_gateway & response.virtual_netmask) + 1
             ..response.virtual_gateway | (!response.virtual_netmask);
-        let mut lock = v.write();
-        let mut virtual_ip = request.virtual_ip;
+        {
+            let mut lock = v.write();
 
-        if virtual_ip != 0 {
-            if u32::from(config.gateway) == virtual_ip
-                || u32::from(config.broadcast) == virtual_ip
-                || !ip_range.contains(&virtual_ip)
-            {
-                log::warn!("手动指定的ip无效: {:?}", request);
-                return Err(Error::InvalidIp);
-            }
-            //指定了ip
-            if let Some(info) = lock.clients.get_mut(&request.virtual_ip) {
-                if info.device_id != request.device_id {
-                    //ip被占用了,并且不能更改ip
-                    if !request.allow_ip_change {
-                        log::warn!("手动指定的ip已经存在:{:?}", request);
-                        return Err(Error::IpAlreadyExists);
+            if virtual_ip != 0 {
+                if u32::from(config.gateway) == virtual_ip
+                    || u32::from(config.broadcast) == virtual_ip
+                    || !ip_range.contains(&virtual_ip)
+                {
+                    log::warn!("手动指定的ip无效: {:?}", request);
+                    return Err(Error::InvalidIp);
+                }
+                //指定了ip
+                if let Some(info) = lock.clients.get_mut(&request.virtual_ip) {
+                    if info.device_id != request.device_id {
+                        //ip被占用了,并且不能更改ip
+                        if !request.allow_ip_change {
+                            log::warn!("手动指定的ip已经存在:{:?}", request);
+                            return Err(Error::IpAlreadyExists);
+                        }
+                        // 重新挑选ip
+                        virtual_ip = 0;
                     }
-                    // 重新挑选ip
-                    virtual_ip = 0;
                 }
             }
-        }
-        if virtual_ip == 0 {
-            // 从小到大找一个未使用的ip
-            for ip in ip_range {
-                if ip == lock.gateway_ip {
-                    continue;
-                }
-                if !lock.clients.contains_key(&ip) {
-                    virtual_ip = ip;
-                    break;
+            for x in lock.clients.values() {
+                if x.device_id == request.device_id {
+                    virtual_ip = x.virtual_ip;
                 }
             }
+            if virtual_ip == 0 {
+                // 从小到大找一个未使用的ip
+                for ip in ip_range {
+                    if ip == lock.gateway_ip {
+                        continue;
+                    }
+                    if !lock.clients.contains_key(&ip) {
+                        virtual_ip = ip;
+                        break;
+                    }
+                }
+            }
+            if virtual_ip == 0 {
+                log::error!("地址使用完:{:?}", request);
+                return Err(Error::AddressExhausted);
+            }
+            let info = lock
+                .clients
+                .entry(virtual_ip)
+                .or_insert_with(|| ClientInfo::default());
+            info.name = request.name;
+            info.device_id = request.device_id;
+            info.client_secret = request.client_secret;
+            info.address = addr;
+            info.online = true;
+            info.virtual_ip = virtual_ip;
+            info.tcp_sender = tcp_sender.clone();
+            lock.epoch += 1;
+            response.epoch = lock.epoch as u32;
+            response.device_info_list = Self::clients_info(&lock.clients, virtual_ip);
+            drop(lock);
         }
-        if virtual_ip == 0 {
-            log::error!("地址使用完:{:?}", request);
-            return Err(Error::AddressExhausted);
-        }
-        let info = lock
-            .clients
-            .entry(virtual_ip)
-            .or_insert_with(|| ClientInfo::default());
-        info.name = request.name;
-        info.device_id = request.device_id;
-        info.client_secret = request.client_secret;
-        info.address = addr;
-        info.online = true;
-        info.virtual_ip = virtual_ip;
-        info.tcp_sender = tcp_sender.clone();
-        lock.epoch += 1;
-        response.epoch = lock.epoch as u32;
-        response.device_info_list = Self::clients_info(&lock.clients, virtual_ip);
-        drop(lock);
         cache
-            .ip_session
-            .insert((group_id.clone(), virtual_ip), addr);
-        cache.addr_session.insert(addr, (group_id, virtual_ip));
+            .insert_ip_session((group_id.clone(), virtual_ip), addr)
+            .await;
+        cache
+            .insert_addr_session(addr, (group_id, virtual_ip))
+            .await;
         response.virtual_ip = virtual_ip;
         let bytes = response.write_to_bytes()?;
         let rs = vec![0u8; 12 + bytes.len() + ENCRYPTION_RESERVED];
@@ -330,7 +344,7 @@ impl ServerPacketHandler {
         packet.set_payload(&bytes)?;
         Ok(Some(packet))
     }
-    fn secret_handshake<B: AsRef<[u8]>>(
+    async fn secret_handshake<B: AsRef<[u8]>>(
         &self,
         net_packet: NetPacket<B>,
         addr: SocketAddr,
@@ -346,7 +360,7 @@ impl ServerPacketHandler {
                     .map_err(|_| Error::Other("key err".into()))?,
                 Finger::new(&sync_secret.token),
             );
-            self.cache.cipher_session.insert(addr, Arc::new(c));
+            self.cache.insert_cipher_session(addr, c).await;
             let rs = vec![0u8; 12 + ENCRYPTION_RESERVED];
             let mut packet = NetPacket::new_encrypt(rs)?;
             packet.set_protocol(Protocol::Service);

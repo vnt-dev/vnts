@@ -1,7 +1,8 @@
 use crate::cipher::RsaCipher;
-use crate::core::server::web::vo::{ClientInfo, GroupsInfo, NetworkInfo};
+use crate::core::server::web::vo::{ClientInfo, GroupList, GroupsInfo, NetworkInfo};
 use crate::core::store::cache::AppCache;
 use crate::ConfigInfo;
+use std::net::{SocketAddr, SocketAddrV4};
 
 #[derive(Clone)]
 pub struct VntsWebService {
@@ -21,16 +22,64 @@ impl VntsWebService {
 }
 
 impl VntsWebService {
-    pub fn groups_info(&self) -> GroupsInfo {
-        let mut data = GroupsInfo::new();
-        for (group, info) in self.cache.virtual_network.iter() {
+    pub fn group_list(&self) -> GroupList {
+        let group_list: Vec<String> = self
+            .cache
+            .virtual_network
+            .key_values()
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        GroupList { group_list }
+    }
+    pub fn group_info(&self, group: String) -> Option<NetworkInfo> {
+        if let Some(info) = self.cache.virtual_network.get(&group) {
             let guard = info.read();
             let mut network = NetworkInfo::new(
                 guard.network_ip.into(),
                 guard.mask_ip.into(),
                 guard.gateway_ip.into(),
             );
-            for (ip, into) in guard.clients.iter() {
+            for into in guard.clients.values() {
+                let address = match into.address {
+                    SocketAddr::V4(_) => into.address,
+                    SocketAddr::V6(ipv6) => {
+                        if let Some(ipv4) = ipv6.ip().to_ipv4_mapped() {
+                            SocketAddr::V4(SocketAddrV4::new(ipv4, ipv6.port()))
+                        } else {
+                            into.address
+                        }
+                    }
+                };
+                let client_info = ClientInfo {
+                    device_id: into.device_id.clone(),
+                    name: into.name.clone(),
+                    client_secret: into.client_secret,
+                    server_secret: into.server_secret.is_some(),
+                    address,
+                    online: into.online,
+                    virtual_ip: into.virtual_ip.into(),
+                };
+                network.clients.push(client_info);
+            }
+            network
+                .clients
+                .sort_by(|v1, v2| v1.virtual_ip.cmp(&v2.virtual_ip));
+            Some(network)
+        } else {
+            None
+        }
+    }
+    pub fn groups_info(&self) -> GroupsInfo {
+        let mut data = GroupsInfo::new();
+        for (group, info) in self.cache.virtual_network.key_values() {
+            let guard = info.read();
+            let mut network = NetworkInfo::new(
+                guard.network_ip.into(),
+                guard.mask_ip.into(),
+                guard.gateway_ip.into(),
+            );
+            for (_ip, into) in guard.clients.iter() {
                 let client_info = ClientInfo {
                     device_id: into.device_id.clone(),
                     name: into.name.clone(),
@@ -40,8 +89,11 @@ impl VntsWebService {
                     online: into.online,
                     virtual_ip: into.virtual_ip.into(),
                 };
-                network.clients.insert((*ip).into(), client_info);
+                network.clients.push(client_info);
             }
+            network
+                .clients
+                .sort_by(|v1, v2| v1.virtual_ip.cmp(&v2.virtual_ip));
             data.data.insert(group.to_string(), network);
         }
         data

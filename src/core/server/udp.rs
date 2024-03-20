@@ -20,7 +20,7 @@ pub async fn start0(main_udp: Arc<UdpSocket>, handler: PacketHandler) {
                 tokio::spawn(async move {
                     match NetPacket::new(&mut buf[..len]) {
                         Ok(net_packet) => {
-                            if let Some(rs) = handler.handle(&udp, net_packet, addr, &None) {
+                            if let Some(rs) = handler.handle(&udp, net_packet, addr, &None).await {
                                 let _ = udp.send_to(rs.buffer(), addr).await;
                             }
                         }

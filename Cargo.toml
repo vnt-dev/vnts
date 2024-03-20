@@ -36,6 +36,7 @@ socket2 = { version = "0.5.5", features = ["all"] }
 actix-web = "4.5.1"
 actix-files = "0.6.5"
 serde = { version = "1.0.193", features = ["derive"] }
+crossbeam-utils = "0.8.15"
 [features]
 default = ["aes-gcm"]
 normal = ["aes-gcm"]

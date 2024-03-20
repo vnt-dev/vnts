@@ -81,7 +81,7 @@ async fn tcp_read(
         }
         read.read_exact(&mut buf[..len]).await?;
         let packet = NetPacket::new0(len, &mut buf)?;
-        if let Some(rs) = handler.handle(&udp_socket, packet, addr, &sender) {
+        if let Some(rs) = handler.handle(&udp_socket, packet, addr, &sender).await {
             if sender
                 .as_ref()
                 .unwrap()

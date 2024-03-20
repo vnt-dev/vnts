@@ -35,7 +35,7 @@ impl PacketHandler {
 }
 
 impl PacketHandler {
-    pub fn handle<B: AsRef<[u8]> + AsMut<[u8]>>(
+    pub async fn handle<B: AsRef<[u8]> + AsMut<[u8]>>(
         &self,
         udp_socket: &UdpSocket,
         net_packet: NetPacket<B>,
@@ -45,6 +45,7 @@ impl PacketHandler {
         let source = net_packet.source();
         let mut rs = self
             .handle0(udp_socket, net_packet, addr, tcp_sender)
+            .await
             .unwrap_or_else(|e| {
                 let rs = vec![0u8; 12 + ENCRYPTION_RESERVED];
                 let mut packet = NetPacket::new_encrypt(rs).unwrap();
@@ -96,18 +97,17 @@ impl PacketHandler {
             packet.set_source(self.config.gateway);
             packet.first_set_ttl(MAX_TTL);
             packet.set_gateway_flag(true);
-            // println!("rs={:?}", packet);
             if let Some(aes) = self.cache.cipher_session.get(&addr) {
                 // 加密
-                if let Err(e) = aes.decrypt_ipv4(packet) {
-                    log::error!("decrypt_ipv4 {:?}", e);
+                if let Err(e) = aes.encrypt_ipv4(packet) {
+                    log::error!("encrypt_ipv4 {:?}", e);
                     return None;
                 }
             }
         }
         rs
     }
-    fn handle0<B: AsRef<[u8]> + AsMut<[u8]>>(
+    async fn handle0<B: AsRef<[u8]> + AsMut<[u8]>>(
         &self,
         udp_socket: &UdpSocket,
         net_packet: NetPacket<B>,
@@ -115,7 +115,7 @@ impl PacketHandler {
         tcp_sender: &Option<Sender<Vec<u8>>>,
     ) -> Result<Option<NetPacket<Vec<u8>>>> {
         if net_packet.is_gateway() {
-            self.server.handle(net_packet, addr, tcp_sender)
+            self.server.handle(net_packet, addr, tcp_sender).await
         } else {
             self.client.handle(udp_socket, net_packet, addr)?;
             Ok(None)
