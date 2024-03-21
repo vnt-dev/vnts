@@ -114,7 +114,7 @@ async fn main() {
     let args = StartArgs::parse();
     log_init(args.log_path);
     let port = args.port.unwrap_or(29872);
-    let web_port = args.port.unwrap_or(29870);
+    let web_port = args.web_port.unwrap_or(29870);
     println!("端口: {}", port);
     println!("web端口: {}", web_port);
     if web_port == port {
