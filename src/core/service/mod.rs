@@ -7,6 +7,7 @@ use crate::protocol::body::ENCRYPTION_RESERVED;
 use crate::protocol::{error_packet, NetPacket, Protocol, Version, MAX_TTL};
 use crate::ConfigInfo;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::Sender;
 
@@ -22,9 +23,20 @@ pub struct PacketHandler {
 }
 
 impl PacketHandler {
-    pub fn new(cache: AppCache, config: ConfigInfo, rsa_cipher: Option<RsaCipher>) -> Self {
-        let client = ClientPacketHandler::new(cache.clone(), config.clone(), rsa_cipher.clone());
-        let server = ServerPacketHandler::new(cache.clone(), config.clone(), rsa_cipher.clone());
+    pub fn new(
+        cache: AppCache,
+        config: ConfigInfo,
+        rsa_cipher: Option<RsaCipher>,
+        udp: Arc<UdpSocket>,
+    ) -> Self {
+        let client = ClientPacketHandler::new(
+            cache.clone(),
+            config.clone(),
+            rsa_cipher.clone(),
+            udp.clone(),
+        );
+        let server =
+            ServerPacketHandler::new(cache.clone(), config.clone(), rsa_cipher.clone(), udp);
         Self {
             config,
             cache,
@@ -37,14 +49,13 @@ impl PacketHandler {
 impl PacketHandler {
     pub async fn handle<B: AsRef<[u8]> + AsMut<[u8]>>(
         &self,
-        udp_socket: &UdpSocket,
         net_packet: NetPacket<B>,
         addr: SocketAddr,
         tcp_sender: &Option<Sender<Vec<u8>>>,
     ) -> Option<NetPacket<Vec<u8>>> {
         let source = net_packet.source();
         let mut rs = self
-            .handle0(udp_socket, net_packet, addr, tcp_sender)
+            .handle0(net_packet, addr, tcp_sender)
             .await
             .unwrap_or_else(|e| {
                 let rs = vec![0u8; 12 + ENCRYPTION_RESERVED];
@@ -109,7 +120,6 @@ impl PacketHandler {
     }
     async fn handle0<B: AsRef<[u8]> + AsMut<[u8]>>(
         &self,
-        udp_socket: &UdpSocket,
         net_packet: NetPacket<B>,
         addr: SocketAddr,
         tcp_sender: &Option<Sender<Vec<u8>>>,
@@ -117,7 +127,7 @@ impl PacketHandler {
         if net_packet.is_gateway() {
             self.server.handle(net_packet, addr, tcp_sender).await
         } else {
-            self.client.handle(udp_socket, net_packet, addr)?;
+            self.client.handle(net_packet, addr)?;
             Ok(None)
         }
     }

@@ -8,31 +8,22 @@ use tokio::net::tcp::OwnedReadHalf;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc::{channel, Sender};
 
-pub async fn start(udp_socket: Arc<UdpSocket>, tcp: TcpListener, handler: PacketHandler) {
+pub async fn start(tcp: TcpListener, handler: PacketHandler) {
     tokio::spawn(async move {
-        if let Err(e) = accept(tcp, udp_socket, handler).await {
+        if let Err(e) = accept(tcp, handler).await {
             log::error!("accept {:?}", e);
         }
     });
 }
 
-async fn accept(
-    tcp: TcpListener,
-    udp_socket: Arc<UdpSocket>,
-    handler: PacketHandler,
-) -> io::Result<()> {
+async fn accept(tcp: TcpListener, handler: PacketHandler) -> io::Result<()> {
     loop {
         let (stream, addr) = tcp.accept().await?;
-        stream_handle(stream, udp_socket.clone(), addr, handler.clone()).await;
+        stream_handle(stream, addr, handler.clone()).await;
     }
 }
 
-async fn stream_handle(
-    stream: TcpStream,
-    udp_socket: Arc<UdpSocket>,
-    addr: SocketAddr,
-    handler: PacketHandler,
-) {
+async fn stream_handle(stream: TcpStream, addr: SocketAddr, handler: PacketHandler) {
     let (r, mut w) = stream.into_split();
 
     let (sender, mut receiver) = channel::<Vec<u8>>(100);
@@ -54,7 +45,7 @@ async fn stream_handle(
         let _ = w.shutdown().await;
     });
     tokio::spawn(async move {
-        if let Err(e) = tcp_read(r, addr, udp_socket, sender, handler).await {
+        if let Err(e) = tcp_read(r, addr, sender, handler).await {
             log::warn!("tcp_read {:?}", e)
         }
     });
@@ -63,7 +54,6 @@ async fn stream_handle(
 async fn tcp_read(
     mut read: OwnedReadHalf,
     addr: SocketAddr,
-    udp_socket: Arc<UdpSocket>,
     sender: Sender<Vec<u8>>,
     handler: PacketHandler,
 ) -> io::Result<()> {
@@ -81,7 +71,7 @@ async fn tcp_read(
         }
         read.read_exact(&mut buf[..len]).await?;
         let packet = NetPacket::new0(len, &mut buf)?;
-        if let Some(rs) = handler.handle(&udp_socket, packet, addr, &sender).await {
+        if let Some(rs) = handler.handle(packet, addr, &sender).await {
             if sender
                 .as_ref()
                 .unwrap()

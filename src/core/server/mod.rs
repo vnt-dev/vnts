@@ -22,8 +22,13 @@ pub async fn start(
 ) -> io::Result<()> {
     let udp = Arc::new(UdpSocket::from_std(udp)?);
     let cache = AppCache::new();
-    let handler = PacketHandler::new(cache.clone(), config.clone(), rsa_cipher.clone());
-    tcp::start(udp.clone(), TcpListener::from_std(tcp)?, handler.clone()).await;
+    let handler = PacketHandler::new(
+        cache.clone(),
+        config.clone(),
+        rsa_cipher.clone(),
+        udp.clone(),
+    );
+    tcp::start(TcpListener::from_std(tcp)?, handler.clone()).await;
     udp::start(udp, handler.clone()).await;
     if let Err(e) = web::start(http, cache, config, rsa_cipher).await {
         log::error!("{:?}", e);

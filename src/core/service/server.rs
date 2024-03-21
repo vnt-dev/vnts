@@ -1,10 +1,14 @@
+use packet::icmp::{icmp, Kind};
+use packet::ip::ipv4;
+use packet::ip::ipv4::packet::IpV4Packet;
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
-use std::result;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
+use std::{io, result};
 
 use protobuf::Message;
+use tokio::net::UdpSocket;
 use tokio::sync::mpsc::Sender;
 
 use crate::cipher::{Aes256GcmCipher, Finger, RsaCipher};
@@ -14,6 +18,7 @@ use crate::error::*;
 use crate::proto::message;
 use crate::proto::message::{DeviceList, RegistrationRequest, RegistrationResponse};
 use crate::protocol::body::ENCRYPTION_RESERVED;
+use crate::protocol::ip_turn_packet::BroadcastPacket;
 use crate::protocol::{control_packet, service_packet, NetPacket, Protocol};
 use crate::{protocol, ConfigInfo};
 
@@ -22,14 +27,21 @@ pub struct ServerPacketHandler {
     cache: AppCache,
     config: ConfigInfo,
     rsa_cipher: Option<RsaCipher>,
+    udp: Arc<UdpSocket>,
 }
 
 impl ServerPacketHandler {
-    pub fn new(cache: AppCache, config: ConfigInfo, rsa_cipher: Option<RsaCipher>) -> Self {
+    pub fn new(
+        cache: AppCache,
+        config: ConfigInfo,
+        rsa_cipher: Option<RsaCipher>,
+        udp: Arc<UdpSocket>,
+    ) -> Self {
         Self {
             cache,
             config,
             rsa_cipher,
+            udp,
         }
     }
 }
@@ -64,7 +76,7 @@ impl ServerPacketHandler {
             }
         }
         // 处理不需要连接上下文的请求
-        let net_packet = match self.not_context(net_packet, addr, tcp_sender).await {
+        let mut net_packet = match self.not_context(net_packet, addr, tcp_sender).await {
             Ok(rs) => {
                 return rs;
             }
@@ -92,6 +104,41 @@ impl ServerPacketHandler {
                 match protocol::control_packet::Protocol::from(net_packet.transport_protocol()) {
                     control_packet::Protocol::Ping => {
                         return self.control_ping(net_packet, &context);
+                    }
+                    _ => {}
+                }
+            }
+            Protocol::IpTurn => {
+                match protocol::ip_turn_packet::Protocol::from(net_packet.transport_protocol()) {
+                    protocol::ip_turn_packet::Protocol::Ipv4Broadcast => {
+                        //处理选择性广播,进过网关还原成原始广播
+                        let broadcast_packet = BroadcastPacket::new(net_packet.payload())?;
+                        let exclude = broadcast_packet.addresses();
+                        let broadcast_net_packet = NetPacket::new(broadcast_packet.data()?)?;
+                        self.broadcast(&context, broadcast_net_packet, &exclude)?;
+                    }
+                    protocol::ip_turn_packet::Protocol::Ipv4 => {
+                        let destination = net_packet.destination();
+                        let source = net_packet.source();
+                        let mut ipv4 = IpV4Packet::new(net_packet.payload_mut())?;
+                        match ipv4.protocol() {
+                            ipv4::protocol::Protocol::Icmp => {
+                                let mut icmp_packet = icmp::IcmpPacket::new(ipv4.payload_mut())?;
+                                if icmp_packet.kind() == Kind::EchoRequest {
+                                    //开启ping
+                                    icmp_packet.set_kind(Kind::EchoReply);
+                                    icmp_packet.update_checksum();
+                                    ipv4.set_source_ip(destination);
+                                    ipv4.set_destination_ip(source);
+                                    ipv4.update_checksum();
+                                    net_packet.set_source(destination);
+                                    net_packet.set_destination(source);
+                                    net_packet.set_gateway_flag(true);
+                                    return Ok(Some(NetPacket::new(net_packet.buffer().to_vec())?));
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                     _ => {}
                 }
@@ -142,7 +189,8 @@ impl ServerPacketHandler {
         packet.set_payload(net_packet.payload())?;
         let mut pong_packet = control_packet::PongPacket::new(packet.payload_mut())?;
         let epoch = context.network_info.read().epoch;
-        pong_packet.set_epoch(epoch);
+        // 这里给客户端的是丢失精度的，可能导致客户端无法感知变更
+        pong_packet.set_epoch(epoch as u16);
         Ok(Some(packet))
     }
     fn control_addr_request(&self, addr: SocketAddr) -> Result<Option<NetPacket<Vec<u8>>>> {
@@ -404,10 +452,32 @@ impl ServerPacketHandler {
                 let mut dev = message::DeviceInfo::new();
                 dev.virtual_ip = device_info.virtual_ip;
                 dev.name = device_info.name.clone();
-                dev.device_status = if device_info.online { 1 } else { 0 };
+                dev.device_status = if device_info.online { 0 } else { 1 };
                 dev.client_secret = device_info.client_secret;
                 dev
             })
             .collect()
+    }
+    fn broadcast<B: AsRef<[u8]>>(
+        &self,
+        context: &Context,
+        net_packet: NetPacket<B>,
+        exclude: &[Ipv4Addr],
+    ) -> io::Result<()> {
+        let client_secret = net_packet.is_encrypt();
+        for (ip, client_info) in &context.network_info.read().clients {
+            if client_info.online && !exclude.contains(&(*ip).into()) {
+                if client_info.client_secret == client_secret {
+                    if let Some(sender) = &client_info.tcp_sender {
+                        let _ = sender.try_send(net_packet.buffer().to_vec());
+                    } else {
+                        let _ = self
+                            .udp
+                            .try_send_to(net_packet.buffer(), client_info.address);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }

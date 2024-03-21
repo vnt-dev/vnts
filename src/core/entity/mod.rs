@@ -15,7 +15,7 @@ pub struct NetworkInfo {
     // 网关
     pub gateway_ip: u32,
     // 纪元号
-    pub epoch: u16,
+    pub epoch: u64,
     // 网段下的客户端列表 ip->ClientInfo
     pub clients: HashMap<u32, ClientInfo>,
 }
