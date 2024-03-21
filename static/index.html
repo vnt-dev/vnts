@@ -55,12 +55,12 @@
                 <span>组网管理</span>
             </a>
         </li>
-        <li>
-            <a href="#">
-                <img src="./svg/控制面板.svg" alt="3">
-                <span>控制面板</span>
-            </a>
-        </li>
+        <!--     <li>
+                 <a href="#">
+                     <img src="./svg/控制面板.svg" alt="3">
+                     <span>控制面板</span>
+                 </a>
+             </li>-->
     </ul>
 
 </div>
@@ -87,6 +87,9 @@
         <div id="container">
 
         </div>
+    </div>
+    <div>
+
     </div>
 </div>
 
@@ -162,6 +165,10 @@
             $('#select_ul .li-select').removeClass('li-hover');
             $(this).addClass('li-hover');
         });
+        if (tempArr.length > 0) {
+            $('#select_input').val(tempArr[0])
+            getGroupInfoFunc(tempArr[0])
+        }
     }
 </script>
 <script src="./js/group_node.js"></script>
