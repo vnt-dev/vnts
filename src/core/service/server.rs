@@ -145,6 +145,13 @@ impl ServerPacketHandler {
             }
             _ => {}
         }
+        log::error!(
+            "Unknown={:?},{:?},{:?},{:?}",
+            net_packet.destination(),
+            net_packet.source(),
+            net_packet.protocol(),
+            net_packet.transport_protocol()
+        );
         Err(Error::Other("Unknown".into()))
     }
 }
