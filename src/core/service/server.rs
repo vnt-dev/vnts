@@ -201,18 +201,23 @@ impl ServerPacketHandler {
         Ok(Some(packet))
     }
     fn control_addr_request(&self, addr: SocketAddr) -> Result<Option<NetPacket<Vec<u8>>>> {
-        match addr.ip() {
-            IpAddr::V4(ipv4) => {
-                let mut packet = NetPacket::new_encrypt(vec![0u8; 12 + 6 + ENCRYPTION_RESERVED])?;
-                packet.set_protocol(Protocol::Control);
-                packet.set_transport_protocol(control_packet::Protocol::AddrResponse.into());
-                let mut addr_packet = control_packet::AddrPacket::new(packet.payload_mut())?;
-                addr_packet.set_ipv4(ipv4);
-                addr_packet.set_port(addr.port());
-                Ok(Some(packet))
+        let ipv4 = match addr.ip() {
+            IpAddr::V4(ipv4) => ipv4,
+            IpAddr::V6(ip) => {
+                if let Some(ipv4) = ip.to_ipv4_mapped() {
+                    ipv4
+                } else {
+                    return Ok(None);
+                }
             }
-            IpAddr::V6(_) => Ok(None),
-        }
+        };
+        let mut packet = NetPacket::new_encrypt(vec![0u8; 12 + 6 + ENCRYPTION_RESERVED])?;
+        packet.set_protocol(Protocol::Control);
+        packet.set_transport_protocol(control_packet::Protocol::AddrResponse.into());
+        let mut addr_packet = control_packet::AddrPacket::new(packet.payload_mut())?;
+        addr_packet.set_ipv4(ipv4);
+        addr_packet.set_port(addr.port());
+        Ok(Some(packet))
     }
 }
 
