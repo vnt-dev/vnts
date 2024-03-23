@@ -18,6 +18,7 @@ pub struct AppCache {
     // addr -> (group，ip)
     pub addr_session: ExpireMap<SocketAddr, (String, u32)>,
     pub cipher_session: ExpireMap<SocketAddr, Arc<Aes256GcmCipher>>,
+    pub auth_map: ExpireMap<String, ()>,
 }
 
 pub struct Context {
@@ -68,11 +69,13 @@ impl AppCache {
             }
         });
         let cipher_session = ExpireMap::new(|k, v| {});
+        let auth_map = ExpireMap::new(|k, v| {});
         Self {
             virtual_network,
             ip_session,
             addr_session,
             cipher_session,
+            auth_map,
         }
     }
 }

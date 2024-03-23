@@ -47,6 +47,12 @@ pub struct StartArgs {
     ///web后台端口，默认29870
     #[arg(long)]
     web_port: Option<u16>,
+    /// web后台用户名，默认为admin
+    #[arg(long)]
+    username: Option<String>,
+    /// web后台用户密码，默认为admin
+    #[arg(long)]
+    password: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +63,8 @@ pub struct ConfigInfo {
     pub broadcast: Ipv4Addr,
     pub netmask: Ipv4Addr,
     pub check_finger: bool,
+    pub username: String,
+    pub password: String,
 }
 
 fn log_init(log_path: Option<String>) {
@@ -198,6 +206,8 @@ async fn main() {
         broadcast,
         netmask,
         check_finger,
+        username: args.username.unwrap_or_else(|| "admin".into()),
+        password: args.password.unwrap_or_else(|| "admin".into()),
     };
     let rsa = match RsaCipher::new() {
         Ok(rsa) => {

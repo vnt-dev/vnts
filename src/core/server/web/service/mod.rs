@@ -1,8 +1,10 @@
 use crate::cipher::RsaCipher;
-use crate::core::server::web::vo::{ClientInfo, GroupList, GroupsInfo, NetworkInfo};
+use crate::core::server::web::vo::{ClientInfo, GroupList, GroupsInfo, LoginData, NetworkInfo};
 use crate::core::store::cache::AppCache;
 use crate::ConfigInfo;
 use std::net::{SocketAddr, SocketAddrV4};
+use std::time::Duration;
+use uuid::uuid;
 
 #[derive(Clone)]
 pub struct VntsWebService {
@@ -22,6 +24,23 @@ impl VntsWebService {
 }
 
 impl VntsWebService {
+    pub async fn login(&self, login_data: LoginData) -> Option<String> {
+        if login_data.username == self.config.username
+            && login_data.password == self.config.password
+        {
+            let auth = uuid::Uuid::new_v4().to_string();
+            self.cache
+                .auth_map
+                .insert(auth.clone(), (), Duration::from_secs(3600 * 24))
+                .await;
+            Some(auth)
+        } else {
+            None
+        }
+    }
+    pub fn check_auth(&self, auth: &String) -> bool {
+        self.cache.auth_map.get(auth).is_some()
+    }
     pub fn group_list(&self) -> GroupList {
         let group_list: Vec<String> = self
             .cache

@@ -20,12 +20,21 @@ impl<V> ResponseMessage<V> {
     }
 }
 
-impl ResponseMessage<Option<String>> {
-    pub fn fail(message: String) -> ResponseMessage<Option<String>> {
+impl ResponseMessage<Option<()>> {}
+
+impl ResponseMessage<Option<()>> {
+    pub fn fail(message: String) -> ResponseMessage<Option<()>> {
         Self {
-            data: Option::<String>::None,
+            data: Option::<()>::None,
             message: Some(message),
             code: 400,
+        }
+    }
+    pub fn unauthorized() -> ResponseMessage<Option<()>> {
+        Self {
+            data: Option::<()>::None,
+            message: Some("unauthorized".into()),
+            code: 401,
         }
     }
 }
@@ -87,4 +96,10 @@ impl GroupsInfo {
             data: HashMap::new(),
         }
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LoginData {
+    pub username: String,
+    pub password: String,
 }

@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <script src="./js/jquery-3.7.1.min.js"></script>
     <script src="./js/g6.min.js"></script>
+    <script src="./js/api-post.js"></script>
+
     <link rel="stylesheet" href="./css/select.css">
     <title>vnts-web</title>
     <style>
@@ -25,9 +27,6 @@
             height: calc(100vh - 260px);
         }
 
-        #group_info {
-            visibility: hidden;
-        }
 
         .network_info > div {
             height: 20px;
@@ -94,14 +93,15 @@
 </div>
 
 </body>
+<script src="js/group-node.js"></script>
+
 <script>
-    function getRootPath() {
-        return window.location.protocol + '//' + window.location.host + '/'
+    if (!auth) {
+        window.location.replace("login.html");
     }
 
-    function getUrl(url) {
-        return getRootPath() + url
-    }
+
+    console.log("auth" + auth)
 </script>
 <script>
     /* 点击按钮设置下拉菜单的显示与隐藏 */
@@ -171,7 +171,6 @@
         }
     }
 </script>
-<script src="./js/group_node.js"></script>
 <script>
     let nodeInitFunc = function (gateway_ip, clients) {
         let nodes = [{
@@ -224,34 +223,33 @@
                 })
             }
         }
-        const data = {
+        let data = {
             nodes: nodes,
             edges: edges,
         };
+        console.log(data)
 
         graph.data(data);
         graph.render();
     }
     let getGroupInfoFunc = function (group) {
-        $.ajax({
-            url: getUrl("group_info?group=") + encodeURIComponent(group), success: function (result) {
-                console.log(result);
-                let data = result.data;
+        postGroupInfo({'group': group}, function (response) {
+            if (response && response.code === 200) {
+                let data = response.data;
                 $('.gateway_ip').html(data.gateway_ip);
                 $('.mask_ip').html(data.mask_ip);
                 $('.network_ip').html(data.network_ip);
-
                 nodeInitFunc(data.gateway_ip, data.clients);
-                $('#group_info').css("visibility", "visible")
+            } else {
+
             }
-        });
+
+        })
     }
-    $.ajax({
-        url: getUrl("group_list"), success: function (result) {
-            let group_list = result.data.group_list;
-            console.log(group_list);
-            searchInput(group_list);
-        }
+    postGroupList({}, function (result) {
+        let group_list = result.data.group_list;
+        console.log(group_list);
+        searchInput(group_list);
     });
 
 </script>
