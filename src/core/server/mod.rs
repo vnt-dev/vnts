@@ -1,7 +1,6 @@
+use std::io;
 use std::sync::Arc;
-use std::{io, thread};
 
-use actix_web::dev::WebService;
 use tokio::net::{TcpListener, UdpSocket};
 
 use crate::cipher::RsaCipher;
@@ -16,7 +15,7 @@ pub mod web;
 pub async fn start(
     udp: std::net::UdpSocket,
     tcp: std::net::TcpListener,
-    http: std::net::TcpListener,
+    http: Option<std::net::TcpListener>,
     config: ConfigInfo,
     rsa_cipher: Option<RsaCipher>,
 ) -> io::Result<()> {
@@ -30,8 +29,10 @@ pub async fn start(
     );
     tcp::start(TcpListener::from_std(tcp)?, handler.clone()).await;
     udp::start(udp, handler.clone()).await;
-    if let Err(e) = web::start(http, cache, config, rsa_cipher).await {
-        log::error!("{:?}", e);
+    if let Some(http) = http {
+        if let Err(e) = web::start(http, cache, config, rsa_cipher).await {
+            log::error!("{:?}", e);
+        }
     }
     Ok(())
 }

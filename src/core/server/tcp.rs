@@ -2,10 +2,9 @@ use crate::core::service::PacketHandler;
 use crate::protocol::NetPacket;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::OwnedReadHalf;
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{channel, Sender};
 
 pub async fn start(tcp: TcpListener, handler: PacketHandler) {

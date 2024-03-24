@@ -5,7 +5,7 @@ use std::sync::Arc;
 use actix_files::Files;
 use actix_web::dev::Service;
 use actix_web::web::Data;
-use actix_web::{post, web, App, HttpMessage, HttpRequest, HttpResponse, HttpServer, Responder};
+use actix_web::{post, web, App, HttpRequest, HttpResponse, HttpServer};
 
 use crate::cipher::RsaCipher;
 use crate::core::server::web::service::VntsWebService;

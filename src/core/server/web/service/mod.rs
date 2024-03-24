@@ -1,10 +1,12 @@
-use crate::cipher::RsaCipher;
-use crate::core::server::web::vo::{ClientInfo, GroupList, GroupsInfo, LoginData, NetworkInfo};
-use crate::core::store::cache::AppCache;
-use crate::ConfigInfo;
 use std::net::{SocketAddr, SocketAddrV4};
 use std::time::Duration;
-use uuid::uuid;
+
+use crate::cipher::RsaCipher;
+use crate::core::server::web::vo::{
+    ClientInfo, ClientStatusInfo, GroupList, LoginData, NetworkInfo,
+};
+use crate::core::store::cache::AppCache;
+use crate::ConfigInfo;
 
 #[derive(Clone)]
 pub struct VntsWebService {
@@ -70,6 +72,21 @@ impl VntsWebService {
                         }
                     }
                 };
+                let status_info = if let Some(client_status) = &into.client_status {
+                    Some(ClientStatusInfo {
+                        p2p_list: client_status.p2p_list.clone(),
+                        up_stream: client_status.up_stream,
+                        down_stream: client_status.down_stream,
+                        is_cone: client_status.is_cone,
+                        update_time: format!(
+                            "{}",
+                            client_status.update_time.format("%Y-%m-%d %H:%M:%S")
+                        ),
+                    })
+                } else {
+                    None
+                };
+
                 let client_info = ClientInfo {
                     device_id: into.device_id.clone(),
                     name: into.name.clone(),
@@ -78,6 +95,7 @@ impl VntsWebService {
                     address,
                     online: into.online,
                     virtual_ip: into.virtual_ip.into(),
+                    status_info,
                 };
                 network.clients.push(client_info);
             }
@@ -89,32 +107,32 @@ impl VntsWebService {
             None
         }
     }
-    pub fn groups_info(&self) -> GroupsInfo {
-        let mut data = GroupsInfo::new();
-        for (group, info) in self.cache.virtual_network.key_values() {
-            let guard = info.read();
-            let mut network = NetworkInfo::new(
-                guard.network_ip.into(),
-                guard.mask_ip.into(),
-                guard.gateway_ip.into(),
-            );
-            for (_ip, into) in guard.clients.iter() {
-                let client_info = ClientInfo {
-                    device_id: into.device_id.clone(),
-                    name: into.name.clone(),
-                    client_secret: into.client_secret,
-                    server_secret: into.server_secret.is_some(),
-                    address: into.address,
-                    online: into.online,
-                    virtual_ip: into.virtual_ip.into(),
-                };
-                network.clients.push(client_info);
-            }
-            network
-                .clients
-                .sort_by(|v1, v2| v1.virtual_ip.cmp(&v2.virtual_ip));
-            data.data.insert(group.to_string(), network);
-        }
-        data
-    }
+    // pub fn groups_info(&self) -> GroupsInfo {
+    //     let mut data = GroupsInfo::new();
+    //     for (group, info) in self.cache.virtual_network.key_values() {
+    //         let guard = info.read();
+    //         let mut network = NetworkInfo::new(
+    //             guard.network_ip.into(),
+    //             guard.mask_ip.into(),
+    //             guard.gateway_ip.into(),
+    //         );
+    //         for (_ip, into) in guard.clients.iter() {
+    //             let client_info = ClientInfo {
+    //                 device_id: into.device_id.clone(),
+    //                 name: into.name.clone(),
+    //                 client_secret: into.client_secret,
+    //                 server_secret: into.server_secret.is_some(),
+    //                 address: into.address,
+    //                 online: into.online,
+    //                 virtual_ip: into.virtual_ip.into(),
+    //             };
+    //             network.clients.push(client_info);
+    //         }
+    //         network
+    //             .clients
+    //             .sort_by(|v1, v2| v1.virtual_ip.cmp(&v2.virtual_ip));
+    //         data.data.insert(group.to_string(), network);
+    //     }
+    //     data
+    // }
 }

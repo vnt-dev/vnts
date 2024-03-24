@@ -1,3 +1,4 @@
+use chrono::Local;
 use packet::icmp::{icmp, Kind};
 use packet::ip::ipv4;
 use packet::ip::ipv4::packet::IpV4Packet;
@@ -12,7 +13,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc::Sender;
 
 use crate::cipher::{Aes256GcmCipher, Finger, RsaCipher};
-use crate::core::entity::{ClientInfo, NetworkInfo};
+use crate::core::entity::{ClientInfo, ClientStatusInfo, NetworkInfo};
 use crate::core::store::cache::{AppCache, Context};
 use crate::error::*;
 use crate::proto::message;
@@ -95,6 +96,13 @@ impl ServerPacketHandler {
                     service_packet::Protocol::PollDeviceList => {
                         //拉取网段设备信息
                         return self.poll_device_list(net_packet, addr, &context);
+                    }
+                    service_packet::Protocol::ClientStatusInfo => {
+                        //客户端上报信息
+                        let client_status_info =
+                            message::ClientStatusInfo::parse_from_bytes(net_packet.payload())?;
+                        self.up_client_status_info(client_status_info, &context);
+                        return Ok(None);
                     }
                     _ => {}
                 }
@@ -452,6 +460,31 @@ impl ServerPacketHandler {
         device_list_packet.set_transport_protocol(service_packet::Protocol::PushDeviceList.into());
         device_list_packet.set_payload(&bytes)?;
         return Ok(Some(device_list_packet));
+    }
+    fn up_client_status_info(
+        &self,
+        client_status_info: message::ClientStatusInfo,
+        context: &Context,
+    ) {
+        let mut status_info = ClientStatusInfo::default();
+        status_info.p2p_list = client_status_info
+            .p2p_list
+            .iter()
+            .map(|v| v.next_ip.into())
+            .collect();
+        status_info.up_stream = client_status_info.up_stream;
+        status_info.down_stream = client_status_info.down_stream;
+        status_info.is_cone =
+            client_status_info.nat_type.enum_value_or_default() == message::PunchNatType::Cone;
+        status_info.update_time = Local::now();
+        if let Some(v) = context
+            .network_info
+            .write()
+            .clients
+            .get_mut(&client_status_info.source)
+        {
+            v.client_status = Some(status_info);
+        }
     }
     fn clients_info(
         clients: &HashMap<u32, ClientInfo>,

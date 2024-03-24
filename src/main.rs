@@ -4,12 +4,10 @@ use std::io;
 use std::io::Write;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use crate::cipher::RsaCipher;
 // use crate::service::{start_tcp, start_udp};
 use clap::Parser;
-use tokio::net::{TcpListener, UdpSocket};
 
 mod cipher;
 mod core;
@@ -44,7 +42,7 @@ pub struct StartArgs {
     /// log路径，默认为当前程序路径，为/dev/null时表示不输出log
     #[arg(long)]
     log_path: Option<String>,
-    ///web后台端口，默认29870
+    ///web后台端口，默认29870，如果设置为0则表示不启动web后台
     #[arg(long)]
     web_port: Option<u16>,
     /// web后台用户名，默认为admin
@@ -124,9 +122,13 @@ async fn main() {
     let port = args.port.unwrap_or(29872);
     let web_port = args.web_port.unwrap_or(29870);
     println!("端口: {}", port);
-    println!("web端口: {}", web_port);
-    if web_port == port {
-        panic!("web-port == port");
+    if web_port != 0 {
+        println!("web端口: {}", web_port);
+        if web_port == port {
+            panic!("web-port == port");
+        }
+    } else {
+        println!("不启用web后台")
     }
     let white_token = if let Some(white_token) = args.white_token {
         Some(HashSet::from_iter(white_token.into_iter()))
@@ -226,9 +228,14 @@ async fn main() {
     let tcp = create_tcp(port).unwrap();
     log::info!("监听tcp端口: {:?}", port);
     println!("监听tcp端口: {:?}", port);
-    let http = create_tcp(web_port).unwrap();
-    log::info!("监听http端口: {:?}", web_port);
-    println!("监听http端口: {:?}", web_port);
+    let http = if web_port != 0 {
+        let http = create_tcp(web_port).unwrap();
+        log::info!("监听http端口: {:?}", web_port);
+        println!("监听http端口: {:?}", web_port);
+        Some(http)
+    } else {
+        None
+    };
     let config = config.clone();
     if let Err(e) = core::start(udp, tcp, http, config, rsa).await {
         log::error!("{:?}", e)

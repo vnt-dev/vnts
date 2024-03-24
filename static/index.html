@@ -32,6 +32,7 @@
             height: 20px;
             line-height: 20px;
         }
+
     </style>
 </head>
 <body>
@@ -172,6 +173,32 @@
     }
 </script>
 <script>
+    function formatBytes(bytes) {
+        if (!bytes) {
+            return ''
+        }
+        const gigabytes = Math.floor(bytes / (1024 * 1024 * 1024));
+        let remaining_bytes = bytes % (1024 * 1024 * 1024);
+        const megabytes = Math.floor(remaining_bytes / (1024 * 1024));
+        remaining_bytes = remaining_bytes % (1024 * 1024);
+        const kilobytes = Math.floor(remaining_bytes / 1024);
+        remaining_bytes = remaining_bytes % 1024;
+        let s = '';
+        if (gigabytes > 0) {
+            s += gigabytes + ' GB ';
+        }
+        if (megabytes > 0) {
+            s += megabytes + ' MB ';
+        }
+        if (kilobytes > 0) {
+            s += kilobytes + ' KB ';
+        }
+        if (remaining_bytes > 0) {
+            s += remaining_bytes + ' bytes';
+        }
+        return s.trim();
+    }
+
     let nodeInitFunc = function (gateway_ip, clients) {
         let nodes = [{
             id: gateway_ip,
@@ -201,26 +228,36 @@
             }
         }];
         let edges = [];
-        let n = 1;
         for (let index in clients) {
-            n++;
             let client = clients[index];
+            let status_info = client.status_info;
+            if (!status_info) {
+                status_info = {};
+            }
             let node = {
+                clientName: client.name,
+                natType: status_info.is_cone ? '锥形' : '对称',
+                upStream: formatBytes(status_info.up_stream),
+                downStream: formatBytes(status_info.down_stream),
+                clientSecret: client.client_secret,
                 id: client.virtual_ip,
                 name: '',
                 ip: client.virtual_ip,
                 nodeError: !client.online,
                 dataType: client.name,
                 keyInfo: client.address,
-                x: (n % 4) * 260,
-                y: (n / 4) * 200
             };
             nodes.push(node);
             if (client.online) {
-                edges.push({
-                    source: gateway_ip,
-                    target: client.virtual_ip,
-                })
+                if (client.status_info && client.status_info.p2p_list) {
+                    let p2p_list = client.status_info.p2p_list;
+                    for (let index in p2p_list) {
+                        edges.push({
+                            source: client.virtual_ip,
+                            target: p2p_list[index],
+                        })
+                    }
+                }
             }
         }
         let data = {

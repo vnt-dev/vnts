@@ -2,7 +2,6 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use moka::sync::Cache;
 use parking_lot::RwLock;
 
 use crate::cipher::Aes256GcmCipher;

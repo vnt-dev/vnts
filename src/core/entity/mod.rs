@@ -1,6 +1,7 @@
 use crate::cipher::Aes256GcmCipher;
+use chrono::{DateTime, Local};
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use tokio::sync::mpsc::Sender;
 
 /// 网段信息
@@ -50,6 +51,7 @@ pub struct ClientInfo {
     pub virtual_ip: u32,
     // 建立的tcp连接发送端
     pub tcp_sender: Option<Sender<Vec<u8>>>,
+    pub client_status: Option<ClientStatusInfo>,
 }
 
 impl Default for ClientInfo {
@@ -63,6 +65,27 @@ impl Default for ClientInfo {
             online: false,
             virtual_ip: 0,
             tcp_sender: None,
+            client_status: None,
+        }
+    }
+}
+
+pub struct ClientStatusInfo {
+    pub p2p_list: Vec<Ipv4Addr>,
+    pub up_stream: u64,
+    pub down_stream: u64,
+    pub is_cone: bool,
+    pub update_time: DateTime<Local>,
+}
+
+impl Default for ClientStatusInfo {
+    fn default() -> Self {
+        ClientStatusInfo {
+            p2p_list: vec![],
+            up_stream: 0,
+            down_stream: 0,
+            is_cone: false,
+            update_time: Local::now(),
         }
     }
 }

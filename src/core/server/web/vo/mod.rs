@@ -55,6 +55,16 @@ pub struct ClientInfo {
     pub online: bool,
     // 分配的ip
     pub virtual_ip: Ipv4Addr,
+    pub status_info: Option<ClientStatusInfo>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ClientStatusInfo {
+    pub p2p_list: Vec<Ipv4Addr>,
+    pub up_stream: u64,
+    pub down_stream: u64,
+    pub is_cone: bool,
+    pub update_time: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

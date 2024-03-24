@@ -162,16 +162,16 @@ const nodeBasicMethod = {
             const ipCPBox = group.find((element) => element.get('name') === 'ip-cp-box');
 
             const onMouseEnter = () => {
-                ipLine.attr('opacity', 1);
-                ipBG.attr('opacity', 1);
-                ipIcon.attr('opacity', 1);
-                graph.get('canvas').draw();
+                // ipLine.attr('opacity', 1);
+                // ipBG.attr('opacity', 1);
+                // ipIcon.attr('opacity', 1);
+                // graph.get('canvas').draw();
             };
             const onMouseLeave = () => {
-                ipLine.attr('opacity', 0);
-                ipBG.attr('opacity', 0);
-                ipIcon.attr('opacity', 0);
-                graph.get('canvas').draw();
+                // ipLine.attr('opacity', 0);
+                // ipBG.attr('opacity', 0);
+                // ipIcon.attr('opacity', 0);
+                // graph.get('canvas').draw();
             };
             ipBox.on('mouseenter', () => {
                 onMouseEnter();
@@ -291,77 +291,77 @@ G6.registerNode('card-node', {
             });
 
             // /* a transparent shape on the IP for click listener */
-            // group.addShape('rect', {
-            //     attrs: {
-            //         stroke: '',
-            //         cursor: 'pointer',
-            //         x: 224 - 12 - ipBBox.width - 4,
-            //         y: ipBBox.minY - 5,
-            //         width: ipBBox.width + 8,
-            //         height: ipBBox.height + 10,
-            //         fill: '#fff',
-            //         opacity: 0,
-            //     },
-            //     // must be assigned in G6 3.3 and later versions. it can be any string you want, but should be unique in a custom item type
-            //     name: 'ip-box',
-            // });
-            //
-            // /* copyIpLine */
-            // group.addShape('rect', {
-            //     attrs: {
-            //         x: 194,
-            //         y: 7,
-            //         width: 1,
-            //         height: 24,
-            //         fill: '#E3E6E8',
-            //         opacity: 0,
-            //     },
-            //     // must be assigned in G6 3.3 and later versions. it can be any string you want, but should be unique in a custom item type
-            //     name: 'ip-cp-line',
-            // });
-            // /* copyIpBG */
-            // group.addShape('rect', {
-            //     attrs: {
-            //         x: 195,
-            //         y: 8,
-            //         width: 22,
-            //         height: 22,
-            //         fill: '#FFF',
-            //         cursor: 'pointer',
-            //         opacity: 0,
-            //     },
-            //     // must be assigned in G6 3.3 and later versions. it can be any string you want, but should be unique in a custom item type
-            //     name: 'ip-cp-bg',
-            // });
-            // /* copyIpIcon */
-            // group.addShape('image', {
-            //     attrs: {
-            //         x: 200,
-            //         y: 13,
-            //         height: 12,
-            //         width: 10,
-            //         img: 'https://os.alipayobjects.com/rmsportal/DFhnQEhHyPjSGYW.png',
-            //         cursor: 'pointer',
-            //         opacity: 0,
-            //     },
-            //     // must be assigned in G6 3.3 and later versions. it can be any string you want, but should be unique in a custom item type
-            //     name: 'ip-cp-icon',
-            // });
-            // /* a transparent rect on the icon area for click listener */
-            // group.addShape('rect', {
-            //     attrs: {
-            //         x: 195,
-            //         y: 8,
-            //         width: 22,
-            //         height: 22,
-            //         fill: '#FFF',
-            //         cursor: 'pointer',
-            //         opacity: 0,
-            //     },
-            //     // must be assigned in G6 3.3 and later versions. it can be any string you want, but should be unique in a custom item type
-            //     name: 'ip-cp-box',
-            //     tooltip: 'Copy the IP',
-            // });
+            group.addShape('rect', {
+                attrs: {
+                    stroke: '',
+                    cursor: 'pointer',
+                    x: 224 - 12 - ipBBox.width - 4,
+                    y: ipBBox.minY - 5,
+                    width: ipBBox.width + 8,
+                    height: ipBBox.height + 10,
+                    fill: '#fff',
+                    opacity: 0,
+                },
+                // must be assigned in G6 3.3 and later versions. it can be any string you want, but should be unique in a custom item type
+                name: 'ip-box',
+            });
+
+            /* copyIpLine */
+            group.addShape('rect', {
+                attrs: {
+                    x: 194,
+                    y: 7,
+                    width: 1,
+                    height: 24,
+                    fill: '#E3E6E8',
+                    opacity: 0,
+                },
+                // must be assigned in G6 3.3 and later versions. it can be any string you want, but should be unique in a custom item type
+                name: 'ip-cp-line',
+            });
+            /* copyIpBG */
+            group.addShape('rect', {
+                attrs: {
+                    x: 195,
+                    y: 8,
+                    width: 22,
+                    height: 22,
+                    fill: '#FFF',
+                    cursor: 'pointer',
+                    opacity: 0,
+                },
+                // must be assigned in G6 3.3 and later versions. it can be any string you want, but should be unique in a custom item type
+                name: 'ip-cp-bg',
+            });
+            /* copyIpIcon */
+            group.addShape('image', {
+                attrs: {
+                    x: 200,
+                    y: 13,
+                    height: 12,
+                    width: 10,
+                    img: 'https://os.alipayobjects.com/rmsportal/DFhnQEhHyPjSGYW.png',
+                    cursor: 'pointer',
+                    opacity: 0,
+                },
+                // must be assigned in G6 3.3 and later versions. it can be any string you want, but should be unique in a custom item type
+                name: 'ip-cp-icon',
+            });
+            /* a transparent rect on the icon area for click listener */
+            group.addShape('rect', {
+                attrs: {
+                    x: 195,
+                    y: 8,
+                    width: 22,
+                    height: 22,
+                    fill: '#FFF',
+                    cursor: 'pointer',
+                    opacity: 0,
+                },
+                // must be assigned in G6 3.3 and later versions. it can be any string you want, but should be unique in a custom item type
+                name: 'ip-cp-box',
+                tooltip: 'Copy the IP',
+            });
 
             /* ip end */
         }
@@ -422,7 +422,24 @@ G6.registerNode('card-node', {
     afterDraw: nodeBasicMethod.afterDraw,
     setState: nodeBasicMethod.setState,
 });
-
+const tooltip = new G6.Tooltip({
+    offsetX: 70,
+    offsetY: 20,
+    getContent(e) {
+        const outDiv = document.createElement('div')
+        // outDiv.style.width = '180px'
+        outDiv.innerHTML = `
+      <ul>
+        <li>名称: ${e.item.getModel().clientName}</li>
+        <li>IP: ${e.item.getModel().ip}</li>
+        <li>NAT类型: ${e.item.getModel().natType}</li>
+        <li>上传: ${e.item.getModel().upStream}</li>
+        <li>下载: ${e.item.getModel().downStream}</li>
+      </ul>`
+        return outDiv
+    },
+    itemTypes: ['node']
+})
 const container = document.getElementById('container');
 const width = container.scrollWidth;
 const height = container.scrollHeight || 600;
@@ -430,6 +447,13 @@ graph = new G6.Graph({
     container: 'container',
     width,
     height,
+    plugins: [tooltip],
+    layout: {
+        type: 'force',
+        preventOverlap: true,
+        nodeSize: 200,
+        linkDistance: 250,
+    },
     // translate the graph to align the canvas's center, support by v3.5.1
     fitCenter: true,
     modes: {

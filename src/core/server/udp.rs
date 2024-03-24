@@ -1,4 +1,3 @@
-use std::io;
 use std::sync::Arc;
 
 use tokio::net::UdpSocket;
