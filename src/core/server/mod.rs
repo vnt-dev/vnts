@@ -10,12 +10,13 @@ use crate::ConfigInfo;
 
 mod tcp;
 mod udp;
-pub mod web;
+#[cfg(feature = "web")]
+mod web;
 
 pub async fn start(
     udp: std::net::UdpSocket,
     tcp: std::net::TcpListener,
-    http: Option<std::net::TcpListener>,
+    #[cfg(feature = "web")] http: Option<std::net::TcpListener>,
     config: ConfigInfo,
     rsa_cipher: Option<RsaCipher>,
 ) -> io::Result<()> {
@@ -29,6 +30,7 @@ pub async fn start(
     );
     tcp::start(TcpListener::from_std(tcp)?, handler.clone()).await;
     udp::start(udp, handler.clone()).await;
+    #[cfg(feature = "web")]
     if let Some(http) = http {
         if let Err(e) = web::start(http, cache, config, rsa_cipher).await {
             log::error!("{:?}", e);

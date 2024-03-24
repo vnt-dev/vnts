@@ -5,9 +5,10 @@ use std::io::Write;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
-use crate::cipher::RsaCipher;
 // use crate::service::{start_tcp, start_udp};
 use clap::Parser;
+
+use crate::cipher::RsaCipher;
 
 mod cipher;
 mod core;
@@ -42,12 +43,15 @@ pub struct StartArgs {
     /// log路径，默认为当前程序路径，为/dev/null时表示不输出log
     #[arg(long)]
     log_path: Option<String>,
+    #[cfg(feature = "web")]
     ///web后台端口，默认29870，如果设置为0则表示不启动web后台
     #[arg(long)]
     web_port: Option<u16>,
+    #[cfg(feature = "web")]
     /// web后台用户名，默认为admin
     #[arg(long)]
     username: Option<String>,
+    #[cfg(feature = "web")]
     /// web后台用户密码，默认为admin
     #[arg(long)]
     password: Option<String>,
@@ -61,7 +65,9 @@ pub struct ConfigInfo {
     pub broadcast: Ipv4Addr,
     pub netmask: Ipv4Addr,
     pub check_finger: bool,
+    #[cfg(feature = "web")]
     pub username: String,
+    #[cfg(feature = "web")]
     pub password: String,
 }
 
@@ -120,16 +126,21 @@ async fn main() {
     let args = StartArgs::parse();
     log_init(args.log_path);
     let port = args.port.unwrap_or(29872);
-    let web_port = args.web_port.unwrap_or(29870);
-    println!("端口: {}", port);
-    if web_port != 0 {
-        println!("web端口: {}", web_port);
-        if web_port == port {
-            panic!("web-port == port");
+    #[cfg(feature = "web")]
+    let web_port = {
+        let web_port = args.web_port.unwrap_or(29870);
+        println!("端口: {}", port);
+        if web_port != 0 {
+            println!("web端口: {}", web_port);
+            if web_port == port {
+                panic!("web-port == port");
+            }
+        } else {
+            println!("不启用web后台")
         }
-    } else {
-        println!("不启用web后台")
-    }
+        web_port
+    };
+
     let white_token = if let Some(white_token) = args.white_token {
         Some(HashSet::from_iter(white_token.into_iter()))
     } else {
@@ -208,7 +219,9 @@ async fn main() {
         broadcast,
         netmask,
         check_finger,
+        #[cfg(feature = "web")]
         username: args.username.unwrap_or_else(|| "admin".into()),
+        #[cfg(feature = "web")]
         password: args.password.unwrap_or_else(|| "admin".into()),
     };
     let rsa = match RsaCipher::new() {
@@ -228,6 +241,7 @@ async fn main() {
     let tcp = create_tcp(port).unwrap();
     log::info!("监听tcp端口: {:?}", port);
     println!("监听tcp端口: {:?}", port);
+    #[cfg(feature = "web")]
     let http = if web_port != 0 {
         let http = create_tcp(web_port).unwrap();
         log::info!("监听http端口: {:?}", web_port);
@@ -237,7 +251,16 @@ async fn main() {
         None
     };
     let config = config.clone();
-    if let Err(e) = core::start(udp, tcp, http, config, rsa).await {
+    if let Err(e) = core::start(
+        udp,
+        tcp,
+        #[cfg(feature = "web")]
+        http,
+        config,
+        rsa,
+    )
+    .await
+    {
         log::error!("{:?}", e)
     }
 }
