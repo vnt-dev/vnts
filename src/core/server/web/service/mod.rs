@@ -1,5 +1,7 @@
+use crossbeam_utils::atomic::AtomicCell;
 use std::net::{SocketAddr, SocketAddrV4};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::cipher::RsaCipher;
 use crate::core::server::web::vo::{
@@ -13,6 +15,7 @@ pub struct VntsWebService {
     cache: AppCache,
     config: ConfigInfo,
     rsa_cipher: Option<RsaCipher>,
+    login_time: Arc<AtomicCell<(Instant, usize)>>,
 }
 
 impl VntsWebService {
@@ -21,23 +24,30 @@ impl VntsWebService {
             cache,
             config,
             rsa_cipher,
+            login_time: Arc::new(AtomicCell::new((Instant::now(), 0))),
         }
     }
 }
 
 impl VntsWebService {
-    pub async fn login(&self, login_data: LoginData) -> Option<String> {
+    pub async fn login(&self, login_data: LoginData) -> Result<String, String> {
+        let (time, count) = self.login_time.load();
+        if count >= 3 && time.elapsed() < Duration::from_secs(60) {
+            return Err("一分钟后再试".into());
+        }
         if login_data.username == self.config.username
             && login_data.password == self.config.password
         {
-            let auth = uuid::Uuid::new_v4().to_string();
+            self.login_time.store((time, 0));
+            let auth = uuid::Uuid::new_v4().to_string().replace("-", "");
             self.cache
                 .auth_map
                 .insert(auth.clone(), (), Duration::from_secs(3600 * 24))
                 .await;
-            Some(auth)
+            Ok(auth)
         } else {
-            None
+            self.login_time.store((Instant::now(), count + 1));
+            Err("账号或密码错误".into())
         }
     }
     pub fn check_auth(&self, auth: &String) -> bool {

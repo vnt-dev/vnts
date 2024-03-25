@@ -74,6 +74,13 @@ where
             None
         }
     }
+    pub fn get_val(&self, k: &K) -> Option<V> {
+        if let Some(v) = self.base.read().get(k) {
+            Some(v.val.clone())
+        } else {
+            None
+        }
+    }
     fn expire_call(&self, k: &K) -> Op<K, V> {
         let mut write_guard = self.base.write();
         if let Some(v) = write_guard.get(k) {

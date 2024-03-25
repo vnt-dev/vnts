@@ -18,10 +18,9 @@ mod vo;
 
 #[post("/login")]
 async fn login(service: Data<VntsWebService>, data: web::Json<LoginData>) -> HttpResponse {
-    if let Some(auth) = service.login(data.0).await {
-        HttpResponse::Ok().json(ResponseMessage::success(auth))
-    } else {
-        HttpResponse::Ok().json(ResponseMessage::fail("username or password error".into()))
+    match service.login(data.0).await {
+        Ok(auth) => HttpResponse::Ok().json(ResponseMessage::success(auth)),
+        Err(e) => HttpResponse::Ok().json(ResponseMessage::fail(e)),
     }
 }
 

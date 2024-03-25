@@ -8,11 +8,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{channel, Sender};
 
 pub async fn start(tcp: TcpListener, handler: PacketHandler) {
-    tokio::spawn(async move {
-        if let Err(e) = accept(tcp, handler).await {
-            log::error!("accept {:?}", e);
-        }
-    });
+    if let Err(e) = accept(tcp, handler).await {
+        log::error!("accept {:?}", e);
+    }
 }
 
 async fn accept(tcp: TcpListener, handler: PacketHandler) -> io::Result<()> {

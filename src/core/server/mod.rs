@@ -28,13 +28,14 @@ pub async fn start(
         rsa_cipher.clone(),
         udp.clone(),
     );
-    tcp::start(TcpListener::from_std(tcp)?, handler.clone()).await;
-    udp::start(udp, handler.clone()).await;
+    let tcp_handle = tokio::spawn(tcp::start(TcpListener::from_std(tcp)?, handler.clone()));
+    let udp_handle = tokio::spawn(udp::start(udp, handler.clone()));
     #[cfg(feature = "web")]
     if let Some(http) = http {
         if let Err(e) = web::start(http, cache, config, rsa_cipher).await {
             log::error!("{:?}", e);
         }
     }
+    let _ = tokio::try_join!(tcp_handle, udp_handle);
     Ok(())
 }
