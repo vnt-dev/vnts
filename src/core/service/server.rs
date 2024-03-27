@@ -124,6 +124,7 @@ impl ServerPacketHandler {
                         let exclude = broadcast_packet.addresses();
                         let broadcast_net_packet = NetPacket::new(broadcast_packet.data()?)?;
                         self.broadcast(&context, broadcast_net_packet, &exclude)?;
+                        return Ok(None);
                     }
                     protocol::ip_turn_packet::Protocol::Ipv4 => {
                         let destination = net_packet.destination();
@@ -160,7 +161,8 @@ impl ServerPacketHandler {
             net_packet.protocol(),
             net_packet.transport_protocol()
         );
-        Err(Error::Other("Unknown".into()))
+        // Err(Error::Other("Unknown".into()))
+        return Ok(None);
     }
 }
 
