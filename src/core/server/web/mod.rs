@@ -5,7 +5,7 @@ use std::sync::Arc;
 use actix_files::Files;
 use actix_web::dev::Service;
 use actix_web::web::Data;
-use actix_web::{post, web, App, HttpRequest, HttpResponse, HttpServer};
+use actix_web::{middleware, post, web, App, HttpRequest, HttpResponse, HttpServer};
 
 use crate::cipher::RsaCipher;
 use crate::core::server::web::service::VntsWebService;
@@ -92,12 +92,13 @@ pub async fn start(
                         .into_response(HttpResponse::Ok().json(ResponseMessage::unauthorized())))
                 })
             })
+            .wrap(middleware::Compress::default())
             .service(login)
             .service(group_list)
             .service(group_info)
             .service(Files::new("/", "./static/").index_file("index.html"))
     })
-    .listen(lst)?
-    .run()
-    .await
+        .listen(lst)?
+        .run()
+        .await
 }
