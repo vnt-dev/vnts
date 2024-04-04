@@ -99,13 +99,15 @@ impl VntsWebService {
 
                 let client_info = ClientInfo {
                     device_id: into.device_id.clone(),
+                    version: into.version.clone(),
                     name: into.name.clone(),
                     client_secret: into.client_secret,
-                    server_secret: into.server_secret.is_some(),
+                    server_secret: into.server_secret,
                     address,
                     online: into.online,
                     virtual_ip: into.virtual_ip.into(),
                     status_info,
+                    last_join_time: into.last_join_time.format("%Y-%m-%d %H:%M:%S").to_string(),
                 };
                 network.clients.push(client_info);
             }

@@ -236,7 +236,10 @@
             }
             let node = {
                 clientName: client.name,
-                natType: status_info.is_cone ? '锥形' : '对称',
+                clientVersion: client.version,
+                deviceId: client.device_id,
+                lastJoinTime: client.last_join_time,
+                natType: status_info.is_cone == null ? '' : (status_info.is_cone ? '锥形' : '对称'),
                 upStream: formatBytes(status_info.up_stream),
                 downStream: formatBytes(status_info.down_stream),
                 clientSecret: client.client_secret,

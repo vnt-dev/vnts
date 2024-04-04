@@ -98,7 +98,7 @@ pub async fn start(
             .service(group_info)
             .service(Files::new("/", "./static/").index_file("index.html"))
     })
-        .listen(lst)?
-        .run()
-        .await
+    .listen(lst)?
+    .run()
+    .await
 }

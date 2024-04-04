@@ -43,6 +43,8 @@ impl ResponseMessage<Option<()>> {
 pub struct ClientInfo {
     // 设备ID
     pub device_id: String,
+    // 客户端版本
+    pub version: String,
     // 名称
     pub name: String,
     // 客户端间是否加密
@@ -56,6 +58,7 @@ pub struct ClientInfo {
     // 分配的ip
     pub virtual_ip: Ipv4Addr,
     pub status_info: Option<ClientStatusInfo>,
+    pub last_join_time: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

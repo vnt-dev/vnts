@@ -1,4 +1,3 @@
-use crate::cipher::Aes256GcmCipher;
 use chrono::{DateTime, Local};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -37,12 +36,14 @@ impl NetworkInfo {
 pub struct ClientInfo {
     // 设备ID
     pub device_id: String,
+    // 版本
+    pub version: String,
     // 名称
     pub name: String,
     // 客户端间是否加密
     pub client_secret: bool,
-    // 和服务端的加密方式
-    pub server_secret: Option<Aes256GcmCipher>,
+    // 和服务端是否加密
+    pub server_secret: bool,
     // 链接服务器的来源地址
     pub address: SocketAddr,
     // 是否在线
@@ -52,20 +53,23 @@ pub struct ClientInfo {
     // 建立的tcp连接发送端
     pub tcp_sender: Option<Sender<Vec<u8>>>,
     pub client_status: Option<ClientStatusInfo>,
+    pub last_join_time: DateTime<Local>,
 }
 
 impl Default for ClientInfo {
     fn default() -> Self {
         Self {
             device_id: "".to_string(),
+            version: "".to_string(),
             name: "".to_string(),
             client_secret: false,
-            server_secret: None,
+            server_secret: false,
             address: "0.0.0.0:0".parse().unwrap(),
             online: false,
             virtual_ip: 0,
             tcp_sender: None,
             client_status: None,
+            last_join_time: Local::now(),
         }
     }
 }

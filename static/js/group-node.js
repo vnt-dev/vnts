@@ -422,6 +422,11 @@ G6.registerNode('card-node', {
     afterDraw: nodeBasicMethod.afterDraw,
     setState: nodeBasicMethod.setState,
 });
+
+function toString(v) {
+    return v ? v : ''
+}
+
 const tooltip = new G6.Tooltip({
     offsetX: 70,
     offsetY: 20,
@@ -430,11 +435,14 @@ const tooltip = new G6.Tooltip({
         // outDiv.style.width = '180px'
         outDiv.innerHTML = `
       <ul>
-        <li>名称: ${e.item.getModel().clientName}</li>
-        <li>IP: ${e.item.getModel().ip}</li>
-        <li>NAT类型: ${e.item.getModel().natType}</li>
-        <li>上传: ${e.item.getModel().upStream}</li>
-        <li>下载: ${e.item.getModel().downStream}</li>
+        <li>名称: ${toString(e.item.getModel().clientName)}</li>
+        <li>ID: ${toString(e.item.getModel().deviceId)}</li>
+        <li>版本: ${toString(e.item.getModel().clientVersion)}</li>
+        <li>IP: ${toString(e.item.getModel().ip)}</li>
+        <li>上传: ${toString(e.item.getModel().upStream)}</li>
+        <li>下载: ${toString(e.item.getModel().downStream)}</li>
+        <li>NAT类型: ${toString(e.item.getModel().natType)}</li>
+        <li>注册时间: ${toString(e.item.getModel().lastJoinTime)}</li>
       </ul>`
         return outDiv
     },
