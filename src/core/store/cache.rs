@@ -30,17 +30,22 @@ impl AppCache {
     pub fn new() -> Self {
         // 网段7天未使用则回收
         let virtual_network: ExpireMap<String, Arc<RwLock<NetworkInfo>>> =
-            ExpireMap::new(|k, v| {});
+            ExpireMap::new(|_k, _v| {});
         let virtual_network_ = virtual_network.clone();
         // ip一天未使用则回收
         let ip_session: ExpireMap<(String, u32), SocketAddr> =
-            ExpireMap::new(move |k: (String, u32), addr: SocketAddr| {
-                log::info!("ip_session eviction {:?}", k);
-                if let Some(v) = virtual_network_.get(&k.0) {
+            ExpireMap::new(move |(group_id, ip), addr: SocketAddr| {
+                log::info!(
+                    "ip_session eviction group_id={},ip={},addr={}",
+                    group_id,
+                    Ipv4Addr::from(ip),
+                    addr
+                );
+                if let Some(v) = virtual_network_.get(&group_id) {
                     let mut lock = v.write();
-                    if let Some(dev) = lock.clients.get(&k.1) {
+                    if let Some(dev) = lock.clients.get(&ip) {
                         if dev.address == addr {
-                            lock.clients.remove(&k.1);
+                            lock.clients.remove(&ip);
                             lock.epoch += 1;
                         }
                     }
@@ -67,8 +72,8 @@ impl AppCache {
                 }
             }
         });
-        let cipher_session = ExpireMap::new(|k, v| {});
-        let auth_map = ExpireMap::new(|k, v| {});
+        let cipher_session = ExpireMap::new(|_k, _v| {});
+        let auth_map = ExpireMap::new(|_k, _v| {});
         Self {
             virtual_network,
             ip_session,
@@ -81,7 +86,11 @@ impl AppCache {
 
 impl AppCache {
     pub fn get_context(&self, addr: &SocketAddr) -> Option<Context> {
-        if let Some((group, virtual_ip)) = self.addr_session.get(&addr) {
+        if let Some(k) = self.addr_session.get(&addr) {
+            if self.ip_session.get(&k).is_none() {
+                return None;
+            }
+            let (group, virtual_ip) = k;
             if let Some(network_info) = self.virtual_network.get(&group) {
                 Some(Context {
                     network_info,
