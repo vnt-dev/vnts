@@ -16,6 +16,7 @@ pub async fn start(tcp: TcpListener, handler: PacketHandler) {
 async fn accept(tcp: TcpListener, handler: PacketHandler) -> io::Result<()> {
     loop {
         let (stream, addr) = tcp.accept().await?;
+        let _ = stream.set_nodelay(true);
         stream_handle(stream, addr, handler.clone()).await;
     }
 }
