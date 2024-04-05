@@ -512,8 +512,9 @@ impl ServerPacketHandler {
     fn handshake<B: AsRef<[u8]>>(
         &self,
         _net_packet: NetPacket<B>,
-        _addr: SocketAddr,
+        addr: SocketAddr,
     ) -> Result<NetPacket<Vec<u8>>> {
+        log::info!("handshake:{}", addr);
         let mut res = message::HandshakeResponse::new();
         res.version = env!("CARGO_PKG_VERSION").to_string();
         if let Some(rsp_cipher) = &self.rsa_cipher {
@@ -534,6 +535,7 @@ impl ServerPacketHandler {
         net_packet: NetPacket<B>,
         addr: SocketAddr,
     ) -> Result<NetPacket<Vec<u8>>> {
+        log::info!("secret_handshake:{}", addr);
         if let Some(rsp_cipher) = &self.rsa_cipher {
             let source = net_packet.source();
             let rsa_secret_body = rsp_cipher.decrypt(&net_packet)?;
