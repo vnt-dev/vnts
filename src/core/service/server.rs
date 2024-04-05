@@ -80,7 +80,8 @@ impl ServerPacketHandler {
                 aes.decrypt_ipv4(&mut net_packet)?;
                 Some(aes)
             } else {
-                return Ok(Some(Self::handle_err(Error::NoKey)?));
+                log::info!("没有密钥:{},head={:?}", addr, net_packet.head());
+                return Ok(Some(self.handle_err(addr, source, Error::NoKey)?));
             }
         } else {
             None
@@ -96,10 +97,7 @@ impl ServerPacketHandler {
                     return Ok(None);
                 }
             }
-            Err(e) => {
-                log::warn!("addr={},{:?}", addr, e);
-                Self::handle_err(e)?
-            }
+            Err(e) => self.handle_err(addr, source, e)?,
         };
         self.common_param(&mut packet, source);
         if let Some(aes) = aes {
@@ -119,7 +117,13 @@ impl ServerPacketHandler {
         net_packet.first_set_ttl(MAX_TTL);
         net_packet.set_gateway_flag(true);
     }
-    fn handle_err(e: Error) -> Result<NetPacket<Vec<u8>>> {
+    fn handle_err(
+        &self,
+        addr: SocketAddr,
+        source: Ipv4Addr,
+        e: Error,
+    ) -> Result<NetPacket<Vec<u8>>> {
+        log::warn!("addr={},source={},{:?}", addr, source, e);
         let rs = vec![0u8; 12 + ENCRYPTION_RESERVED];
         let mut packet = NetPacket::new_encrypt(rs)?;
         match e {
@@ -154,6 +158,7 @@ impl ServerPacketHandler {
             }
         }
         packet.set_protocol(Protocol::Error);
+        self.common_param(&mut packet, source);
         Ok(packet)
     }
     async fn handle0<B: AsRef<[u8]> + AsMut<[u8]>>(
