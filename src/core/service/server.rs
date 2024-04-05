@@ -315,7 +315,7 @@ impl ServerPacketHandler {
                 if let Some(ipv4) = ip.to_ipv4_mapped() {
                     ipv4
                 } else {
-                    return Ok(None);
+                    Ipv4Addr::UNSPECIFIED
                 }
             }
         };
