@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use std::io;
 
 use sha2::Digest;
@@ -35,7 +36,7 @@ impl Finger {
         nonce_raw[11] = net_packet.source_ttl();
         let payload = net_packet.payload();
         let finger = self.calculate_finger(&nonce_raw, &payload[..payload_len - 12]);
-        if &finger[..] != &payload[payload_len - 12..] {
+        if finger[..] != payload[payload_len - 12..] {
             return Err(io::Error::new(io::ErrorKind::Other, "finger err"));
         }
         Ok(())
@@ -44,8 +45,8 @@ impl Finger {
         let mut hasher = sha2::Sha256::new();
         hasher.update(nonce);
         hasher.update(secret_body);
-        hasher.update(&self.hash);
+        hasher.update(self.hash);
         let key: [u8; 32] = hasher.finalize().into();
-        return key[20..].try_into().unwrap();
+        key[20..].try_into().unwrap()
     }
 }

@@ -9,7 +9,6 @@ use crate::core::service::client::ClientPacketHandler;
 use crate::core::service::server::ServerPacketHandler;
 use crate::core::store::cache::AppCache;
 use crate::error::*;
-use crate::protocol::body::ENCRYPTION_RESERVED;
 use crate::protocol::NetPacket;
 use crate::ConfigInfo;
 

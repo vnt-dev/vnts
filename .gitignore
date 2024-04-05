@@ -1,0 +1,3 @@
+target/*
+src/proto/message.rs
+Cargo.lock

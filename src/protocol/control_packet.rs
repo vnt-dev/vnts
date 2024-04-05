@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use std::net::Ipv4Addr;
 use std::{fmt, io};
 
@@ -38,9 +39,9 @@ impl From<u8> for Protocol {
     }
 }
 
-impl Into<u8> for Protocol {
-    fn into(self) -> u8 {
-        match self {
+impl From<Protocol> for u8 {
+    fn from(val: Protocol) -> Self {
+        match val {
             Protocol::Ping => 1,
             Protocol::Pong => 2,
             Protocol::PunchRequest => 3,

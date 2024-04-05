@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::hash::Hash;
@@ -25,7 +26,7 @@ struct Value<V> {
 impl<K, V> ExpireMap<K, V> {
     pub fn new<F>(call: F) -> ExpireMap<K, V>
     where
-        F: Fn(K, V) -> () + Send + 'static,
+        F: Fn(K, V) + Send + 'static,
         K: Eq + Hash + Clone + Sync + Send + 'static,
         V: Clone + Sync + Send + 'static,
     {
@@ -75,11 +76,7 @@ where
         }
     }
     pub fn get_val(&self, k: &K) -> Option<V> {
-        if let Some(v) = self.base.read().get(k) {
-            Some(v.val.clone())
-        } else {
-            None
-        }
+        self.base.read().get(k).map(|v| v.val.clone())
     }
     fn expire_call(&self, k: &K) -> Op<K, V> {
         let mut write_guard = self.base.write();
@@ -97,7 +94,7 @@ where
                 }
             }
         }
-        return Op::None;
+        Op::None
     }
     pub async fn optionally_get_with<F>(&self, k: K, f: F) -> V
     where
@@ -166,22 +163,20 @@ where
                         continue;
                     }
                 }
-            } else {
-                if let Some(mut task) = binary_heap.pop() {
-                    //执行过期逻辑
-                    match map.expire_call(&task.k) {
-                        Op::Reset(time) => {
-                            //没有过期，重新加入监听
+            } else if let Some(mut task) = binary_heap.pop() {
+                //执行过期逻辑
+                match map.expire_call(&task.k) {
+                    Op::Reset(time) => {
+                        //没有过期，重新加入监听
 
-                            task.time = time;
-                            binary_heap.push(task);
-                        }
-                        Op::Remove(k, v) => {
-                            //执行回调
-                            f(k, v)
-                        }
-                        Op::None => {}
+                        task.time = time;
+                        binary_heap.push(task);
                     }
+                    Op::Remove(k, v) => {
+                        //执行回调
+                        f(k, v)
+                    }
+                    Op::None => {}
                 }
             }
         }
@@ -226,6 +221,7 @@ impl<K> PartialEq for DelayedTask<K> {
     }
 }
 
+#[allow(clippy::non_canonical_partial_ord_impl)]
 impl<K> PartialOrd for DelayedTask<K> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.time.partial_cmp(&other.time).map(|ord| ord.reverse())

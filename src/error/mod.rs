@@ -1,3 +1,5 @@
+#![allow(dead_code,clippy::enum_variant_names)]
+
 use std::io;
 
 use crossbeam::channel::RecvError;

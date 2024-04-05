@@ -140,11 +140,7 @@ async fn main() {
         web_port
     };
 
-    let white_token = if let Some(white_token) = args.white_token {
-        Some(HashSet::from_iter(white_token.into_iter()))
-    } else {
-        None
-    };
+    let white_token = args.white_token.map(|white_token| HashSet::from_iter(white_token.into_iter()));
     println!("token白名单: {:?}", white_token);
     let gateway = if let Some(gateway) = args.gateway {
         match gateway.parse::<Ipv4Addr>() {

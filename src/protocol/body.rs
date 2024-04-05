@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use std::{fmt, io};
 
 pub const ENCRYPTION_RESERVED: usize = 16 + 32 + 12;
@@ -279,7 +280,7 @@ impl<B: AsRef<[u8]>> RsaSecretBody<B> {
     pub fn new(buffer: B) -> io::Result<RsaSecretBody<B>> {
         let len = buffer.as_ref().len();
         // 不能大于udp最大载荷长度
-        if len < 32 || len > 65535 - 20 - 8 - 12 {
+        if !(32..=65535 - 20 - 8 - 12).contains(&len) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "length overflow",
@@ -304,7 +305,7 @@ impl<B: AsRef<[u8]>> RsaSecretBody<B> {
         &self.buffer.as_ref()[end..]
     }
     pub fn buffer(&self) -> &[u8] {
-        &self.buffer.as_ref()
+        self.buffer.as_ref()
     }
 }
 
