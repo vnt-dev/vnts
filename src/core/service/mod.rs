@@ -17,8 +17,6 @@ pub mod server;
 
 #[derive(Clone)]
 pub struct PacketHandler {
-    config: ConfigInfo,
-    cache: AppCache,
     client: ClientPacketHandler,
     server: ServerPacketHandler,
 }
@@ -38,12 +36,7 @@ impl PacketHandler {
         );
         let server =
             ServerPacketHandler::new(cache.clone(), config.clone(), rsa_cipher.clone(), udp);
-        Self {
-            config,
-            cache,
-            client,
-            server,
-        }
+        Self { client, server }
     }
 }
 

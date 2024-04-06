@@ -103,14 +103,6 @@ pub struct GroupsInfo {
     pub data: HashMap<String, NetworkInfo>,
 }
 
-impl GroupsInfo {
-    pub fn new() -> Self {
-        Self {
-            data: HashMap::new(),
-        }
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LoginData {
     pub username: String,

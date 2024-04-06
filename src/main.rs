@@ -34,7 +34,7 @@ pub struct StartArgs {
     #[arg(short, long)]
     gateway: Option<String>,
     /// 子网掩码，例如 --netmask 255.255.255.0
-    #[arg(short='m', long)]
+    #[arg(short = 'm', long)]
     netmask: Option<String>,
     ///开启指纹校验，开启后只会转发指纹正确的客户端数据包，增强安全性，这会损失一部分性能
     #[arg(short, long, default_value_t = false)]
@@ -44,15 +44,15 @@ pub struct StartArgs {
     log_path: Option<String>,
     #[cfg(feature = "web")]
     ///web后台端口，默认29870，如果设置为0则表示不启动web后台
-    #[arg(short='P', long)]
+    #[arg(short = 'P', long)]
     web_port: Option<u16>,
     #[cfg(feature = "web")]
     /// web后台用户名，默认为admin
-    #[arg(short='U', long)]
+    #[arg(short = 'U', long)]
     username: Option<String>,
     #[cfg(feature = "web")]
     /// web后台用户密码，默认为admin
-    #[arg(short='W',long)]
+    #[arg(short = 'W', long)]
     password: Option<String>,
 }
 
