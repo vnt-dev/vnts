@@ -1,5 +1,5 @@
 target/*
-src/proto/message.rs
+src/proto/*
 Cargo.lock
 key/*
 log/*

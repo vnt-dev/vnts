@@ -199,7 +199,9 @@ impl ServerPacketHandler {
             }
             Protocol::Control => {
                 // 控制数据
-                if let control_packet::Protocol::Ping = protocol::control_packet::Protocol::from(net_packet.transport_protocol()) {
+                if let control_packet::Protocol::Ping =
+                    protocol::control_packet::Protocol::from(net_packet.transport_protocol())
+                {
                     return self.control_ping(net_packet, &context);
                 }
             }
@@ -259,14 +261,18 @@ impl ServerPacketHandler {
         server_secret: bool,
     ) -> result::Result<Result<Option<NetPacket<Vec<u8>>>>, NetPacket<B>> {
         if net_packet.protocol() == Protocol::Service {
-            if let service_packet::Protocol::RegistrationRequest = protocol::service_packet::Protocol::from(net_packet.transport_protocol()) {
+            if let service_packet::Protocol::RegistrationRequest =
+                protocol::service_packet::Protocol::from(net_packet.transport_protocol())
+            {
                 //注册
                 return Ok(self
                     .register(net_packet, addr, tcp_sender, server_secret)
                     .await);
             }
         } else if net_packet.protocol() == Protocol::Control {
-            if let control_packet::Protocol::AddrRequest = protocol::control_packet::Protocol::from(net_packet.transport_protocol()) {
+            if let control_packet::Protocol::AddrRequest =
+                protocol::control_packet::Protocol::from(net_packet.transport_protocol())
+            {
                 return Ok(self.control_addr_request(addr));
             }
         }
@@ -619,7 +625,10 @@ impl ServerPacketHandler {
     ) -> io::Result<()> {
         let client_secret = net_packet.is_encrypt();
         for (ip, client_info) in &context.network_info.read().clients {
-            if client_info.online && !exclude.contains(&(*ip).into()) && client_info.client_secret == client_secret {
+            if client_info.online
+                && !exclude.contains(&(*ip).into())
+                && client_info.client_secret == client_secret
+            {
                 if let Some(sender) = &client_info.tcp_sender {
                     let _ = sender.try_send(net_packet.buffer().to_vec());
                 } else {

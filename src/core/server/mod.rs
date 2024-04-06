@@ -32,7 +32,7 @@ pub async fn start(
     let udp_handle = tokio::spawn(udp::start(udp, handler.clone()));
     #[cfg(feature = "web")]
     if let Some(http) = http {
-        if let Err(e) = web::start(http, cache, config, rsa_cipher).await {
+        if let Err(e) = web::start(http, cache, config).await {
             log::error!("{:?}", e);
         }
     }

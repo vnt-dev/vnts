@@ -25,7 +25,7 @@ impl RsaCipher {
         let priv_key_path = PathBuf::from("key/private_key.pem");
         let private_key = if priv_key_path.exists() {
             let key = std::fs::read_to_string(priv_key_path)?;
-            
+
             match RsaPrivateKey::from_pkcs8_pem(&key) {
                 Ok(private_key) => private_key,
                 Err(e) => {
