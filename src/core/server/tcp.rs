@@ -2,23 +2,66 @@ use crate::core::service::PacketHandler;
 use crate::protocol::NetPacket;
 use std::io;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::OwnedReadHalf;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::select;
 use tokio::sync::mpsc::{channel, Sender};
+use tokio::sync::Notify;
+use tokio::signal;
 
-pub async fn start(tcp: TcpListener, handler: PacketHandler) {
-    if let Err(e) = accept(tcp, handler).await {
-        log::error!("accept {:?}", e);
-    }
-}
+pub async fn start(tcp: TcpListener, handler: PacketHandler) -> io::Result<()> {
+    let state = Arc::new((AtomicUsize::new(0), Notify::new()));
 
-async fn accept(tcp: TcpListener, handler: PacketHandler) -> io::Result<()> {
     loop {
-        let (stream, addr) = tcp.accept().await?;
-        stream_handle(stream, addr, handler.clone()).await;
+        select! {
+            handle = tcp.accept() =>{
+                let (stream, addr) = handle?;
+                
+                let state = state.clone();
+                state.0.fetch_add(1, Ordering::Relaxed);
+                log::info!("State++: {state:?}");
+
+                stream_handle(stream, addr, handler.clone()).await;
+                
+                if state.0.fetch_sub(1, Ordering::Relaxed) == 1 {
+                    state.1.notify_one();
+                }
+                log::info!("State--: {state:?}");
+            }
+            _shutdown = signal::ctrl_c() => {
+                log::info!("State: {state:?}, ctrl_c is pressed, exit");
+                let timer = tokio::time::sleep(Duration::from_secs(30));
+                // notified by the last active task
+                let notification = state.1.notified();
+        
+                // if the count isn't zero, we have to wait
+                if state.0.load(Ordering::Relaxed) != 0 {
+                    // wait for either the timer or notification to resolve
+                    select! {
+                        _ = timer => {log::info!("超时退出");}
+                        _ = notification => {log::info!("通知退出");}
+                    }
+                } else {
+                    return Ok(());
+                }
+            }
+        }
     }
+    // if let Err(e) = accept(tcp, handler).await {
+    //     log::error!("accept {:?}", e);
+    // }
 }
+
+// async fn accept(tcp: TcpListener, handler: PacketHandler) -> io::Result<()> {
+//     loop {
+//         let (stream, addr) = tcp.accept().await?;
+//         stream_handle(stream, addr, handler.clone()).await;
+//     }
+// }
 
 async fn stream_handle(stream: TcpStream, addr: SocketAddr, handler: PacketHandler) {
     let (r, mut w) = stream.into_split();
