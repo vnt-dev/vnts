@@ -7,7 +7,6 @@ use actix_web::dev::Service;
 use actix_web::web::Data;
 use actix_web::{middleware, post, web, App, HttpRequest, HttpResponse, HttpServer};
 
-use crate::cipher::RsaCipher;
 use crate::core::server::web::service::VntsWebService;
 use crate::core::server::web::vo::{LoginData, ResponseMessage};
 use crate::core::store::cache::AppCache;
@@ -62,9 +61,8 @@ pub async fn start(
     lst: net::TcpListener,
     cache: AppCache,
     config: ConfigInfo,
-    rsa_cipher: Option<RsaCipher>,
 ) -> std::io::Result<()> {
-    let web_service = VntsWebService::new(cache, config, rsa_cipher);
+    let web_service = VntsWebService::new(cache, config);
     let auth_api = auth_api_set();
     HttpServer::new(move || {
         App::new()

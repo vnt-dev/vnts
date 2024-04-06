@@ -103,7 +103,7 @@ impl ServerPacketHandler {
         if let Some(aes) = aes {
             aes.encrypt_ipv4(&mut packet)?;
         }
-        return Ok(Some(packet));
+        Ok(Some(packet))
     }
     fn common_param<B: AsRef<[u8]> + AsMut<[u8]>>(
         &self,
@@ -204,11 +204,10 @@ impl ServerPacketHandler {
             }
             Protocol::Control => {
                 // 控制数据
-                match protocol::control_packet::Protocol::from(net_packet.transport_protocol()) {
-                    control_packet::Protocol::Ping => {
-                        return self.control_ping(net_packet, &context);
-                    }
-                    _ => {}
+                if let control_packet::Protocol::Ping =
+                    protocol::control_packet::Protocol::from(net_packet.transport_protocol())
+                {
+                    return self.control_ping(net_packet, &context);
                 }
             }
             Protocol::IpTurn => {
@@ -225,23 +224,20 @@ impl ServerPacketHandler {
                         let destination = net_packet.destination();
                         let source = net_packet.source();
                         let mut ipv4 = IpV4Packet::new(net_packet.payload_mut())?;
-                        match ipv4.protocol() {
-                            ipv4::protocol::Protocol::Icmp => {
-                                let mut icmp_packet = icmp::IcmpPacket::new(ipv4.payload_mut())?;
-                                if icmp_packet.kind() == Kind::EchoRequest {
-                                    //开启ping
-                                    icmp_packet.set_kind(Kind::EchoReply);
-                                    icmp_packet.update_checksum();
-                                    ipv4.set_source_ip(destination);
-                                    ipv4.set_destination_ip(source);
-                                    ipv4.update_checksum();
-                                    return Ok(Some(NetPacket::new0(
-                                        net_packet.data_len(),
-                                        net_packet.raw_buffer().to_vec(),
-                                    )?));
-                                }
+                        if let ipv4::protocol::Protocol::Icmp = ipv4.protocol() {
+                            let mut icmp_packet = icmp::IcmpPacket::new(ipv4.payload_mut())?;
+                            if icmp_packet.kind() == Kind::EchoRequest {
+                                //开启ping
+                                icmp_packet.set_kind(Kind::EchoReply);
+                                icmp_packet.update_checksum();
+                                ipv4.set_source_ip(destination);
+                                ipv4.set_destination_ip(source);
+                                ipv4.update_checksum();
+                                return Ok(Some(NetPacket::new0(
+                                    net_packet.data_len(),
+                                    net_packet.raw_buffer().to_vec(),
+                                )?));
                             }
-                            _ => {}
                         }
                     }
                     _ => {}
@@ -257,7 +253,7 @@ impl ServerPacketHandler {
             net_packet.transport_protocol()
         );
         // Err(Error::Other("Unknown".into()))
-        return Ok(None);
+        Ok(None)
     }
 }
 
@@ -270,21 +266,19 @@ impl ServerPacketHandler {
         server_secret: bool,
     ) -> result::Result<Result<Option<NetPacket<Vec<u8>>>>, NetPacket<B>> {
         if net_packet.protocol() == Protocol::Service {
-            match protocol::service_packet::Protocol::from(net_packet.transport_protocol()) {
-                service_packet::Protocol::RegistrationRequest => {
-                    //注册
-                    return Ok(self
-                        .register(net_packet, addr, tcp_sender, server_secret)
-                        .await);
-                }
-                _ => {}
+            if let service_packet::Protocol::RegistrationRequest =
+                protocol::service_packet::Protocol::from(net_packet.transport_protocol())
+            {
+                //注册
+                return Ok(self
+                    .register(net_packet, addr, tcp_sender, server_secret)
+                    .await);
             }
         } else if net_packet.protocol() == Protocol::Control {
-            match protocol::control_packet::Protocol::from(net_packet.transport_protocol()) {
-                control_packet::Protocol::AddrRequest => {
-                    return Ok(self.control_addr_request(addr));
-                }
-                _ => {}
+            if let control_packet::Protocol::AddrRequest =
+                protocol::control_packet::Protocol::from(net_packet.transport_protocol())
+            {
+                return Ok(self.control_addr_request(addr));
             }
         }
         Err(net_packet)
@@ -461,7 +455,7 @@ impl ServerPacketHandler {
             let info = if old_ip == 0 {
                 lock.clients
                     .entry(virtual_ip)
-                    .or_insert_with(|| ClientInfo::default())
+                    .or_insert_with(ClientInfo::default)
             } else {
                 let client_info = lock.clients.remove(&old_ip).unwrap();
                 lock.clients
@@ -501,13 +495,13 @@ impl ServerPacketHandler {
 }
 
 fn check_reg(request: &RegistrationRequest) -> Result<()> {
-    if request.token.len() == 0 || request.token.len() > 128 {
+    if request.token.is_empty() || request.token.len() > 128 {
         return Err(Error::Other("group length error".into()));
     }
-    if request.device_id.len() == 0 || request.device_id.len() > 128 {
+    if request.device_id.is_empty() || request.device_id.len() > 128 {
         return Err(Error::Other("device_id length error".into()));
     }
-    if request.name.len() == 0 || request.name.len() > 128 {
+    if request.name.is_empty() || request.name.len() > 128 {
         return Err(Error::Other("name length error".into()));
     }
     Ok(())
@@ -586,7 +580,7 @@ impl ServerPacketHandler {
         device_list_packet.set_protocol(Protocol::Service);
         device_list_packet.set_transport_protocol(service_packet::Protocol::PushDeviceList.into());
         device_list_packet.set_payload(&bytes)?;
-        return Ok(Some(device_list_packet));
+        Ok(Some(device_list_packet))
     }
     fn up_client_status_info(
         &self,
@@ -638,15 +632,16 @@ impl ServerPacketHandler {
     ) -> io::Result<()> {
         let client_secret = net_packet.is_encrypt();
         for (ip, client_info) in &context.network_info.read().clients {
-            if client_info.online && !exclude.contains(&(*ip).into()) {
-                if client_info.client_secret == client_secret {
-                    if let Some(sender) = &client_info.tcp_sender {
-                        let _ = sender.try_send(net_packet.buffer().to_vec());
-                    } else {
-                        let _ = self
-                            .udp
-                            .try_send_to(net_packet.buffer(), client_info.address);
-                    }
+            if client_info.online
+                && !exclude.contains(&(*ip).into())
+                && client_info.client_secret == client_secret
+            {
+                if let Some(sender) = &client_info.tcp_sender {
+                    let _ = sender.try_send(net_packet.buffer().to_vec());
+                } else {
+                    let _ = self
+                        .udp
+                        .try_send_to(net_packet.buffer(), client_info.address);
                 }
             }
         }

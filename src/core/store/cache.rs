@@ -86,24 +86,21 @@ impl AppCache {
 
 impl AppCache {
     pub fn get_context(&self, addr: &SocketAddr) -> Option<Context> {
-        if let Some(k) = self.addr_session.get(&addr) {
-            if self.ip_session.get(&k).is_none() {
-                return None;
-            }
+        if let Some(k) = self.addr_session.get(addr) {
+            self.ip_session.get(&k)?;
             let (group, virtual_ip) = k;
-            if let Some(network_info) = self.virtual_network.get(&group) {
-                Some(Context {
+            return self
+                .virtual_network
+                .get(&group)
+                .map(|network_info| Context {
                     network_info,
                     group,
                     virtual_ip,
-                })
-            } else {
-                None
-            }
-        } else {
-            None
+                });
         }
+        None
     }
+
     pub async fn insert_cipher_session(&self, key: SocketAddr, value: Aes256GcmCipher) {
         self.cipher_session
             .insert(key, Arc::new(value), Duration::from_secs(120))

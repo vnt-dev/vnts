@@ -25,34 +25,34 @@ const NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
 #[command(version)]
 pub struct StartArgs {
     /// 指定端口，默认29872
-    #[arg(long)]
+    #[arg(short, long)]
     port: Option<u16>,
     /// token白名单，例如 --white-token 1234 --white-token 123
-    #[arg(long)]
+    #[arg(short, long)]
     white_token: Option<Vec<String>>,
     /// 网关，例如 --gateway 10.10.0.1
-    #[arg(long)]
+    #[arg(short, long)]
     gateway: Option<String>,
     /// 子网掩码，例如 --netmask 255.255.255.0
-    #[arg(long)]
+    #[arg(short = 'm', long)]
     netmask: Option<String>,
     ///开启指纹校验，开启后只会转发指纹正确的客户端数据包，增强安全性，这会损失一部分性能
-    #[arg(long)]
+    #[arg(short, long, default_value_t = false)]
     finger: bool,
     /// log路径，默认为当前程序路径，为/dev/null时表示不输出log
-    #[arg(long)]
+    #[arg(short, long)]
     log_path: Option<String>,
     #[cfg(feature = "web")]
     ///web后台端口，默认29870，如果设置为0则表示不启动web后台
-    #[arg(long)]
+    #[arg(short = 'P', long)]
     web_port: Option<u16>,
     #[cfg(feature = "web")]
     /// web后台用户名，默认为admin
-    #[arg(long)]
+    #[arg(short = 'U', long)]
     username: Option<String>,
     #[cfg(feature = "web")]
     /// web后台用户密码，默认为admin
-    #[arg(long)]
+    #[arg(short = 'W', long)]
     password: Option<String>,
 }
 
@@ -140,11 +140,9 @@ async fn main() {
         web_port
     };
 
-    let white_token = if let Some(white_token) = args.white_token {
-        Some(HashSet::from_iter(white_token.into_iter()))
-    } else {
-        None
-    };
+    let white_token = args
+        .white_token
+        .map(|white_token| HashSet::from_iter(white_token.into_iter()));
     println!("token白名单: {:?}", white_token);
     let gateway = if let Some(gateway) = args.gateway {
         match gateway.parse::<Ipv4Addr>() {

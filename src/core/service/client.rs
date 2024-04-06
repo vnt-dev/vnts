@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -61,12 +63,10 @@ impl ClientPacketHandler {
             if destination.is_broadcast() || self.config.broadcast == destination {
                 //处理广播
                 broadcast(&self.udp, context, net_packet);
-            } else {
-                if let Some(client_info) =
-                    context.network_info.read().clients.get(&destination.into())
-                {
-                    send_one(&self.udp, client_info, &net_packet);
-                }
+            } else if let Some(client_info) =
+                context.network_info.read().clients.get(&destination.into())
+            {
+                send_one(&self.udp, client_info, &net_packet);
             }
         }
     }

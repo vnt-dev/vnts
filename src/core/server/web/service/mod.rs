@@ -3,7 +3,6 @@ use std::net::{SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::cipher::RsaCipher;
 use crate::core::server::web::vo::{
     ClientInfo, ClientStatusInfo, GroupList, LoginData, NetworkInfo,
 };
@@ -14,16 +13,14 @@ use crate::ConfigInfo;
 pub struct VntsWebService {
     cache: AppCache,
     config: ConfigInfo,
-    rsa_cipher: Option<RsaCipher>,
     login_time: Arc<AtomicCell<(Instant, usize)>>,
 }
 
 impl VntsWebService {
-    pub fn new(cache: AppCache, config: ConfigInfo, rsa_cipher: Option<RsaCipher>) -> Self {
+    pub fn new(cache: AppCache, config: ConfigInfo) -> Self {
         Self {
             cache,
             config,
-            rsa_cipher,
             login_time: Arc::new(AtomicCell::new((Instant::now(), 0))),
         }
     }
