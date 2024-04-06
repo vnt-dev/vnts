@@ -15,7 +15,7 @@ pub async fn start(main_udp: Arc<UdpSocket>, handler: PacketHandler) -> io::Resu
 
     let udp = main_udp.clone();
     loop {
-        let mut buf = vec![0; 1024];
+        let mut buf = vec![0; 65536];
         select! {
             handle = udp.recv_from(&mut buf) =>{
 
