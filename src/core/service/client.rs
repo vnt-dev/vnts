@@ -43,8 +43,7 @@ impl ClientPacketHandler {
         addr: SocketAddr,
     ) -> Result<()> {
         if let Some(context) = self.cache.get_context(&addr) {
-            self.handle0(net_packet, context);
-            Ok(())
+            self.handle0(net_packet, context)
         } else {
             Err(Error::Disconnect)
         }
@@ -57,8 +56,12 @@ impl ClientPacketHandler {
         &self,
         mut net_packet: NetPacket<B>,
         context: Context,
-    ) {
+    ) -> Result<()> {
         if net_packet.incr_ttl() > 1 {
+            if self.config.check_finger {
+                let finger = crate::cipher::Finger::new(&context.group);
+                finger.check_finger(&net_packet)?;
+            }
             let destination = net_packet.destination();
             if destination.is_broadcast() || self.config.broadcast == destination {
                 //处理广播
@@ -69,6 +72,7 @@ impl ClientPacketHandler {
                 send_one(&self.udp, client_info, &net_packet);
             }
         }
+        Ok(())
     }
 }
 
