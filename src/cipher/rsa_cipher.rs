@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use crate::protocol::body::RsaSecretBody;
 use crate::protocol::NetPacket;
-use rsa::pkcs8::der::Decode;
 use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey, LineEnding};
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use sha2::Digest;
+use spki::der::{Any, Decode};
 
 #[derive(Clone)]
 pub struct RsaCipher {
@@ -92,7 +92,7 @@ impl RsaCipher {
         })
     }
     pub fn finger_(public_key_der: &[u8]) -> io::Result<String> {
-        match rsa::pkcs8::SubjectPublicKeyInfo::from_der(public_key_der) {
+        match rsa::pkcs8::SubjectPublicKeyInfo::<Any, ()>::from_der(public_key_der) {
             Ok(spki) => match spki.fingerprint_base64() {
                 Ok(finger) => Ok(finger),
                 Err(e) => Err(io::Error::new(
@@ -123,7 +123,7 @@ impl RsaCipher {
         match self
             .inner
             .private_key
-            .decrypt(rsa::PaddingScheme::PKCS1v15Encrypt, net_packet.payload())
+            .decrypt(rsa::pkcs1v15::Pkcs1v15Encrypt, net_packet.payload())
         {
             Ok(rs) => {
                 let mut nonce_raw = [0; 12];

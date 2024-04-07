@@ -36,7 +36,7 @@ impl VntsWebService {
             && login_data.password == self.config.password
         {
             self.login_time.store((time, 0));
-            let auth = uuid::Uuid::new_v4().to_string().replace("-", "");
+            let auth = uuid::Uuid::new_v4().to_string().replace('-', "");
             self.cache
                 .auth_map
                 .insert(auth.clone(), (), Duration::from_secs(3600 * 24))
@@ -79,8 +79,7 @@ impl VntsWebService {
                         }
                     }
                 };
-                let status_info = if let Some(client_status) = &into.client_status {
-                    Some(ClientStatusInfo {
+                let status_info = into.client_status.as_ref().map(|client_status| ClientStatusInfo {
                         p2p_list: client_status.p2p_list.clone(),
                         up_stream: client_status.up_stream,
                         down_stream: client_status.down_stream,
@@ -89,10 +88,7 @@ impl VntsWebService {
                             "{}",
                             client_status.update_time.format("%Y-%m-%d %H:%M:%S")
                         ),
-                    })
-                } else {
-                    None
-                };
+                    });
 
                 let client_info = ClientInfo {
                     device_id: into.device_id.clone(),

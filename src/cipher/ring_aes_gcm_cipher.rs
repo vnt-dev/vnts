@@ -13,6 +13,7 @@ pub struct Aes256GcmCipher {
     pub(crate) finger: Finger,
 }
 
+#[allow(dead_code)]
 pub enum AesGcmEnum {
     AesGCM128(LessSafeKey, [u8; 16]),
     AesGCM256(LessSafeKey, [u8; 32]),
@@ -64,11 +65,11 @@ impl Aes256GcmCipher {
         nonce_raw[11] = net_packet.source_ttl();
         let nonce = aead::Nonce::assume_unique_for_key(nonce_raw);
         let mut secret_body = SecretBody::new(net_packet.payload_mut(), true)?;
-        let tag = secret_body.tag();
+        // let tag = secret_body.tag();
         let finger = self
             .finger
             .calculate_finger(&nonce_raw, secret_body.en_body());
-        if &finger != secret_body.finger() {
+        if finger != secret_body.finger() {
             return Err(io::Error::new(io::ErrorKind::Other, "finger err"));
         }
 
@@ -88,7 +89,7 @@ impl Aes256GcmCipher {
         }
         net_packet.set_encrypt_flag(false);
         net_packet.set_data_len(net_packet.data_len() - AES_GCM_ENCRYPTION_RESERVED)?;
-        return Ok(());
+        Ok(())
     }
     /// net_packet 必须预留足够长度
     /// data_len是有效载荷的长度

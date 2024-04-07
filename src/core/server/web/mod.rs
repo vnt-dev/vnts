@@ -76,9 +76,8 @@ pub async fn start(
                 }
                 let service: &Data<VntsWebService> = request.app_data().unwrap();
                 if let Some(authorization) = request.headers().get("Authorization") {
-                    if let Ok(auth) = authorization.to_str() {
-                        if auth.starts_with("Bearer ") {
-                            let auth = &auth["Bearer ".len()..];
+                    if let Ok(s) = authorization.to_str() {
+                        if let Some(auth) = s.strip_prefix("Bearer ") {
                             if service.check_auth(&auth.to_string()) {
                                 return srv.call(request);
                             }
