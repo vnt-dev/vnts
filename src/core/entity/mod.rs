@@ -54,6 +54,7 @@ pub struct ClientInfo {
     pub tcp_sender: Option<Sender<Vec<u8>>>,
     pub client_status: Option<ClientStatusInfo>,
     pub last_join_time: DateTime<Local>,
+    pub timestamp: i64,
 }
 
 impl Default for ClientInfo {
@@ -70,6 +71,7 @@ impl Default for ClientInfo {
             tcp_sender: None,
             client_status: None,
             last_join_time: Local::now(),
+            timestamp: 0,
         }
     }
 }

@@ -15,7 +15,7 @@ pub struct AppCache {
     // (group,ip) -> addr
     pub ip_session: ExpireMap<(String, u32), SocketAddr>,
     // addr -> (group，ip)
-    pub addr_session: ExpireMap<SocketAddr, (String, u32)>,
+    pub addr_session: ExpireMap<SocketAddr, (String, u32, i64)>,
     pub cipher_session: ExpireMap<SocketAddr, Arc<Aes256GcmCipher>>,
     pub auth_map: ExpireMap<String, ()>,
 }
@@ -53,25 +53,35 @@ impl AppCache {
             });
         let virtual_network_ = virtual_network.clone();
         // 20秒钟没有收到消息则判定为掉线
-        let addr_session = ExpireMap::new(move |addr: SocketAddr, (group, virtual_ip)| {
-            log::info!(
-                "addr_session eviction group={},virtual_ip={},addr={}",
-                group,
-                Ipv4Addr::from(virtual_ip),
-                addr
-            );
+        let addr_session = ExpireMap::new(
+            move |addr: SocketAddr, (group, virtual_ip, timestamp)| {
+                log::info!(
+                    "addr_session eviction group={},virtual_ip={},addr={},timestamp={}",
+                    group,
+                    Ipv4Addr::from(virtual_ip),
+                    addr,
+                    timestamp
+                );
 
-            if let Some(v) = virtual_network_.get(&group) {
-                let mut lock = v.write();
-                if let Some(item) = lock.clients.get_mut(&virtual_ip) {
-                    if item.address != addr {
-                        return;
+                if let Some(v) = virtual_network_.get(&group) {
+                    let mut lock = v.write();
+                    if let Some(item) = lock.clients.get_mut(&virtual_ip) {
+                        if item.address != addr || item.timestamp != timestamp {
+                            log::info!(
+                                "无效信息 addr_session eviction group={},virtual_ip={},addr={},timestamp={}",
+                                group,
+                                Ipv4Addr::from(virtual_ip),
+                                addr,
+                                timestamp
+                            );
+                            return;
+                        }
+                        item.online = false;
+                        lock.epoch += 1;
                     }
-                    item.online = false;
-                    lock.epoch += 1;
                 }
-            }
-        });
+            },
+        );
         let cipher_session = ExpireMap::new(|_k, _v| {});
         let auth_map = ExpireMap::new(|_k, _v| {});
         Self {
@@ -86,7 +96,8 @@ impl AppCache {
 
 impl AppCache {
     pub fn get_context(&self, addr: &SocketAddr) -> Option<Context> {
-        if let Some(k) = self.addr_session.get(addr) {
+        if let Some((group, virtual_ip, _)) = self.addr_session.get(addr) {
+            let k = (group, virtual_ip);
             self.ip_session.get(&k)?;
             let (group, virtual_ip) = k;
             return self
@@ -111,7 +122,7 @@ impl AppCache {
             .insert(key, value, Duration::from_secs(24 * 3600))
             .await
     }
-    pub async fn insert_addr_session(&self, key: SocketAddr, value: (String, u32)) {
+    pub async fn insert_addr_session(&self, key: SocketAddr, value: (String, u32, i64)) {
         self.addr_session
             .insert(key, value, Duration::from_secs(20))
             .await

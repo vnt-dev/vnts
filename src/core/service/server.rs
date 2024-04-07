@@ -395,6 +395,7 @@ impl ServerPacketHandler {
         let mut virtual_ip = request.virtual_ip;
         // 可分配的ip段
         let ip_range = network + 1..gateway | (!netmask);
+        let timestamp = Local::now().timestamp();
         {
             let mut lock = v.write();
             let mut insert = true;
@@ -472,6 +473,7 @@ impl ServerPacketHandler {
             info.virtual_ip = virtual_ip;
             info.tcp_sender = tcp_sender.clone();
             info.last_join_time = Local::now();
+            info.timestamp = timestamp;
             lock.epoch += 1;
             response.virtual_ip = virtual_ip;
             response.epoch = lock.epoch as u32;
@@ -482,7 +484,7 @@ impl ServerPacketHandler {
             .insert_ip_session((group_id.clone(), virtual_ip), addr)
             .await;
         cache
-            .insert_addr_session(addr, (group_id, virtual_ip))
+            .insert_addr_session(addr, (group_id, virtual_ip, timestamp))
             .await;
         let bytes = response.write_to_bytes()?;
         let rs = vec![0u8; 12 + bytes.len() + ENCRYPTION_RESERVED];
