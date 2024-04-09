@@ -75,6 +75,7 @@
 
             </ul>
         </div>
+        <span class="group_len"></span>
     </div>
 </div>
 <div id="container_content">
@@ -170,6 +171,7 @@
             $('#select_input').val(tempArr[0])
             getGroupInfoFunc(tempArr[0])
         }
+        $('.group_len').html('(' + tempArr.length + ')')
     }
 </script>
 <script>
