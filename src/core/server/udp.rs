@@ -16,11 +16,13 @@ pub async fn start(main_udp: Arc<UdpSocket>, handler: PacketHandler) {
                     match NetPacket::new(&mut buf[..len]) {
                         Ok(net_packet) => {
                             if let Some(rs) = handler.handle(net_packet, addr, &None).await {
-                                let _ = udp.send_to(rs.buffer(), addr).await;
+                                if let Err(e) = udp.send_to(rs.buffer(), addr).await {
+                                    log::error!("{:?} {}", e, addr)
+                                }
                             }
                         }
                         Err(e) => {
-                            log::error!("{:?}", e)
+                            log::error!("{:?} {}", e, addr)
                         }
                     }
                 });
