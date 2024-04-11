@@ -13,6 +13,8 @@ pub enum Protocol {
     HandshakeResponse,
     SecretHandshakeRequest,
     SecretHandshakeResponse,
+    /// 客户端上报状态
+    ClientStatusInfo,
     Unknown(u8),
 }
 
@@ -27,23 +29,25 @@ impl From<u8> for Protocol {
             6 => Self::HandshakeResponse,
             7 => Self::SecretHandshakeRequest,
             8 => Self::SecretHandshakeResponse,
+            9 => Self::ClientStatusInfo,
             val => Self::Unknown(val),
         }
     }
 }
 
-impl Into<u8> for Protocol {
-    fn into(self) -> u8 {
-        match self {
-            Self::RegistrationRequest => 1,
-            Self::RegistrationResponse => 2,
-            Self::PollDeviceList => 3,
-            Self::PushDeviceList => 4,
-            Self::HandshakeRequest => 5,
-            Self::HandshakeResponse => 6,
-            Self::SecretHandshakeRequest => 7,
-            Self::SecretHandshakeResponse => 8,
-            Self::Unknown(val) => val,
+impl From<Protocol> for u8 {
+    fn from(val: Protocol) -> Self {
+        match val {
+            Protocol::RegistrationRequest => 1,
+            Protocol::RegistrationResponse => 2,
+            Protocol::PollDeviceList => 3,
+            Protocol::PushDeviceList => 4,
+            Protocol::HandshakeRequest => 5,
+            Protocol::HandshakeResponse => 6,
+            Protocol::SecretHandshakeRequest => 7,
+            Protocol::SecretHandshakeResponse => 8,
+            Protocol::ClientStatusInfo => 9,
+            Protocol::Unknown(val) => val,
         }
     }
 }

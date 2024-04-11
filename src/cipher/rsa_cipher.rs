@@ -25,7 +25,8 @@ impl RsaCipher {
         let priv_key_path = PathBuf::from("key/private_key.pem");
         let private_key = if priv_key_path.exists() {
             let key = std::fs::read_to_string(priv_key_path)?;
-            let private_key = match RsaPrivateKey::from_pkcs8_pem(&key) {
+
+            match RsaPrivateKey::from_pkcs8_pem(&key) {
                 Ok(private_key) => private_key,
                 Err(e) => {
                     return Err(io::Error::new(
@@ -33,8 +34,7 @@ impl RsaCipher {
                         format!("'key/private_key.pem' content error {}", e),
                     ));
                 }
-            };
-            private_key
+            }
         } else {
             let path = PathBuf::from("key");
             if !path.exists() {
@@ -91,7 +91,7 @@ impl RsaCipher {
             inner: Arc::new(inner),
         })
     }
-    pub fn finger_(public_key_der: &Vec<u8>) -> io::Result<String> {
+    pub fn finger_(public_key_der: &[u8]) -> io::Result<String> {
         match rsa::pkcs8::SubjectPublicKeyInfo::from_der(public_key_der) {
             Ok(spki) => match spki.fingerprint_base64() {
                 Ok(finger) => Ok(finger),

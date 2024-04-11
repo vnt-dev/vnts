@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <script src="./js/jquery-3.7.1.min.js"></script>
+    <script src="./js/g6.min.js"></script>
+    <script src="./js/api-post.js"></script>
+
+    <link rel="stylesheet" href="./css/select.css">
+    <title>vnts-web</title>
+    <style>
+
+        .select-content:before {
+            content: "组网标识";
+            position: absolute;
+            left: -76px;
+            line-height: 48px;
+        }
+
+        #container_content {
+            position: relative;
+            margin-left: 240px;
+            padding-left: 10px;
+        }
+
+        #container {
+            height: calc(100vh - 260px);
+        }
+
+
+        .network_info > div {
+            height: 20px;
+            line-height: 20px;
+        }
+
+    </style>
+</head>
+<body>
+<div class="bigbox">
+    <!-- 点击效果 -->
+    <!--  <input type="checkbox" id="checkbox"/>
+      <label for="checkbox">
+          <img src="./svg/组网交换机.sxvg" alt="功能按钮">
+          <img src="./svg/组网交换机.sxvg" alt="功能按钮">
+          <img src="./svg/组网交换机.sxvg" alt="功能按钮">
+      </label>-->
+    <ul>
+        <li>
+            <img src="./svg/组网交换机.svg" alt="VNT"/>
+            <span>VNT</span>
+        </li>
+        <li>
+            <a href="#">
+                <img src="svg/组网管理.svg" alt="1">
+                <span>组网管理</span>
+            </a>
+        </li>
+        <!--     <li>
+                 <a href="#">
+                     <img src="./svg/控制面板.svg" alt="3">
+                     <span>控制面板</span>
+                 </a>
+             </li>-->
+    </ul>
+
+</div>
+<div class="topBox">
+    <div class="select-content">
+        <!--        <label>组网标识：</label>-->
+        <input type="hidden" name="newMachineId">
+        <input type="text" name="select_input" id="select_input" class="select-input" value="" autocomplete="off"
+               placeholder="Search..."/>
+        <div id="search_select" class="search-select">
+            <ul id="select_ul" class="select-ul">
+
+            </ul>
+        </div>
+        <span class="group_len"></span>
+    </div>
+</div>
+<div id="container_content">
+    <div id="group_info">
+        <div class="network_info">
+            <div class="gateway_ip"></div>
+            <div class="mask_ip"></div>
+            <div class="network_ip"></div>
+        </div>
+        <div id="container">
+
+        </div>
+    </div>
+    <div>
+
+    </div>
+</div>
+
+</body>
+<script src="js/group-node.js"></script>
+
+<script>
+    if (!auth) {
+        window.location.replace("login.html");
+    }
+
+
+    console.log("auth" + auth)
+</script>
+<script>
+    /* 点击按钮设置下拉菜单的显示与隐藏 */
+
+    function newOptions(tempArr) {
+        var listArr = [];
+        for (var i = 0; i < tempArr.length; i++) {
+            if (tempArr[i].indexOf($('#select_input').val()) > -1) {
+                listArr.push(tempArr[i]);
+            }
+        }
+        var options = '';
+        for (var i = 0; i < listArr.length; i++) {
+            opt = '<li class="li-select" data-newMachineId="' + listArr[i] + '">' + listArr[i] + '</li>';
+            options += opt;
+        }
+        if (options == '') {
+            $('#search_select').hide();
+        } else {
+            $('#search_select').show();
+            $('#select_ul').html('').append(options);
+        }
+    }
+
+    function searchInput(tempArr) {
+        $('#select_input').on('keyup', function () {
+            newOptions(tempArr);
+        });
+        $('#select_input').on('focus', function () {
+            $('#search_select').show();
+            newOptions(tempArr);
+        });
+        $('#select_ul .li-disabled').on('click', function () {
+            $('#search_select').show();
+        });
+        $('#search_select').on('mouseover', function () {
+            $(this).addClass('ul-hover');
+        });
+        $('#search_select').on('mouseout', function () {
+            $(this).removeClass('ul-hover');
+        });
+        $('#select_input').on('blur', function () {
+            if ($('#search_select').hasClass('ul-hover')) {
+                $('#search_select').show();
+            } else {
+                $('#search_select').hide();
+            }
+        });
+        $('#select_ul').delegate('.li-select', 'click', function () {
+            $('#select_ul .li-select').removeClass('li-hover');
+            var selectText = $(this).html();
+            var newMachineIdVal = $($(this)[0]).attr("data-newMachineId");
+            $('#select_input').val(selectText);
+            $('#search_select').hide();
+            $("input[name='newMachineId']").val(newMachineIdVal);
+            console.log(newMachineIdVal);
+            getGroupInfoFunc(newMachineIdVal)
+
+        });
+        $('#select_ul').delegate('.li-select', 'mouseover', function () {
+            $('#select_ul .li-select').removeClass('li-hover');
+            $(this).addClass('li-hover');
+        });
+        if (tempArr.length > 0) {
+            $('#select_input').val(tempArr[0])
+            getGroupInfoFunc(tempArr[0])
+        }
+        $('.group_len').html('(' + tempArr.length + ')')
+    }
+</script>
+<script>
+    function formatBytes(bytes) {
+        if (!bytes) {
+            return ''
+        }
+        const gigabytes = Math.floor(bytes / (1024 * 1024 * 1024));
+        let remaining_bytes = bytes % (1024 * 1024 * 1024);
+        const megabytes = Math.floor(remaining_bytes / (1024 * 1024));
+        remaining_bytes = remaining_bytes % (1024 * 1024);
+        const kilobytes = Math.floor(remaining_bytes / 1024);
+        remaining_bytes = remaining_bytes % 1024;
+        let s = '';
+        if (gigabytes > 0) {
+            s += gigabytes + ' GB ';
+        }
+        if (megabytes > 0) {
+            s += megabytes + ' MB ';
+        }
+        if (kilobytes > 0) {
+            s += kilobytes + ' KB ';
+        }
+        if (remaining_bytes > 0) {
+            s += remaining_bytes + ' bytes';
+        }
+        return s.trim();
+    }
+
+    let nodeInitFunc = function (gateway_ip, clients) {
+        let nodes = [{
+            id: gateway_ip,
+            label: gateway_ip,
+            x: 0,
+            y: 0,
+            type: 'ellipse',
+            size: [80, 60],
+            icon: {
+                show: true,
+                img: './svg/路由器.svg',
+                width: 40,
+                height: 40,
+            },
+            labelCfg: {
+                style: {
+                    fill: '#1890ff',
+                    fontSize: 14,
+                    background: {
+                        fill: '#ffffff',
+                        stroke: '#9EC9FF',
+                        padding: [2, 2, 2, 2],
+                        radius: 2,
+                    },
+                },
+                position: 'bottom',
+            }
+        }];
+        let edges = [];
+        for (let index in clients) {
+            let client = clients[index];
+            let status_info = client.status_info;
+            if (!status_info) {
+                status_info = {};
+            }
+            let node = {
+                clientName: client.name,
+                clientVersion: client.version,
+                deviceId: client.device_id,
+                lastJoinTime: client.last_join_time,
+                natType: status_info.is_cone == null ? '' : (status_info.is_cone ? '锥形' : '对称'),
+                upStream: formatBytes(status_info.up_stream),
+                downStream: formatBytes(status_info.down_stream),
+                clientSecret: client.client_secret,
+                id: client.virtual_ip,
+                name: '',
+                ip: client.virtual_ip,
+                nodeError: !client.online,
+                dataType: client.name,
+                keyInfo: client.address,
+            };
+            nodes.push(node);
+            if (client.online) {
+                if (client.status_info && client.status_info.p2p_list) {
+                    let p2p_list = client.status_info.p2p_list;
+                    for (let index in p2p_list) {
+                        edges.push({
+                            source: client.virtual_ip,
+                            target: p2p_list[index],
+                        })
+                    }
+                }
+            }
+        }
+        let data = {
+            nodes: nodes,
+            edges: edges,
+        };
+        console.log(data)
+
+        graph.data(data);
+        graph.render();
+    }
+    let getGroupInfoFunc = function (group) {
+        postGroupInfo({'group': group}, function (response) {
+            if (response && response.code === 200) {
+                let data = response.data;
+                $('.gateway_ip').html(data.gateway_ip);
+                $('.mask_ip').html(data.mask_ip);
+                $('.network_ip').html(data.network_ip);
+                nodeInitFunc(data.gateway_ip, data.clients);
+            } else {
+
+            }
+
+        })
+    }
+    postGroupList({}, function (result) {
+        let group_list = result.data.group_list;
+        console.log(group_list);
+        searchInput(group_list);
+    });
+
+</script>
+</html>

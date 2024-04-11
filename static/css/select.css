@@ -1,0 +1,192 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    width: 100%;
+    background-color: #f2f2f2;
+}
+
+.bigbox {
+    position: relative;
+    width: 100%;
+    height: 40px;
+    background-color: #fff;
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, .1);
+}
+
+.bigbox > input {
+    display: none;
+}
+
+.bigbox > label {
+    position: absolute;
+    top: 10px;
+    left: 240px;
+    font-size: 20px;
+    color: #666;
+    padding-left: 20px;
+    /* 光标样式
+     1）、div{ cursor:default }默认正常鼠标指针
+     2）、div{ cursor:hand }和div{ cursor:text } 文本选择效果
+     3）、div{ cursor:move } 移动选择效果
+     4）、div{ cursor:pointer } 手指形状 链接选择效果
+     5）、div{ cursor:url(url图片地址) }设置对象为图片 */
+    cursor: pointer;
+    transition: all .5s;
+}
+
+.bigbox ul {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 240px;
+    height: 100vh;
+    background-color: #2b3044;
+    transition: all .5s;
+
+}
+
+.bigbox ul li {
+    width: 100%;
+    height: 70px;
+    margin-bottom: 10px;
+    list-style: none;
+}
+
+.bigbox ul li:first-child {
+    display: flex;
+    align-items: center;
+    margin-top: 40px;
+
+}
+
+.bigbox ul li:first-child img {
+    height: 50px;
+    width: 50px;
+    border-radius: 50%;
+    margin: 0 25px;
+}
+
+.bigbox ul li:first-child span {
+    color: #fff;
+    font-size: 16px;
+    white-space: nowrap;
+}
+
+.bigbox ul li a {
+    display: flex;
+    align-items: center;
+    height: 100%;
+    width: 100%;
+    color: #d2d2d2;
+
+    text-decoration: none;
+    transition: all .5s;
+}
+
+.bigbox ul li a img {
+    width: 20px;
+    height: 20px;
+    margin: 0 25px;
+}
+
+.bigbox ul li a span {
+    font-size: 14px;
+}
+
+.bigbox ul li a:hover {
+    color: #fff;
+    background-color: rgb(47, 183, 204);
+}
+
+.bigbox input:checked + label {
+    left: 0;
+}
+
+/* 图片旋转 */
+/* .bigbox input:checked + label img {
+    transform: rotateX(180deg);
+} */
+
+.bigbox input:checked ~ ul {
+    left: -240px;
+}
+
+
+/*下拉*/
+.topBox {
+    position: relative;
+    height: 98px;
+    padding-top: 20px;
+    margin-left: 300px;
+}
+
+/* 下拉菜单按钮 */
+
+
+.select-content {
+    position: relative;
+    margin-left: 65px;
+}
+
+.select-content .select-input {
+    background-image: url('../svg/搜索.svg');
+    background-position: 14px 12px;
+    background-repeat: no-repeat;
+    font-size: 16px;
+    padding: 14px 20px 12px 45px;
+    border: none;
+    border-bottom: 1px solid #ddd;
+    width: 300px;
+    border-radius: 5px;
+}
+
+.select-content .dot-bottom {
+    font-size: 0;
+    line-height: 0;
+    border-width: 5px;
+    border-color: #6a6a6a;
+    border-bottom-width: 0;
+    border-style: dashed;
+    border-top-style: solid;
+    border-left-color: transparent;
+    border-right-color: transparent;
+}
+
+.select-content .search-select {
+    display: none;
+    position: absolute;
+    left: 0;
+    top: 52px;
+    z-index: 999;
+    min-width: 300px;
+    max-height: 300px;
+    overflow-y: auto;
+    border: 1px solid #799bd2;
+    background-color: #f0f0f0;
+    font-size: 16px;
+}
+
+.select-content .search-select .select-ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.select-content .search-select .select-ul .li-select {
+    color: #555;
+    padding: 2px 10px;
+    cursor: pointer;
+    line-height: 40px;
+
+}
+
+.select-content .search-select .select-ul .li-hover {
+    color: #fff;
+    background-color: #1e90ff;
+}
+
+

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::protocol::body::ENCRYPTION_RESERVED;
 use std::net::Ipv4Addr;
 use std::{fmt, io};
@@ -28,23 +29,23 @@ pub mod service_packet;
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
 pub enum Version {
     V1,
-    UnKnow(u8),
+    Unknown(u8),
 }
 
 impl From<u8> for Version {
     fn from(value: u8) -> Self {
         match value {
             1 => Version::V1,
-            val => Version::UnKnow(val),
+            val => Version::Unknown(val),
         }
     }
 }
 
-impl Into<u8> for Version {
-    fn into(self) -> u8 {
-        match self {
+impl From<Version> for u8 {
+    fn from(val: Version) -> Self {
+        match val {
             Version::V1 => 1,
-            Version::UnKnow(val) => val,
+            Version::Unknown(val) => val,
         }
     }
 }
@@ -61,7 +62,7 @@ pub enum Protocol {
     IpTurn,
     /// 转发其他数据
     OtherTurn,
-    UnKnow(u8),
+    Unknown(u8),
 }
 
 impl From<u8> for Protocol {
@@ -72,20 +73,20 @@ impl From<u8> for Protocol {
             3 => Protocol::Control,
             4 => Protocol::IpTurn,
             5 => Protocol::OtherTurn,
-            val => Protocol::UnKnow(val),
+            val => Protocol::Unknown(val),
         }
     }
 }
 
-impl Into<u8> for Protocol {
-    fn into(self) -> u8 {
-        match self {
+impl From<Protocol> for u8 {
+    fn from(val: Protocol) -> Self {
+        match val {
             Protocol::Service => 1,
             Protocol::Error => 2,
             Protocol::Control => 3,
             Protocol::IpTurn => 4,
             Protocol::OtherTurn => 5,
-            Protocol::UnKnow(val) => val,
+            Protocol::Unknown(val) => val,
         }
     }
 }
@@ -108,7 +109,7 @@ impl<B: AsRef<[u8]>> NetPacket<B> {
         if 12 + ENCRYPTION_RESERVED > buffer.as_ref().len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("new_encrypt length overflow {}", buffer.as_ref().len()),
+                "length overflow",
             ));
         }
         //加密需要预留ENCRYPTION_RESERVED字节
@@ -119,14 +120,14 @@ impl<B: AsRef<[u8]>> NetPacket<B> {
         if data_len > buffer.as_ref().len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("new0 length overflow {}", buffer.as_ref().len()),
+                "length overflow",
             ));
         }
         // 不能大于udp最大载荷长度
-        if data_len < 12 || buffer.as_ref().len() > 65535 - 20 - 8 {
+        if !(12..=65535 - 20 - 8).contains(&data_len) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("new0 length overflow {}", buffer.as_ref().len()),
+                "length overflow",
             ));
         }
         Ok(NetPacket { data_len, buffer })
@@ -183,6 +184,9 @@ impl<B: AsRef<[u8]>> NetPacket<B> {
     pub fn payload(&self) -> &[u8] {
         &self.buffer.as_ref()[12..self.data_len]
     }
+    pub fn head(&self) -> &[u8] {
+        &self.buffer.as_ref()[..12]
+    }
 }
 
 impl<B: AsRef<[u8]> + AsMut<[u8]>> NetPacket<B> {
@@ -198,6 +202,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> NetPacket<B> {
     }
     pub fn set_gateway_flag(&mut self, is_gateway: bool) {
         if is_gateway {
+            // 后面的版本再改为0x40，改了之后不兼容1.2.5之前的版本
             self.buffer.as_mut()[0] = self.buffer.as_ref()[0] | 0x50
         } else {
             self.buffer.as_mut()[0] = self.buffer.as_ref()[0] & 0xBF
@@ -213,11 +218,19 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> NetPacket<B> {
     pub fn set_transport_protocol(&mut self, transport_protocol: u8) {
         self.buffer.as_mut()[2] = transport_protocol;
     }
+    pub fn set_transport_protocol_into<P: Into<u8>>(&mut self, transport_protocol: P) {
+        self.buffer.as_mut()[2] = transport_protocol.into();
+    }
     pub fn first_set_ttl(&mut self, ttl: u8) {
         self.buffer.as_mut()[3] = ttl << 4 | ttl;
     }
     pub fn set_ttl(&mut self, ttl: u8) {
         self.buffer.as_mut()[3] = (self.buffer.as_mut()[3] & MAX_SOURCE) | (MAX_TTL & ttl);
+    }
+    pub fn incr_ttl(&mut self) -> u8 {
+        let ttl = self.ttl() - 1;
+        self.set_ttl(ttl);
+        ttl
     }
     pub fn set_source_ttl(&mut self, source_ttl: u8) {
         self.buffer.as_mut()[3] = (source_ttl << 4) | (MAX_TTL & self.buffer.as_ref()[3]);
