@@ -512,16 +512,20 @@ fn check_reg(request: &RegistrationRequest) -> Result<()> {
 impl ServerPacketHandler {
     fn handshake<B: AsRef<[u8]>>(
         &self,
-        _net_packet: NetPacket<B>,
+        net_packet: NetPacket<B>,
         addr: SocketAddr,
     ) -> Result<NetPacket<Vec<u8>>> {
-        log::info!("handshake:{}", addr);
+        let req = message::HandshakeRequest::parse_from_bytes(net_packet.payload())?;
+        log::info!("handshake:{},{}", addr, req);
         let mut res = message::HandshakeResponse::new();
         res.version = env!("CARGO_PKG_VERSION").to_string();
         if let Some(rsp_cipher) = &self.rsa_cipher {
-            res.public_key.extend_from_slice(rsp_cipher.public_key());
-            res.secret = true;
             res.key_finger = rsp_cipher.finger();
+            if res.key_finger != req.key_finger {
+                //指纹不相同则回应公钥，这有助于重连减少数据传输
+                res.public_key.extend_from_slice(rsp_cipher.public_key());
+            }
+            res.secret = true;
         }
         let bytes = res.write_to_bytes()?;
         let vec = vec![0u8; 12 + bytes.len() + ENCRYPTION_RESERVED];
