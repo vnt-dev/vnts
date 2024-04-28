@@ -21,8 +21,9 @@ struct Inner {
 }
 
 impl RsaCipher {
-    pub fn new() -> io::Result<Self> {
-        let priv_key_path = PathBuf::from("key/private_key.pem");
+    pub fn new(root_path: PathBuf) -> io::Result<Self> {
+        let priv_key_path = root_path.join("key/private_key.pem");
+        let pub_key_path = root_path.join("key/public_key.pem");
         let private_key = if priv_key_path.exists() {
             let key = std::fs::read_to_string(priv_key_path)?;
 
@@ -36,10 +37,6 @@ impl RsaCipher {
                 }
             }
         } else {
-            let path = PathBuf::from("key");
-            if !path.exists() {
-                std::fs::create_dir(path)?;
-            }
             let mut rng = rand::thread_rng();
             let bits = 2048;
             let private_key = match RsaPrivateKey::new(&mut rng, bits) {
@@ -51,25 +48,25 @@ impl RsaCipher {
                     ));
                 }
             };
+            let path = root_path.join("key");
+            if !path.exists() {
+                if let Err(e) = std::fs::create_dir(path) {
+                    log::warn!("创建密钥目录失败:{}", e);
+                }
+            }
             match private_key.write_pkcs8_pem_file(priv_key_path, LineEnding::CRLF) {
                 Ok(_) => {}
                 Err(e) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("failed to write to file 'key/private_key.pem' {}", e),
-                    ));
+                    log::warn!("保存私钥文件失败:{}", e);
                 }
             };
             private_key
         };
         let public_key = RsaPublicKey::from(&private_key);
-        match public_key.write_public_key_pem_file("key/public_key.pem", LineEnding::CRLF) {
+        match public_key.write_public_key_pem_file(pub_key_path, LineEnding::CRLF) {
             Ok(_) => {}
             Err(e) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("failed to write to file 'key/public_key.pem' {}", e),
-                ));
+                log::warn!("保存公钥文件失败:{}", e);
             }
         };
         let public_key_der = match public_key.to_public_key_der() {

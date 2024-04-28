@@ -70,9 +70,9 @@ pub struct ConfigInfo {
     pub password: String,
 }
 
-fn log_init(log_path: Option<String>) {
+fn log_init(root_path: PathBuf, log_path: Option<String>) {
     let log_path = match log_path {
-        None => PathBuf::from("log"),
+        None => root_path.join("log"),
         Some(log_path) => {
             if &log_path == "/dev/null" {
                 return;
@@ -120,10 +120,28 @@ root:
     let _ = log4rs::init_file(log_config, Default::default());
 }
 
+pub fn app_root() -> PathBuf {
+    match std::env::current_exe() {
+        Ok(path) => {
+            if let Some(v) = path.as_path().parent() {
+                v.to_path_buf()
+            } else {
+                log::warn!("current_exe parent none:{:?}", path);
+                PathBuf::new()
+            }
+        }
+        Err(e) => {
+            log::warn!("current_exe err:{:?}", e);
+            PathBuf::new()
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let args = StartArgs::parse();
-    log_init(args.log_path);
+    let root_path = app_root();
+    log_init(root_path.clone(), args.log_path);
     let port = args.port.unwrap_or(29872);
     #[cfg(feature = "web")]
     let web_port = {
@@ -221,7 +239,7 @@ async fn main() {
         #[cfg(feature = "web")]
         password: args.password.unwrap_or_else(|| "admin".into()),
     };
-    let rsa = match RsaCipher::new() {
+    let rsa = match RsaCipher::new(root_path) {
         Ok(rsa) => {
             println!("密钥指纹: {}", rsa.finger());
             Some(rsa)
