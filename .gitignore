@@ -1,6 +1,5 @@
 target/*
 src/proto/*
-Cargo.lock
 key/*
 log/*
 .vscode/*
