@@ -51,16 +51,16 @@ jobs:
           - TARGET: aarch64-unknown-linux-musl # tested on aws t4g.nano in alpine container
             OS: ubuntu-latest
             FEATURES: normal,web
-          - TARGET: armv7-unknown-linux-gnueabihf # raspberry pi 2-3-4, not tested
-            OS: ubuntu-latest
-            FEATURES: ring-cipher,web
           - TARGET: armv7-unknown-linux-musleabihf # raspberry pi 2-3-4, not tested
             OS: ubuntu-latest
             FEATURES: normal,web
-          - TARGET: arm-unknown-linux-gnueabihf # raspberry pi 0-1, not tested
+          - TARGET: armv7-unknown-linux-musleabi # raspberry pi 2-3-4, not tested
             OS: ubuntu-latest
-            FEATURES: ring-cipher,web
+            FEATURES: normal,web
           - TARGET: arm-unknown-linux-musleabihf # raspberry pi 0-1, not tested
+            OS: ubuntu-latest
+            FEATURES: normal,web
+          - TARGET: arm-unknown-linux-musleabi # raspberry pi 0-1, not tested
             OS: ubuntu-latest
             FEATURES: normal,web
           - TARGET: x86_64-apple-darwin # tested on a mac, is not properly signed so there are security warnings
@@ -116,9 +116,15 @@ jobs:
               armv7-unknown-linux-musleabihf)
                 MUSL_URI=armv7l-linux-musleabihf-cross
                 ;;   
+              armv7-unknown-linux-musleabi)
+                MUSL_URI=armv7m-linux-musleabi-cross
+                ;;   
               arm-unknown-linux-musleabihf)
                 MUSL_URI=arm-linux-musleabihf-cross
-                ;;        
+                ;;    
+              arm-unknown-linux-musleabi)
+                MUSL_URI=arm-linux-musleabi-cross
+                ;;     
               mips-unknown-linux-musl)
                 MUSL_URI=mips-linux-musl-cross
                 ;;
@@ -152,11 +158,17 @@ jobs:
           [target.armv7-unknown-linux-musleabihf]
           linker = "armv7l-linux-musleabihf-gcc"
           rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols"]
+          [target.armv7-unknown-linux-musleabi]
+          linker = "armv7m-linux-musleabi-gcc"
+          rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols"]
           [target.arm-unknown-linux-gnueabihf]
           linker = "arm-linux-gnueabihf-gcc"
           rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols"]
           [target.arm-unknown-linux-musleabihf]
           linker = "arm-linux-musleabihf-gcc"
+          rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols"]
+          [target.arm-unknown-linux-musleabi]
+          linker = "arm-linux-musleabi-gcc"
           rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols"]
           [target.mipsel-unknown-linux-musl]
           linker = "mipsel-linux-musl-gcc"
