@@ -20,9 +20,7 @@ use crate::proto::message;
 use crate::proto::message::{DeviceList, RegistrationRequest, RegistrationResponse};
 use crate::protocol::body::ENCRYPTION_RESERVED;
 use crate::protocol::ip_turn_packet::BroadcastPacket;
-use crate::protocol::{
-    control_packet, error_packet, service_packet, NetPacket, Protocol, Version, MAX_TTL,
-};
+use crate::protocol::{control_packet, error_packet, service_packet, NetPacket, Protocol, MAX_TTL};
 use crate::{protocol, ConfigInfo};
 
 #[derive(Clone)]
@@ -111,7 +109,7 @@ impl ServerPacketHandler {
         source: Ipv4Addr,
     ) {
         //设置通用参数
-        net_packet.set_version(Version::V1);
+        net_packet.set_default_version();
         net_packet.set_destination(source);
         net_packet.set_source(self.config.gateway);
         net_packet.first_set_ttl(MAX_TTL);
@@ -188,7 +186,7 @@ impl ServerPacketHandler {
         match net_packet.protocol() {
             Protocol::Service => {
                 match protocol::service_packet::Protocol::from(net_packet.transport_protocol()) {
-                    service_packet::Protocol::PollDeviceList => {
+                    service_packet::Protocol::PullDeviceList => {
                         //拉取网段设备信息
                         return self.poll_device_list(net_packet, addr, &context);
                     }

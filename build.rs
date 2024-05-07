@@ -1,8 +1,8 @@
-use std::fs::File;
-use std::io::Write;
 use rand::Rng;
 use static_files::resource_dir;
-fn main(){
+use std::fs::File;
+use std::io::Write;
+fn main() {
     std::fs::create_dir_all("src/proto").unwrap();
     protobuf_codegen::Codegen::new()
         .pure()

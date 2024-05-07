@@ -12,9 +12,9 @@ use crate::cipher::RsaCipher;
 mod cipher;
 mod core;
 mod error;
+mod generated_serial_number;
 mod proto;
 mod protocol;
-mod generated_serial_number;
 pub const VNT_VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
 /// 默认网关信息
