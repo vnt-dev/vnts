@@ -35,20 +35,32 @@ socket2 = { version = "0.5", features = ["all"] }
 
 actix-web = { version = "4.5", optional = true }
 actix-files = { version = "0.6", optional = true }
+actix-web-static-files = { version = "4.0.1", optional = true }
+
 serde = { version = "1", features = ["derive"] }
 crossbeam-utils = "0.8"
 futures-util = "0.3"
 uuid = { version = "1.8", features = ["v4"] }
 static-files = "0.2"
-actix-web-static-files = "4.0.1"
 
 [features]
 default = ["normal"]
 normal = ["aes-gcm"]
 ring-cipher = ["ring"]
-web = ["actix-web", "actix-files"]
+web = ["actix-web", "actix-files", "actix-web-static-files"]
 
 [build-dependencies]
 protobuf-codegen = "3"
 protoc-bin-vendored = "3"
 static-files = "0.2"
+
+[profile.release]
+opt-level = 'z'
+debug = 0
+debug-assertions = false
+strip = "debuginfo"
+lto = true
+panic = 'abort'
+incremental = false
+codegen-units = 1
+rpath = false
