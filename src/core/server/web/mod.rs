@@ -18,7 +18,6 @@ mod vo;
 
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 
-
 #[post("/login")]
 async fn login(service: Data<VntsWebService>, data: web::Json<LoginData>) -> HttpResponse {
     match service.login(data.0).await {

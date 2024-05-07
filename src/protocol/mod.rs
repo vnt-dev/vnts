@@ -1,5 +1,7 @@
 #![allow(dead_code)]
+
 use crate::protocol::body::ENCRYPTION_RESERVED;
+use std::fmt::Formatter;
 use std::net::Ipv4Addr;
 use std::{fmt, io};
 
@@ -282,6 +284,22 @@ impl<B: AsRef<[u8]>> fmt::Debug for NetPacket<B> {
             .field("source", &self.source())
             .field("destination", &self.destination())
             .field("payload", &self.payload())
+            .finish()
+    }
+}
+
+impl<B: AsRef<[u8]>> fmt::Display for NetPacket<B> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NetPacket")
+            .field("version", &self.version())
+            .field("gateway", &self.is_gateway())
+            .field("encrypt", &self.is_encrypt())
+            .field("protocol", &self.protocol())
+            .field("transport_protocol", &self.transport_protocol())
+            .field("ttl", &self.ttl())
+            .field("source_ttl", &self.source_ttl())
+            .field("source", &self.source())
+            .field("destination", &self.destination())
             .finish()
     }
 }
