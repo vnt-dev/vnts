@@ -2,10 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::net;
 use std::sync::Arc;
 
-use actix_files::Files;
 use actix_web::dev::Service;
 use actix_web::web::Data;
 use actix_web::{middleware, post, web, App, HttpRequest, HttpResponse, HttpServer};
+
+use actix_web_static_files::ResourceFiles;
 
 use crate::core::server::web::service::VntsWebService;
 use crate::core::server::web::vo::{LoginData, ResponseMessage};
@@ -14,6 +15,9 @@ use crate::ConfigInfo;
 
 mod service;
 mod vo;
+
+include!(concat!(env!("OUT_DIR"), "/generated.rs"));
+
 
 #[post("/login")]
 async fn login(service: Data<VntsWebService>, data: web::Json<LoginData>) -> HttpResponse {
@@ -65,6 +69,7 @@ pub async fn start(
     let web_service = VntsWebService::new(cache, config);
     let auth_api = auth_api_set();
     HttpServer::new(move || {
+        let generated = generate();
         App::new()
             .app_data(Data::new(web_service.clone()))
             .app_data(Data::new(auth_api.clone()))
@@ -94,7 +99,7 @@ pub async fn start(
             .service(login)
             .service(group_list)
             .service(group_info)
-            .service(Files::new("/", "./static/").index_file("index.html"))
+            .service(ResourceFiles::new("/", generated))
     })
     .listen(lst)?
     .run()
