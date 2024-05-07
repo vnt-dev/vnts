@@ -14,6 +14,8 @@ mod core;
 mod error;
 mod proto;
 mod protocol;
+mod generated_serial_number;
+pub const VNT_VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
 /// 默认网关信息
 const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 26, 0, 1);
@@ -139,6 +141,8 @@ pub fn app_root() -> PathBuf {
 
 #[tokio::main]
 async fn main() {
+    println!("version: {}", VNT_VERSION);
+    println!("Serial: {}", generated_serial_number::SERIAL_NUMBER);
     let args = StartArgs::parse();
     let root_path = app_root();
     log_init(root_path.clone(), args.log_path);
