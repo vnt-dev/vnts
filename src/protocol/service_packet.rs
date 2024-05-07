@@ -5,7 +5,7 @@ pub enum Protocol {
     /// 注册响应
     RegistrationResponse,
     /// 拉取设备列表
-    PollDeviceList,
+    PullDeviceList,
     /// 推送设备列表
     PushDeviceList,
     /// 和服务端握手
@@ -23,7 +23,7 @@ impl From<u8> for Protocol {
         match value {
             1 => Self::RegistrationRequest,
             2 => Self::RegistrationResponse,
-            3 => Self::PollDeviceList,
+            3 => Self::PullDeviceList,
             4 => Self::PushDeviceList,
             5 => Self::HandshakeRequest,
             6 => Self::HandshakeResponse,
@@ -40,7 +40,7 @@ impl From<Protocol> for u8 {
         match val {
             Protocol::RegistrationRequest => 1,
             Protocol::RegistrationResponse => 2,
-            Protocol::PollDeviceList => 3,
+            Protocol::PullDeviceList => 3,
             Protocol::PushDeviceList => 4,
             Protocol::HandshakeRequest => 5,
             Protocol::HandshakeResponse => 6,
