@@ -592,7 +592,8 @@ impl ServerPacketHandler {
         context: &Context,
     ) {
         let mut status_info = ClientStatusInfo::default();
-        status_info.p2p_list = client_status_info
+        let iplist = &mut status_info.p2p_list;
+        *iplist = client_status_info
             .p2p_list
             .iter()
             .map(|v| v.next_ip.into())
