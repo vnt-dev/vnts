@@ -30,12 +30,15 @@ pub async fn start(
     );
     let tcp_handle = tokio::spawn(tcp::start(TcpListener::from_std(tcp)?, handler.clone()));
     let udp_handle = tokio::spawn(udp::start(udp, handler.clone()));
+    #[cfg(not(feature = "web"))]
+    let _ = tokio::try_join!(tcp_handle, udp_handle);
     #[cfg(feature = "web")]
     if let Some(http) = http {
         if let Err(e) = web::start(http, cache, config).await {
             log::error!("{:?}", e);
         }
+    } else {
+        let _ = tokio::try_join!(tcp_handle, udp_handle);
     }
-    let _ = tokio::try_join!(tcp_handle, udp_handle);
     Ok(())
 }

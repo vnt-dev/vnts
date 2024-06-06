@@ -29,7 +29,12 @@ async fn stream_handle(stream: TcpStream, addr: SocketAddr, handler: PacketHandl
         while let Some(data) = receiver.recv().await {
             let len = data.len();
             if let Err(e) = w
-                .write_all(&[0, 0, (len >> 8) as u8, (len & 0xFF) as u8])
+                .write_all(&[
+                    (len >> 24) as u8,
+                    (len >> 16) as u8,
+                    (len >> 8) as u8,
+                    len as u8,
+                ])
                 .await
             {
                 log::info!("发送失败,链接终止:{:?},{:?}", addr, e);
@@ -60,7 +65,10 @@ async fn tcp_read(
     let sender = Some(sender);
     loop {
         read.read_exact(&mut head).await?;
-        let len = ((head[2] as usize) << 8) | head[3] as usize;
+        let len = ((head[0] as usize) << 24)
+            | ((head[1] as usize) << 16)
+            | ((head[2] as usize) << 8)
+            | head[3] as usize;
         if len < 12 || len > buf.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
