@@ -21,6 +21,7 @@
             position: relative;
             margin-left: 240px;
             padding-left: 10px;
+            height: 100%;
         }
 
         #container {
@@ -33,6 +34,29 @@
             line-height: 20px;
         }
 
+        #group_info_show {
+            max-height: calc(100vh - 200px);
+            overflow-y: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+
+        table, th, td {
+            border: 1px solid #ccc;
+        }
+
+        th, td {
+            padding: 8px;
+            text-align: left;
+        }
+
+        th {
+            background-color: #f2f2f2;
+        }
     </style>
 </head>
 <body>
@@ -85,13 +109,30 @@
             <div class="mask_ip"></div>
             <div class="network_ip"></div>
         </div>
-        <div id="container">
+        <div id="group_info_show">
+            <div id="container">
 
+            </div>
+            <table id="deviceTable">
+                <thead>
+                <tr>
+                    <th>虚拟 IP</th>
+                    <th>名称</th>
+                    <th>版本</th>
+                    <th>在线状态</th>
+                    <th>客户端加密</th>
+                    <th>服务器加密</th>
+                    <th>连接时间</th>
+                    <th>链接地址</th>
+                    <th>设备 ID</th>
+                </tr>
+                </thead>
+                <tbody>
+                </tbody>
+            </table>
         </div>
     </div>
-    <div>
 
-    </div>
 </div>
 
 </body>
@@ -172,6 +213,51 @@
             getGroupInfoFunc(tempArr[0])
         }
         $('.group_len').html('(' + tempArr.length + ')')
+    }
+
+    function displayDeviceInfo(devices) {
+        const tableBody = document.getElementById('deviceTable').getElementsByTagName('tbody')[0];
+        devices.forEach(device => {
+            const row = document.createElement('tr');
+
+            const virtualIpCell = document.createElement('td');
+            virtualIpCell.textContent = device.virtual_ip;
+            row.appendChild(virtualIpCell);
+
+            const nameCell = document.createElement('td');
+            nameCell.textContent = device.name;
+            row.appendChild(nameCell);
+
+            const versionCell = document.createElement('td');
+            versionCell.textContent = device.version;
+            row.appendChild(versionCell);
+
+            const onlineCell = document.createElement('td');
+            onlineCell.textContent = device.online ? '在线' : '离线';
+            row.appendChild(onlineCell);
+
+            const clientSecretCell = document.createElement('td');
+            clientSecretCell.textContent = device.client_secret ? '是' : '否';
+            row.appendChild(clientSecretCell);
+
+            const serverSecretCell = document.createElement('td');
+            serverSecretCell.textContent = device.server_secret ? '是' : '否';
+            row.appendChild(serverSecretCell);
+
+            const lastJoinTimeCell = document.createElement('td');
+            lastJoinTimeCell.textContent = device.last_join_time;
+            row.appendChild(lastJoinTimeCell);
+            
+            const addressCell = document.createElement('td');
+            addressCell.textContent = device.address;
+            row.appendChild(addressCell);
+
+            const deviceIdCell = document.createElement('td');
+            deviceIdCell.textContent = device.device_id;
+            row.appendChild(deviceIdCell);
+
+            tableBody.appendChild(row);
+        });
     }
 </script>
 <script>
@@ -282,8 +368,9 @@
                 $('.mask_ip').html(data.mask_ip);
                 $('.network_ip').html(data.network_ip);
                 nodeInitFunc(data.gateway_ip, data.clients);
+                displayDeviceInfo(data.clients);
             } else {
-
+                window.alert("调用服务失败")
             }
 
         })
