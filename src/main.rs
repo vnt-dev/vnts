@@ -15,7 +15,7 @@ mod error;
 mod generated_serial_number;
 mod proto;
 mod protocol;
-pub const VNT_VERSION: &'static str = env!("CARGO_PKG_VERSION");
+pub const VNT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// 默认网关信息
 const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 26, 0, 1);

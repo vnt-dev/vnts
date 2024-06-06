@@ -22,6 +22,6 @@ fn main() {
     );
     let generated_code = format!(r#"pub const SERIAL_NUMBER: &str = "{}";"#, serial_number);
     let dest_path = "src/generated_serial_number.rs";
-    let mut file = File::create(&dest_path).unwrap();
+    let mut file = File::create(dest_path).unwrap();
     file.write_all(generated_code.as_bytes()).unwrap();
 }
