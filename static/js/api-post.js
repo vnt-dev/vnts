@@ -44,7 +44,7 @@ function post(url, data, success, error,) {
         },
         data: JSON.stringify(data),
         success: function (response) {
-            console.log(response)
+            // console.log(response)
             if (response && response.code === 401) {
                 setAuth(null);
                 window.location.replace("login.html");
