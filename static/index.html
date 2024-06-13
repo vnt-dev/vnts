@@ -144,7 +144,7 @@
     }
 
 
-    console.log("auth" + auth)
+    // console.log("auth" + auth)
 </script>
 <script>
     /* 点击按钮设置下拉菜单的显示与隐藏 */
@@ -200,7 +200,7 @@
             $('#select_input').val(selectText);
             $('#search_select').hide();
             $("input[name='newMachineId']").val(newMachineIdVal);
-            console.log(newMachineIdVal);
+            // console.log(newMachineIdVal);
             getGroupInfoFunc(newMachineIdVal)
 
         });
@@ -255,7 +255,7 @@
             const deviceIdCell = document.createElement('td');
             deviceIdCell.textContent = device.device_id;
             row.appendChild(deviceIdCell);
-
+            tableBody.innerHTML="";
             tableBody.appendChild(row);
         });
     }
@@ -355,7 +355,7 @@
             nodes: nodes,
             edges: edges,
         };
-        console.log(data)
+        // console.log(data)
 
         graph.data(data);
         graph.render();
@@ -377,7 +377,7 @@
     }
     postGroupList({}, function (result) {
         let group_list = result.data.group_list;
-        console.log(group_list);
+        // console.log(group_list);
         searchInput(group_list);
     });
 
