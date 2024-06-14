@@ -217,6 +217,7 @@
 
     function displayDeviceInfo(devices) {
         const tableBody = document.getElementById('deviceTable').getElementsByTagName('tbody')[0];
+        tableBody.innerHTML="";
         devices.forEach(device => {
             const row = document.createElement('tr');
 
@@ -255,7 +256,6 @@
             const deviceIdCell = document.createElement('td');
             deviceIdCell.textContent = device.device_id;
             row.appendChild(deviceIdCell);
-            tableBody.innerHTML="";
             tableBody.appendChild(row);
         });
     }
