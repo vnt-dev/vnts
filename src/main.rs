@@ -258,8 +258,8 @@ async fn main() {
     log::info!("监听udp端口: {:?}", port);
     println!("监听udp端口: {:?}", port);
     let tcp = create_tcp(port).unwrap();
-    log::info!("监听tcp端口: {:?}", port);
-    println!("监听tcp端口: {:?}", port);
+    log::info!("监听tcp/ws端口: {:?}", port);
+    println!("监听tcp/ws端口: {:?}", port);
     #[cfg(feature = "web")]
     let http = if web_port != 0 {
         let http = create_tcp(web_port).unwrap();

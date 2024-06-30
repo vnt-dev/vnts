@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use crate::protocol::body::ENCRYPTION_RESERVED;
-use std::fmt::Formatter;
 use std::net::Ipv4Addr;
 use std::{fmt, io};
 
@@ -9,7 +8,7 @@ use std::{fmt, io};
    0                                            15                                              31
    0  1  2  3  4  5  6  7  8  9  0  1  2  3  4  5  6  7  8  9  0  1  2  3  4  5  6  7  8  9  0  1
   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-  |e |s |u |u|   版本(4) |      协议(8)          |      上层协议(8)        | 初始ttl(4) | 生存时间(4) |
+  |e |s |x |u|   版本(4) |      协议(8)          |      上层协议(8)        | 初始ttl(4) | 生存时间(4) |
   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
   |                                          源ip地址(32)                                         |
   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -17,13 +16,14 @@ use std::{fmt, io};
   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
   |                                           数据体                                              |
   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-  注：e为是否加密标志，s为服务端通信包标志，u未使用
+  注：e为是否加密标志，s为服务端通信包标志，x扩展标志，u未使用
 */
 pub const HEAD_LEN: usize = 12;
 
 pub mod body;
 pub mod control_packet;
 pub mod error_packet;
+pub mod extension;
 pub mod ip_turn_packet;
 pub mod other_turn_packet;
 pub mod service_packet;
@@ -44,9 +44,9 @@ impl From<u8> for Version {
     }
 }
 
-impl From<Version> for u8 {
-    fn from(val: Version) -> Self {
-        match val {
+impl Into<u8> for Version {
+    fn into(self) -> u8 {
+        match self {
             Version::V2 => 2,
             Version::Unknown(val) => val,
         }
@@ -81,9 +81,9 @@ impl From<u8> for Protocol {
     }
 }
 
-impl From<Protocol> for u8 {
-    fn from(val: Protocol) -> Self {
-        match val {
+impl Into<u8> for Protocol {
+    fn into(self) -> u8 {
+        match self {
             Protocol::Service => 1,
             Protocol::Error => 2,
             Protocol::Control => 3,
@@ -104,6 +104,10 @@ pub struct NetPacket<B> {
 }
 
 impl<B: AsRef<[u8]>> NetPacket<B> {
+    pub fn unchecked(buffer: B) -> Self {
+        let data_len = buffer.as_ref().len();
+        Self { data_len, buffer }
+    }
     pub fn new(buffer: B) -> io::Result<NetPacket<B>> {
         let data_len = buffer.as_ref().len();
         Self::new0(data_len, buffer)
@@ -126,14 +130,15 @@ impl<B: AsRef<[u8]>> NetPacket<B> {
                 "length overflow",
             ));
         }
-        if HEAD_LEN > data_len {
+        if data_len < 12 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "length overflow",
+                "data_len too short",
             ));
         }
         Ok(NetPacket { data_len, buffer })
     }
+    #[inline]
     pub fn buffer(&self) -> &[u8] {
         &self.buffer.as_ref()[..self.data_len]
     }
@@ -159,6 +164,10 @@ impl<B: AsRef<[u8]>> NetPacket<B> {
     /// 网关通信的标识
     pub fn is_gateway(&self) -> bool {
         self.buffer.as_ref()[0] & 0x40 == 0x40
+    }
+    /// 扩展协议
+    pub fn is_extension(&self) -> bool {
+        self.buffer.as_ref()[0] & 0x20 == 0x20
     }
     pub fn version(&self) -> Version {
         Version::from(self.buffer.as_ref()[0] & 0x0F)
@@ -192,6 +201,9 @@ impl<B: AsRef<[u8]>> NetPacket<B> {
 }
 
 impl<B: AsRef<[u8]> + AsMut<[u8]>> NetPacket<B> {
+    pub fn head_mut(&mut self) -> &mut [u8] {
+        &mut self.buffer.as_mut()[..12]
+    }
     pub fn buffer_mut(&mut self) -> &mut [u8] {
         &mut self.buffer.as_mut()[..self.data_len]
     }
@@ -204,10 +216,16 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> NetPacket<B> {
     }
     pub fn set_gateway_flag(&mut self, is_gateway: bool) {
         if is_gateway {
-            // 后面的版本再改为0x40，改了之后不兼容1.2.5之前的版本
-            self.buffer.as_mut()[0] = self.buffer.as_ref()[0] | 0x50
+            self.buffer.as_mut()[0] = self.buffer.as_ref()[0] | 0x40
         } else {
             self.buffer.as_mut()[0] = self.buffer.as_ref()[0] & 0xBF
+        };
+    }
+    pub fn set_extension_flag(&mut self, is_extension: bool) {
+        if is_extension {
+            self.buffer.as_mut()[0] = self.buffer.as_ref()[0] | 0x20
+        } else {
+            self.buffer.as_mut()[0] = self.buffer.as_ref()[0] & 0xDF
         };
     }
     pub fn set_default_version(&mut self) {
@@ -266,6 +284,10 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> NetPacket<B> {
         self.data_len = data_len;
         Ok(())
     }
+    pub fn set_payload_len(&mut self, payload_len: usize) -> io::Result<()> {
+        let data_len = HEAD_LEN + payload_len;
+        self.set_data_len(data_len)
+    }
     pub fn set_data_len_max(&mut self) {
         self.data_len = self.buffer.as_ref().len();
     }
@@ -284,22 +306,6 @@ impl<B: AsRef<[u8]>> fmt::Debug for NetPacket<B> {
             .field("source", &self.source())
             .field("destination", &self.destination())
             .field("payload", &self.payload())
-            .finish()
-    }
-}
-
-impl<B: AsRef<[u8]>> fmt::Display for NetPacket<B> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("NetPacket")
-            .field("version", &self.version())
-            .field("gateway", &self.is_gateway())
-            .field("encrypt", &self.is_encrypt())
-            .field("protocol", &self.protocol())
-            .field("transport_protocol", &self.transport_protocol())
-            .field("ttl", &self.ttl())
-            .field("source_ttl", &self.source_ttl())
-            .field("source", &self.source())
-            .field("destination", &self.destination())
             .finish()
     }
 }

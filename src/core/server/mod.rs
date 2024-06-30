@@ -12,6 +12,7 @@ mod tcp;
 mod udp;
 #[cfg(feature = "web")]
 mod web;
+mod websocket;
 
 pub async fn start(
     udp: std::net::UdpSocket,

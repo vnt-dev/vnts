@@ -1,6 +1,6 @@
 [package]
 name = "vnts"
-version = "1.2.9"
+version = "1.2.11"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -22,6 +22,7 @@ ring = { version = "0.17", optional = true }
 rand = "0.8"
 sha2 = { version = "0.10", features = ["oid"] }
 colored = "2.1"
+anyhow = "1.0.82"
 
 thiserror = "1"
 chrono = "0.4"
@@ -36,6 +37,7 @@ socket2 = { version = "0.5", features = ["all"] }
 actix-web = { version = "4.5", optional = true }
 actix-files = { version = "0.6", optional = true }
 actix-web-static-files = { version = "4.0.1", optional = true }
+tokio-tungstenite = "0.23.1"
 
 serde = { version = "1", features = ["derive"] }
 crossbeam-utils = "0.8"

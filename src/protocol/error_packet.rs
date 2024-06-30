@@ -1,6 +1,4 @@
-#![allow(dead_code)]
-
-use tokio::io;
+use std::io;
 
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
 pub enum Protocol {
