@@ -569,10 +569,14 @@ impl ServerPacketHandler {
     ) -> anyhow::Result<()> {
         let source = net_packet.source();
         let dest = net_packet.destination();
+        let destination = u32::from(dest);
+        if destination == context.virtual_ip {
+            return Ok(());
+        }
         if dest.is_broadcast() || dest == context.broadcast {
             // 广播
             for peer in context.network_info.read().clients.values() {
-                if !peer.online {
+                if !peer.online || destination == peer.virtual_ip {
                     continue;
                 }
                 if let Some(sender) = &peer.wg_sender {
@@ -581,7 +585,7 @@ impl ServerPacketHandler {
                     }
                 }
             }
-        } else if let Some(peer) = context.network_info.read().clients.get(&dest.into()) {
+        } else if let Some(peer) = context.network_info.read().clients.get(&destination) {
             // 点对点
             if peer.online {
                 if let Some(sender) = &peer.wg_sender {
@@ -600,11 +604,13 @@ impl ServerPacketHandler {
         exclude: &[Ipv4Addr],
     ) -> io::Result<()> {
         let client_secret = net_packet.is_encrypt();
+        let destination = u32::from(net_packet.destination());
         for (ip, client_info) in &context.network_info.read().clients {
             if client_info.online
-                && !exclude.contains(&(*ip).into())
+                && destination != *ip
                 && client_info.client_secret == client_secret
                 && client_info.wireguard.is_none()
+                && !exclude.contains(&(*ip).into())
             {
                 if let Some(sender) = &client_info.tcp_sender {
                     let _ = sender.try_send(net_packet.buffer().to_vec());
