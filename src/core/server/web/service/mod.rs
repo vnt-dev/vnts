@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -165,10 +165,17 @@ impl VntsWebService {
         Ok(wg_data)
     }
     fn check_wg_config(config: &CreateWgConfig) -> anyhow::Result<([u8; 32], [u8; 32])> {
-        let addr = SocketAddr::from_str(&config.vnts_endpoint).context("服务器地址错误")?;
-        if addr.ip().is_unspecified() || addr.port() == 0 {
-            Err(anyhow!("服务端地址错误"))?
+        match config.vnts_endpoint.to_socket_addrs() {
+            Ok(mut addr) => {
+                if let Some(addr) = addr.next() {
+                    if addr.ip().is_unspecified() || addr.port() == 0 {
+                        Err(anyhow!("服务端地址错误"))?
+                    }
+                }
+            }
+            Err(e) => Err(anyhow!("服务端地址解析失败:{}", e))?,
         }
+
         let private_key = general_purpose::STANDARD
             .decode(&config.private_key)
             .context("私钥错误")?;
