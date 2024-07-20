@@ -7,7 +7,7 @@ use tokio::sync::mpsc::Sender;
 use crate::cipher::RsaCipher;
 use crate::core::service::client::ClientPacketHandler;
 use crate::core::service::server::ServerPacketHandler;
-use crate::core::store::cache::AppCache;
+use crate::core::store::cache::{AppCache, VntContext};
 use crate::error::*;
 use crate::protocol::NetPacket;
 use crate::ConfigInfo;
@@ -41,13 +41,17 @@ impl PacketHandler {
 }
 
 impl PacketHandler {
+    pub async fn leave(&self, context: VntContext) {
+        self.server.leave(context).await;
+    }
     pub async fn handle<B: AsRef<[u8]> + AsMut<[u8]>>(
         &self,
+        context: &mut VntContext,
         net_packet: NetPacket<B>,
         addr: SocketAddr,
         tcp_sender: &Option<Sender<Vec<u8>>>,
     ) -> Option<NetPacket<Vec<u8>>> {
-        self.handle0(net_packet, addr, tcp_sender)
+        self.handle0(context, net_packet, addr, tcp_sender)
             .await
             .unwrap_or_else(|e| {
                 log::error!("addr={},{:?}", addr, e);
@@ -56,14 +60,17 @@ impl PacketHandler {
     }
     async fn handle0<B: AsRef<[u8]> + AsMut<[u8]>>(
         &self,
+        context: &mut VntContext,
         net_packet: NetPacket<B>,
         addr: SocketAddr,
         tcp_sender: &Option<Sender<Vec<u8>>>,
     ) -> Result<Option<NetPacket<Vec<u8>>>> {
         if net_packet.is_gateway() {
-            self.server.handle(net_packet, addr, tcp_sender).await
+            self.server
+                .handle(context, net_packet, addr, tcp_sender)
+                .await
         } else {
-            self.client.handle(net_packet, addr)?;
+            self.client.handle(context, net_packet, addr).await?;
             Ok(None)
         }
     }

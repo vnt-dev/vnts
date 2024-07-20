@@ -1,4 +1,5 @@
 use crate::core::service::PacketHandler;
+use crate::core::store::cache::VntContext;
 use crate::protocol::NetPacket;
 use anyhow::Context;
 use futures_util::{SinkExt, StreamExt};
@@ -14,16 +15,23 @@ pub async fn handle_websocket_connection(
     handler: PacketHandler,
 ) {
     tokio::spawn(async move {
-        if let Err(e) = handle_websocket_connection0(stream, addr, handler).await {
+        let mut context = VntContext {
+            link_context: None,
+            server_cipher: None,
+            link_address: addr,
+        };
+        if let Err(e) = handle_websocket_connection0(&mut context, stream, addr, &handler).await {
             log::warn!("websocket err {:?} {}", e, addr);
         }
+        handler.leave(context).await;
     });
 }
 
 async fn handle_websocket_connection0(
+    context: &mut VntContext,
     stream: TcpStream,
     addr: SocketAddr,
-    handler: PacketHandler,
+    handler: &PacketHandler,
 ) -> anyhow::Result<()> {
     let ws_stream = accept_async(stream)
         .await
@@ -42,13 +50,14 @@ async fn handle_websocket_connection0(
         let _ = ws_write.close().await;
     });
     let sender = Some(sender);
+
     while let Some(msg) = ws_read.next().await {
         let msg = msg.with_context(|| format!("Error during WebSocket read {}", addr))?;
         match msg {
             Message::Text(txt) => log::info!("Received text message: {} {}", txt, addr),
             Message::Binary(mut data) => {
                 let packet = NetPacket::new0(data.len(), &mut data)?;
-                if let Some(rs) = handler.handle(packet, addr, &sender).await {
+                if let Some(rs) = handler.handle(context, packet, addr, &sender).await {
                     if sender
                         .as_ref()
                         .unwrap()

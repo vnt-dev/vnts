@@ -123,7 +123,27 @@ body {
     padding-top: 20px;
     margin-left: 300px;
 }
+button{
+    padding: 10px 20px;
+    margin: 10px 5px;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 16px;
+    transition: background-color 0.3s, box-shadow 0.3s;
+}
+#addWireGuard {
+    background-color: #4CAF50; /* 绿色背景 */
+    color: white;
+    position: absolute;
+    right: 50px;
+    top:20px;
+}
 
+#addWireGuard:hover {
+    background-color: #45a049; /* 鼠标悬停时变暗 */
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.2); /* 阴影效果 */
+}
 /* 下拉菜单按钮 */
 
 

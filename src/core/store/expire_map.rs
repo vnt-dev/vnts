@@ -26,7 +26,7 @@ struct Value<V> {
 impl<K, V> ExpireMap<K, V> {
     pub fn new<F>(call: F) -> ExpireMap<K, V>
     where
-        F: Fn(K, V) + Send + 'static,
+        F: Fn(&K, &V) -> Option<Duration> + Send + 'static,
         K: Eq + Hash + Clone + Sync + Send + 'static,
         V: Clone + Sync + Send + 'static,
     {
@@ -66,6 +66,14 @@ where
             .await
             .unwrap();
     }
+    /// remove出去的不会执行过期回调
+    pub fn remove(&self, k: &K) -> Option<V> {
+        if let Some(v) = self.base.write().remove(k) {
+            Some(v.val)
+        } else {
+            None
+        }
+    }
     pub fn get(&self, k: &K) -> Option<V> {
         if let Some(v) = self.base.read().get(k) {
             // 延长过期时间
@@ -78,7 +86,10 @@ where
     pub fn get_val(&self, k: &K) -> Option<V> {
         self.base.read().get(k).map(|v| v.val.clone())
     }
-    fn expire_call(&self, k: &K) -> Op<K, V> {
+    fn expire_call<F>(&self, k: &K, f: &F) -> Op<K, V>
+    where
+        F: Fn(&K, &V) -> Option<Duration>,
+    {
         let mut write_guard = self.base.write();
         if let Some(v) = write_guard.get(k) {
             let now = Instant::now();
@@ -87,10 +98,14 @@ where
                 // 过期时间更新了
                 return Op::Reset(instant);
             } else {
-                //删除key
-                if let Some((k, v)) = write_guard.remove_entry(k) {
-                    //执行回调
-                    return Op::Remove(k, v.val);
+                //执行过期回调
+                if let Some(v) = f(k, &v.val) {
+                    return Op::Reset(now.add(v));
+                } else {
+                    //删除key
+                    if let Some((k, v)) = write_guard.remove_entry(k) {
+                        return Op::Remove(k, v.val);
+                    }
                 }
             }
         }
@@ -142,7 +157,7 @@ async fn expire_task<K, V, F>(mut receiver: Receiver<DelayedTask<K>>, map: Expir
 where
     K: Eq + Hash + Clone,
     V: Clone,
-    F: Fn(K, V),
+    F: Fn(&K, &V) -> Option<Duration>,
 {
     let mut binary_heap = BinaryHeap::<DelayedTask<K>>::with_capacity(32);
     loop {
@@ -165,17 +180,13 @@ where
                 }
             } else if let Some(mut task) = binary_heap.pop() {
                 //执行过期逻辑
-                match map.expire_call(&task.k) {
+                match map.expire_call(&task.k, &f) {
                     Op::Reset(time) => {
                         //没有过期，重新加入监听
-
                         task.time = time;
                         binary_heap.push(task);
                     }
-                    Op::Remove(k, v) => {
-                        //执行回调
-                        f(k, v)
-                    }
+                    Op::Remove(_, _) => {}
                     Op::None => {}
                 }
             }
