@@ -1,0 +1,174 @@
+.option-cell {
+    display: flex;
+    gap: 10px; /* 间隔 */
+}
+
+.option-cell button {
+    padding: 5px 10px;
+    font-size: 14px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background-color 0.3s ease;
+}
+
+.option-cell button.delete-button {
+    background-color: #f44336; /* 红色 */
+    color: white;
+}
+
+.option-cell button.delete-button:hover {
+    background-color: #d32f2f; /* 深红色 */
+}
+
+.option-cell button.view-button {
+    background-color: #4CAF50; /* 绿色 */
+    color: white;
+}
+
+.option-cell button.view-button:hover {
+    background-color: #388E3C; /* 深绿色 */
+}
+
+/* wg弹窗样式 */
+.modal {
+    display: none; /* 默认隐藏 */
+    position: fixed;
+    z-index: 1;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    overflow: auto;
+    background-color: rgb(0,0,0);
+    background-color: rgba(0,0,0,0.4);
+    padding-top: 60px;
+}
+
+.modal-content {
+    position: relative;
+    background-color: #fefefe;
+    width: 380px;
+    height: 380px;
+    margin: 5% auto;
+    padding: 50px;
+    border: 1px solid #888;
+    text-align: center;
+    box-sizing: border-box;
+    border-radius: 5px;
+}
+.add-modal-content{
+    position: relative;
+    background-color: #fefefe;
+    margin: 5% auto;
+    padding: 20px;
+    border: 1px solid #888;
+    width: 80%;
+    max-width: 600px;
+    box-sizing: border-box;
+    border-radius: 5px;
+}
+.form-group {
+    display: flex;
+    align-items: center;
+    margin: 10px 0;
+}
+
+.form-group label {
+    flex: 1;
+    margin-right: 10px;
+}
+
+.form-group input {
+    flex: 2;
+    padding: 10px;
+    box-sizing: border-box;
+}
+
+.modal button {
+    padding: 10px 20px;
+    margin: 10px 5px;
+}
+
+.button-container {
+    text-align: center;
+}
+.button-container button {
+    padding: 10px 20px;
+    margin: 10px 5px;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 16px;
+    transition: background-color 0.3s, box-shadow 0.3s;
+}
+
+.error {
+    color: red;
+    font-size: 14px;
+}
+
+#confirmButton {
+    background-color: #4CAF50; /* 绿色背景 */
+    color: white;
+}
+
+#confirmButton:hover {
+    background-color: #45a049; /* 鼠标悬停时变暗 */
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.2); /* 阴影效果 */
+}
+
+#cancelButton {
+    background-color: #f44336; /* 红色背景 */
+    color: white;
+}
+
+#cancelButton:hover {
+    background-color: #e53935; /* 鼠标悬停时变暗 */
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.2); /* 阴影效果 */
+}
+.modal-content .title{
+    position: absolute;
+    left: 20px;
+    top: 10px;
+}
+
+.close {
+    position: absolute;
+    right: 20px;
+    top: 10px;
+    color: #aaa;
+    font-size: 28px;
+    font-weight: bold;
+}
+
+.close:hover,
+.close:focus {
+    color: black;
+    text-decoration: none;
+    cursor: pointer;
+}
+
+.hidden {
+    display: none;
+}
+
+.visible {
+    display: block;
+}
+#qrcode {
+    margin: 0 auto; /* 居中 */
+    width: 260px; /* 固定宽度 */
+    height: 260px; /* 固定高度 */
+}
+pre {
+    text-align: left; /* 左对齐 */
+    white-space: pre-wrap; /* 自动换行 */
+    word-break: break-all;
+    user-select: auto;
+}
+#toggleButton{
+    position: absolute;
+    bottom: 10px;
+    left: 116px;
+}

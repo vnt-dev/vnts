@@ -64,13 +64,25 @@ function post(url, data, success, error,) {
 }
 
 function postLogin(requestData, success, error) {
-    post("login", requestData, success, error)
+    post("api/login", requestData, success, error)
 }
 
 function postGroupList(requestData, success, error) {
-    post("group_list", requestData, success, error)
+    post("api/group_list", requestData, success, error)
 }
 
 function postGroupInfo(requestData, success, error) {
-    post("group_info", requestData, success, error)
+    post("api/group_info", requestData, success, error)
+}
+
+function postWgPrivateKey(requestData, success, error) {
+    post("api/private_key", requestData, success, error)
+}
+
+function postCreateWG(requestData, success, error) {
+    post("api/create_wg_config", requestData, success, error)
+}
+
+function postRemoveClient(requestData, success, error) {
+    post("api/remove_client", requestData, success, error)
 }

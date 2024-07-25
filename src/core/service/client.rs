@@ -3,14 +3,13 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use tokio::net::UdpSocket;
-
 use crate::cipher::RsaCipher;
-use crate::core::entity::ClientInfo;
-use crate::core::store::cache::{AppCache, Context};
+use crate::core::store::cache::{AppCache, LinkVntContext, VntContext};
 use crate::error::*;
 use crate::protocol::NetPacket;
 use crate::ConfigInfo;
+use tokio::net::UdpSocket;
+use tokio::sync::mpsc::Sender;
 
 #[derive(Clone)]
 pub struct ClientPacketHandler {
@@ -37,25 +36,26 @@ impl ClientPacketHandler {
 }
 
 impl ClientPacketHandler {
-    pub fn handle<B: AsRef<[u8]> + AsMut<[u8]>>(
+    pub async fn handle<B: AsRef<[u8]> + AsMut<[u8]>>(
         &self,
+        context: &VntContext,
         net_packet: NetPacket<B>,
-        addr: SocketAddr,
+        _addr: SocketAddr,
     ) -> Result<()> {
-        if let Some(context) = self.cache.get_context(&addr) {
-            self.handle0(net_packet, context)
+        if let Some(context) = &context.link_context {
+            self.handle0(context, net_packet).await
         } else {
-            Err(Error::Disconnect)
+            Err(Error::Disconnect)?
         }
     }
 }
 
 impl ClientPacketHandler {
     /// 转发到目标地址
-    fn handle0<B: AsRef<[u8]> + AsMut<[u8]>>(
+    async fn handle0<B: AsRef<[u8]> + AsMut<[u8]>>(
         &self,
+        context: &LinkVntContext,
         mut net_packet: NetPacket<B>,
-        context: Context,
     ) -> Result<()> {
         if net_packet.incr_ttl() > 1 {
             if self.config.check_finger {
@@ -65,33 +65,65 @@ impl ClientPacketHandler {
             let destination = net_packet.destination();
             if destination.is_broadcast() || self.config.broadcast == destination {
                 //处理广播
-                broadcast(&self.udp, context, net_packet);
-            } else if let Some(client_info) =
-                context.network_info.read().clients.get(&destination.into())
-            {
-                send_one(&self.udp, client_info, &net_packet);
+                broadcast(context, &self.udp, net_packet).await;
+            } else {
+                let is_encrypt = net_packet.is_encrypt();
+                let source_ip = u32::from(net_packet.source());
+                let rs = context
+                    .network_info
+                    .read()
+                    .clients
+                    .get(&destination.into())
+                    .filter(|v| {
+                        v.wireguard.is_none()
+                            && v.online
+                            && v.client_secret == is_encrypt
+                            && v.virtual_ip != source_ip
+                    })
+                    .map(|v| (v.address, v.tcp_sender.clone()));
+                if let Some((peer_addr, peer_tcp_sender)) = rs {
+                    send_one(&self.udp, peer_addr, peer_tcp_sender, &net_packet).await;
+                }
             }
         }
         Ok(())
     }
 }
 
-fn broadcast<B: AsRef<[u8]>>(udp_socket: &UdpSocket, context: Context, net_packet: NetPacket<B>) {
-    for client_info in context.network_info.read().clients.values() {
-        send_one(udp_socket, client_info, &net_packet);
+async fn broadcast<B: AsRef<[u8]>>(
+    context: &LinkVntContext,
+    udp_socket: &UdpSocket,
+    net_packet: NetPacket<B>,
+) {
+    let is_encrypt = net_packet.is_encrypt();
+    let source_ip = u32::from(net_packet.source());
+    let x: Vec<_> = context
+        .network_info
+        .read()
+        .clients
+        .values()
+        .filter(|v| {
+            v.wireguard.is_none()
+                && v.online
+                && v.client_secret == is_encrypt
+                && v.virtual_ip != source_ip
+        })
+        .map(|v| (v.address, v.tcp_sender.clone()))
+        .collect();
+    for (peer_addr, peer_tcp_sender) in x {
+        send_one(udp_socket, peer_addr, peer_tcp_sender, &net_packet).await;
     }
 }
 
-fn send_one<B: AsRef<[u8]>>(
+async fn send_one<B: AsRef<[u8]>>(
     udp_socket: &UdpSocket,
-    client_info: &ClientInfo,
+    peer_addr: SocketAddr,
+    peer_tcp_sender: Option<Sender<Vec<u8>>>,
     net_packet: &NetPacket<B>,
 ) {
-    if client_info.online && client_info.client_secret == net_packet.is_encrypt() {
-        if let Some(sender) = &client_info.tcp_sender {
-            let _ = sender.try_send(net_packet.buffer().to_vec());
-        } else {
-            let _ = udp_socket.try_send_to(net_packet.buffer(), client_info.address);
-        }
+    if let Some(sender) = &peer_tcp_sender {
+        let _ = sender.send(net_packet.buffer().to_vec()).await;
+    } else {
+        let _ = udp_socket.send_to(net_packet.buffer(), peer_addr).await;
     }
 }

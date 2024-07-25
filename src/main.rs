@@ -1,11 +1,15 @@
+use aes_gcm::aead::rand_core::RngCore;
+use anyhow::{anyhow, Context};
+use base64::engine::general_purpose;
+use base64::Engine;
+use boringtun::x25519::{PublicKey, StaticSecret};
+use clap::Parser;
 use std::collections::HashSet;
-use std::fmt::Display;
+use std::fmt::{Debug, Display, Formatter};
 use std::io;
 use std::io::Write;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
-
-use clap::Parser;
 
 use crate::cipher::RsaCipher;
 
@@ -15,6 +19,7 @@ mod error;
 mod generated_serial_number;
 mod proto;
 mod protocol;
+
 pub const VNT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// 默认网关信息
@@ -56,9 +61,12 @@ pub struct StartArgs {
     /// web后台用户密码，默认为admin
     #[arg(short = 'W', long)]
     password: Option<String>,
+    /// wg私钥，使用base64编码
+    #[arg(long = "wg")]
+    wg_secret_key: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ConfigInfo {
     pub port: u16,
     pub white_token: Option<HashSet<String>>,
@@ -70,6 +78,28 @@ pub struct ConfigInfo {
     pub username: String,
     #[cfg(feature = "web")]
     pub password: String,
+    pub wg_secret_key: StaticSecret,
+    pub wg_public_key: PublicKey,
+}
+impl Debug for ConfigInfo {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConfigInfo")
+            .field("port", &self.port)
+            .field("white_token", &self.white_token)
+            .field("gateway", &self.gateway)
+            .field("broadcast", &self.broadcast)
+            .field("netmask", &self.netmask)
+            .field("check_finger", &self.check_finger)
+            .field(
+                "wg_secret_key",
+                &general_purpose::STANDARD.encode(&self.wg_secret_key),
+            )
+            .field(
+                "wg_public_key",
+                &general_purpose::STANDARD.encode(&self.wg_public_key),
+            )
+            .finish()
+    }
 }
 
 fn log_init(root_path: PathBuf, log_path: Option<String>) {
@@ -231,6 +261,22 @@ async fn main() {
     if check_finger {
         println!("转发校验数据指纹，客户端必须增加--finger参数");
     }
+    let wg_secret_key: [u8; 32] = if let Some(wg_secret_key) = args.wg_secret_key {
+        let wg_secret_key = general_purpose::STANDARD
+            .decode(wg_secret_key)
+            .context("wg私钥错误")
+            .unwrap();
+        wg_secret_key
+            .try_into()
+            .map_err(|_| anyhow!("wg私钥错误"))
+            .unwrap()
+    } else {
+        let mut wg_secret_key = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut wg_secret_key);
+        wg_secret_key
+    };
+    let wg_secret_key = boringtun::x25519::StaticSecret::from(wg_secret_key);
+    let wg_public_key = boringtun::x25519::PublicKey::from(&wg_secret_key);
     let config = ConfigInfo {
         port,
         white_token,
@@ -242,6 +288,8 @@ async fn main() {
         username: args.username.unwrap_or_else(|| "admin".into()),
         #[cfg(feature = "web")]
         password: args.password.unwrap_or_else(|| "admin".into()),
+        wg_secret_key,
+        wg_public_key,
     };
     let rsa = match RsaCipher::new(root_path) {
         Ok(rsa) => {
@@ -258,8 +306,8 @@ async fn main() {
     log::info!("监听udp端口: {:?}", port);
     println!("监听udp端口: {:?}", port);
     let tcp = create_tcp(port).unwrap();
-    log::info!("监听tcp端口: {:?}", port);
-    println!("监听tcp端口: {:?}", port);
+    log::info!("监听tcp/ws端口: {:?}", port);
+    println!("监听tcp/ws端口: {:?}", port);
     #[cfg(feature = "web")]
     let http = if web_port != 0 {
         let http = create_tcp(web_port).unwrap();

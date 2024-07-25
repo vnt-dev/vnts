@@ -4,9 +4,11 @@
     <meta charset="UTF-8">
     <script src="./js/jquery-3.7.1.min.js"></script>
     <script src="./js/g6.min.js"></script>
+    <script src="./js/qrcode.min.js"></script>
     <script src="./js/api-post.js"></script>
 
     <link rel="stylesheet" href="./css/select.css">
+    <link rel="stylesheet" href="./css/index.css">
     <title>vnts-web</title>
     <style>
 
@@ -91,7 +93,7 @@
 <div class="topBox">
     <div class="select-content">
         <!--        <label>组网标识：</label>-->
-        <input type="hidden" name="newMachineId">
+        <input type="hidden" name="groupId">
         <input type="text" name="select_input" id="select_input" class="select-input" value="" autocomplete="off"
                placeholder="Search..."/>
         <div id="search_select" class="search-select">
@@ -101,6 +103,7 @@
         </div>
         <span class="group_len"></span>
     </div>
+    <button id="addWireGuard">接入WireGuard客户端</button>
 </div>
 <div id="container_content">
     <div id="group_info">
@@ -125,6 +128,7 @@
                     <th>连接时间</th>
                     <th>链接地址</th>
                     <th>设备 ID</th>
+                    <th>操作</th>
                 </tr>
                 </thead>
                 <tbody>
@@ -134,7 +138,51 @@
     </div>
 
 </div>
-
+<!-- wg信息弹窗 -->
+<div id="wgConfigModal" class="modal">
+    <div class="modal-content">
+        <span class="title">使用WireGuard客户端接入</span>
+        <span class="close">&times;</span>
+        <div id="qrcode" class="visible"></div>
+        <pre id="textConfig" class="hidden"></pre>
+        <button id="toggleButton">显示文本配置</button>
+    </div>
+</div>
+<!-- 添加wg弹窗 -->
+<div id="addModal" class="modal">
+    <div class="add-modal-content">
+        <span class="close">&times;</span>
+        <h2>WireGuard配置</h2>
+        <div class="form-group">
+            <label for="groupId">组网编号</label>
+            <input type="text" id="groupId" placeholder="组网编号">
+        </div>
+        <div class="form-group">
+            <label for="virtualIP">虚拟IP</label>
+            <input type="text" id="virtualIP" placeholder="为空则自动分配">
+        </div>
+        <div class="form-group">
+            <label for="deviceName">设备名称</label>
+            <input type="text" id="deviceName" placeholder="设备名称">
+        </div>
+        <div class="form-group">
+            <label for="privateKey">PrivateKey</label>
+            <input type="text" id="privateKey" placeholder="PrivateKey">
+        </div>
+        <div class="form-group">
+            <label for="endpoint">Endpoint</label>
+            <input type="text" id="endpoint" placeholder="服务器UDP链接地址">
+        </div>
+        <div class="form-group">
+            <label for="persistentKeepalive">PersistentKeepalive</label>
+            <input type="number" id="persistentKeepalive" value="10" placeholder="PersistentKeepalive">
+        </div>
+        <div class="button-container">
+            <button id="confirmButton">确认</button>
+        </div>
+        <div class="error" id="addWGError"></div>
+    </div>
+</div>
 </body>
 <script src="js/group-node.js"></script>
 
@@ -158,7 +206,7 @@
         }
         var options = '';
         for (var i = 0; i < listArr.length; i++) {
-            opt = '<li class="li-select" data-newMachineId="' + listArr[i] + '">' + listArr[i] + '</li>';
+            opt = '<li class="li-select" data-groupId="' + listArr[i] + '">' + listArr[i] + '</li>';
             options += opt;
         }
         if (options == '') {
@@ -196,12 +244,11 @@
         $('#select_ul').delegate('.li-select', 'click', function () {
             $('#select_ul .li-select').removeClass('li-hover');
             var selectText = $(this).html();
-            var newMachineIdVal = $($(this)[0]).attr("data-newMachineId");
+            var groupIdVal = $($(this)[0]).attr("data-groupId");
             $('#select_input').val(selectText);
             $('#search_select').hide();
-            $("input[name='newMachineId']").val(newMachineIdVal);
-            // console.log(newMachineIdVal);
-            getGroupInfoFunc(newMachineIdVal)
+            $("input[name='groupId']").val(groupIdVal);
+            getGroupInfoFunc(groupIdVal)
 
         });
         $('#select_ul').delegate('.li-select', 'mouseover', function () {
@@ -215,9 +262,10 @@
         $('.group_len').html('(' + tempArr.length + ')')
     }
 
-    function displayDeviceInfo(devices) {
+    function displayDeviceInfo(groupId, data) {
+        let devices = data.clients;
         const tableBody = document.getElementById('deviceTable').getElementsByTagName('tbody')[0];
-        tableBody.innerHTML="";
+        tableBody.innerHTML = "";
         devices.forEach(device => {
             const row = document.createElement('tr');
 
@@ -248,7 +296,7 @@
             const lastJoinTimeCell = document.createElement('td');
             lastJoinTimeCell.textContent = device.last_join_time;
             row.appendChild(lastJoinTimeCell);
-            
+
             const addressCell = document.createElement('td');
             addressCell.textContent = device.address;
             row.appendChild(addressCell);
@@ -256,11 +304,132 @@
             const deviceIdCell = document.createElement('td');
             deviceIdCell.textContent = device.device_id;
             row.appendChild(deviceIdCell);
+            // 操作栏
+            const optionCell = document.createElement('td');
+            optionCell.className = 'option-cell';
+            const deleteButton = document.createElement('button');
+            optionCell.appendChild(deleteButton);
+            deleteButton.className = 'delete-button';
+            deleteButton.textContent = '删除';
+            deleteButton.onclick = function () {
+                const confirmed = window.confirm('你确定要删除这条记录吗？');
+                if (confirmed) {
+                    postRemoveClient({'group_id': groupId, 'virtual_ip': device.virtual_ip}, function () {
+                        location.reload();
+                    });
+                    row.remove();
+                }
+
+            };
+            let wg_config = device.wg_config;
+            if (wg_config) {
+                function generateWireguardConfig(privateKey, ip, prefix, publicKey, allowedIPs, endpoint, persistentKeepalive) {
+                    return `[Interface]
+PrivateKey = ${privateKey}
+Address = ${ip}/${prefix}
+[Peer]
+PublicKey = ${publicKey}
+AllowedIPs = ${allowedIPs}
+Endpoint = ${endpoint}
+PersistentKeepalive = ${persistentKeepalive}`;
+                }
+
+                const wireguardConfig = generateWireguardConfig(wg_config.secret_key, wg_config.ip, wg_config.prefix,
+                    data.vnts_public_key, wg_config.vnts_allowed_ips, wg_config.vnts_endpoint, wg_config.persistent_keepalive);
+                console.log(wireguardConfig);
+                const viewButton = document.createElement('button');
+                viewButton.textContent = '接入';
+                viewButton.className = 'view-button';
+                viewButton.onclick = function () {
+                    // 显示弹窗
+                    $('#wgConfigModal').show();
+                    // 设置文本配置
+                    $('#textConfig').text(wireguardConfig);
+                    $('#qrcode').html('');
+                    // 生成二维码
+                    new QRCode(document.getElementById("qrcode"), {
+                        correctLevel: 3,
+                        text: wireguardConfig,
+                        width: 256,
+                        height: 256
+                    });
+
+                };
+                optionCell.appendChild(viewButton);
+            }
+            row.appendChild(optionCell);
             tableBody.appendChild(row);
         });
     }
 </script>
 <script>
+    let groupId;
+    let deviceId = 'wg' + new Date().getTime();
+    $('#addWireGuard').on('click', function () {
+        $('#groupId').val(groupId);
+        $('#deviceName').val('WireGuard');
+        postWgPrivateKey({}, function (data) {
+            $('#privateKey').val(data.data);
+            $('.error').text('');
+            $('#addModal').show();
+        })
+    });
+    $('#confirmButton').on('click', function () {
+        // 清除以前的错误信息
+        $('.error').text('');
+        // 获取输入值
+        const groupId = $('#groupId').val().trim();
+        const virtualIP = $('#virtualIP').val().trim();
+        const deviceName = $('#deviceName').val().trim();
+        const privateKey = $('#privateKey').val().trim();
+        const endpoint = $('#endpoint').val().trim();
+        const persistentKeepalive = $('#persistentKeepalive').val().trim();
+        // 校验输入值
+        if (!groupId) {
+            $('#addWGError').text('组网编号不能为空');
+            return
+        }
+
+        if (!deviceName) {
+            $('#addWGError').text('设备名称不能为空');
+            return;
+        }
+
+        if (!privateKey) {
+            $('#addWGError').text('PrivateKey不能为空');
+            return;
+        }
+
+        if (!endpoint) {
+            $('#addWGError').text('Endpoint不能为空');
+            return;
+        }
+
+        if (persistentKeepalive === '') {
+            $('#addWGError').text('PersistentKeepalive不能为空');
+            return;
+        } else if (isNaN(persistentKeepalive) || persistentKeepalive < 0 || persistentKeepalive > 65535) {
+            $('#addWGError').text('PersistentKeepalive必须是0~65535');
+            return;
+        }
+        postCreateWG({
+            'group_id': groupId, 'virtual_ip': virtualIP, 'device_id': deviceId, 'name': deviceName,
+            'config': {
+                'vnts_endpoint': endpoint,
+                'private_key': privateKey,
+                'persistent_keepalive': parseInt(persistentKeepalive),
+            }
+        }, function (data) {
+            if (data && data.code === 200) {
+                location.reload();
+                $('#addModal').hide(); // 关闭模态框
+            } else {
+                $('#addWGError').text('添加失败:' + data.message);
+            }
+
+        })
+    });
+
     function formatBytes(bytes) {
         if (!bytes) {
             return ''
@@ -361,6 +530,7 @@
         graph.render();
     }
     let getGroupInfoFunc = function (group) {
+        groupId = group;
         postGroupInfo({'group': group}, function (response) {
             if (response && response.code === 200) {
                 let data = response.data;
@@ -368,7 +538,7 @@
                 $('.mask_ip').html(data.mask_ip);
                 $('.network_ip').html(data.network_ip);
                 nodeInitFunc(data.gateway_ip, data.clients);
-                displayDeviceInfo(data.clients);
+                displayDeviceInfo(group, data);
             } else {
                 window.alert("调用服务失败")
             }
@@ -380,6 +550,20 @@
         // console.log(group_list);
         searchInput(group_list);
     });
-
+    $('.close').on('click', function () {
+        $('#wgConfigModal').hide();
+        $('#addModal').hide();
+    });
+    $('#toggleButton').on('click', function () {
+        if ($('#qrcode').hasClass('visible')) {
+            $('#qrcode').removeClass('visible').addClass('hidden');
+            $('#textConfig').removeClass('hidden').addClass('visible');
+            $('#toggleButton').text('显示二维码');
+        } else {
+            $('#qrcode').removeClass('hidden').addClass('visible');
+            $('#textConfig').removeClass('visible').addClass('hidden');
+            $('#toggleButton').text('显示文本配置');
+        }
+    });
 </script>
 </html>

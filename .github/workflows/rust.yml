@@ -36,9 +36,6 @@ jobs:
       matrix:
         # a list of all the targets
         include:
-          - TARGET: i686-unknown-linux-musl # test in an alpine container on a mac
-            OS: ubuntu-latest
-            FEATURES: normal,web
           - TARGET: x86_64-unknown-linux-musl # test in an alpine container on a mac
             OS: ubuntu-latest
             FEATURES: ring-cipher,web

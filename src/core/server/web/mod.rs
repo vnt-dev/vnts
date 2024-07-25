@@ -1,6 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net;
-use std::sync::Arc;
 
 use actix_web::dev::Service;
 use actix_web::web::Data;
@@ -9,7 +8,9 @@ use actix_web::{middleware, post, web, App, HttpRequest, HttpResponse, HttpServe
 use actix_web_static_files::ResourceFiles;
 
 use crate::core::server::web::service::VntsWebService;
-use crate::core::server::web::vo::{LoginData, ResponseMessage};
+use crate::core::server::web::vo::req::{CreateWGData, LoginData, RemoveClientReq};
+
+use crate::core::server::web::vo::ResponseMessage;
 use crate::core::store::cache::AppCache;
 use crate::ConfigInfo;
 
@@ -18,7 +19,7 @@ mod vo;
 
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 
-#[post("/login")]
+#[post("/api/login")]
 async fn login(service: Data<VntsWebService>, data: web::Json<LoginData>) -> HttpResponse {
     match service.login(data.0).await {
         Ok(auth) => HttpResponse::Ok().json(ResponseMessage::success(auth)),
@@ -26,13 +27,37 @@ async fn login(service: Data<VntsWebService>, data: web::Json<LoginData>) -> Htt
     }
 }
 
-#[post("/group_list")]
+#[post("/api/group_list")]
 async fn group_list(_req: HttpRequest, service: Data<VntsWebService>) -> HttpResponse {
     let info = service.group_list();
     HttpResponse::Ok().json(ResponseMessage::success(info))
 }
-
-#[post("/group_info")]
+#[post("/api/remove_client")]
+async fn remove_client(
+    _req: HttpRequest,
+    service: Data<VntsWebService>,
+    data: web::Json<RemoveClientReq>,
+) -> HttpResponse {
+    service.remove_client(data.0);
+    HttpResponse::Ok().json(ResponseMessage::success("success"))
+}
+#[post("/api/private_key")]
+async fn private_key(_req: HttpRequest, service: Data<VntsWebService>) -> HttpResponse {
+    let private_key = service.gen_wg_private_key();
+    HttpResponse::Ok().json(ResponseMessage::success(private_key))
+}
+#[post("/api/create_wg_config")]
+async fn create_wg_config(
+    _req: HttpRequest,
+    service: Data<VntsWebService>,
+    data: web::Json<CreateWGData>,
+) -> HttpResponse {
+    match service.create_wg_config(data.0).await {
+        Ok(wg_config) => HttpResponse::Ok().json(ResponseMessage::success(wg_config)),
+        Err(e) => HttpResponse::Ok().json(ResponseMessage::fail(e.to_string())),
+    }
+}
+#[post("/api/group_info")]
 async fn group_info(
     _req: HttpRequest,
     service: Data<VntsWebService>,
@@ -46,36 +71,19 @@ async fn group_info(
     }
 }
 
-#[derive(Clone)]
-struct AuthApi {
-    api_set: Arc<HashSet<String>>,
-}
-
-fn auth_api_set() -> AuthApi {
-    let mut api_set = HashSet::new();
-    api_set.insert("/group_info".to_string());
-    api_set.insert("/group_list".to_string());
-    AuthApi {
-        api_set: Arc::new(api_set),
-    }
-}
-
 pub async fn start(
     lst: net::TcpListener,
     cache: AppCache,
     config: ConfigInfo,
 ) -> std::io::Result<()> {
     let web_service = VntsWebService::new(cache, config);
-    let auth_api = auth_api_set();
     HttpServer::new(move || {
         let generated = generate();
         App::new()
             .app_data(Data::new(web_service.clone()))
-            .app_data(Data::new(auth_api.clone()))
             .wrap_fn(|request, srv| {
-                let auth_api: &Data<AuthApi> = request.app_data().unwrap();
                 let path = request.path();
-                if path == "/login" || !auth_api.api_set.contains(path) {
+                if path == "/api/login" || !path.contains("/api/") {
                     return srv.call(request);
                 }
                 let service: &Data<VntsWebService> = request.app_data().unwrap();
@@ -96,6 +104,9 @@ pub async fn start(
             })
             .wrap(middleware::Compress::default())
             .service(login)
+            .service(remove_client)
+            .service(private_key)
+            .service(create_wg_config)
             .service(group_list)
             .service(group_info)
             .service(ResourceFiles::new("/", generated))

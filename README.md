@@ -1,20 +1,18 @@
 # vnts
 
-[vnt](https://github.com/lbl8603/vnt)的服务端
+[vnt](https://github.com/vnt-dev/vnt)的服务端
 
 查看参数
 
 ```
 Options:
-      --port <PORT>                指定端口，默认29872
-      --white-token <WHITE_TOKEN>  token白名单，例如 --white-token 1234 --white-token 123
-      --gateway <GATEWAY>          网关，例如 --gateway 10.10.0.1
-      --netmask <NETMASK>          子网掩码，例如 --netmask 255.255.255.0
-      --finger                     开启指纹校验，开启后只会转发指纹正确的客户端数据包，增强安全性，这会损失一部分性能
-      --log-path <LOG_PATH>        log路径，默认为当前程序路径，为/dev/null时表示不输出log
-      --web-port <WEB_PORT>        web后台端口，默认29870，如果设置为0则表示不启动web后台
-      --username <USERNAME>        web后台用户名，默认为admin
-      --password <PASSWORD>        web后台用户密码，默认为admin
+  -p, --port <PORT>                指定端口，默认29872
+  -w, --white-token <WHITE_TOKEN>  token白名单，例如 --white-token 1234 --white-token 123
+  -g, --gateway <GATEWAY>          网关，例如 --gateway 10.10.0.1
+  -m, --netmask <NETMASK>          子网掩码，例如 --netmask 255.255.255.0
+  -f, --finger                     开启指纹校验，开启后只会转发指纹正确的客户端数据包，增强安全性，这会损失一部分性能
+  -l, --log-path <LOG_PATH>        log路径，默认为当前程序路径，为/dev/null时表示不输出log
+      --wg <WG_SECRET_KEY>         wg私钥，使用base64编码
   -h, --help                       Print help information
   -V, --version                    Print version information
 ```

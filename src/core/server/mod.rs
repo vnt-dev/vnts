@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, UdpSocket};
 
 use crate::cipher::RsaCipher;
+use crate::core::server::wire_guard::WireGuardGroup;
 use crate::core::service::PacketHandler;
 use crate::core::store::cache::AppCache;
 use crate::ConfigInfo;
@@ -12,6 +13,8 @@ mod tcp;
 mod udp;
 #[cfg(feature = "web")]
 mod web;
+mod websocket;
+mod wire_guard;
 
 pub async fn start(
     udp: std::net::UdpSocket,
@@ -28,8 +31,9 @@ pub async fn start(
         rsa_cipher.clone(),
         udp.clone(),
     );
+    let wg = WireGuardGroup::new(cache.clone(), config.clone(), udp.clone());
     let tcp_handle = tokio::spawn(tcp::start(TcpListener::from_std(tcp)?, handler.clone()));
-    let udp_handle = tokio::spawn(udp::start(udp, handler.clone()));
+    let udp_handle = tokio::spawn(udp::start(udp, handler.clone(), wg));
     #[cfg(not(feature = "web"))]
     let _ = tokio::try_join!(tcp_handle, udp_handle);
     #[cfg(feature = "web")]
