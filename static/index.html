@@ -192,7 +192,7 @@
     }
 
 
-    console.log("auth" + auth)
+    // console.log("auth" + auth)
 </script>
 <script>
     /* 点击按钮设置下拉菜单的显示与隐藏 */
@@ -524,7 +524,7 @@ PersistentKeepalive = ${persistentKeepalive}`;
             nodes: nodes,
             edges: edges,
         };
-        console.log(data)
+        // console.log(data)
 
         graph.data(data);
         graph.render();
@@ -547,7 +547,7 @@ PersistentKeepalive = ${persistentKeepalive}`;
     }
     postGroupList({}, function (result) {
         let group_list = result.data.group_list;
-        console.log(group_list);
+        // console.log(group_list);
         searchInput(group_list);
     });
     $('.close').on('click', function () {
