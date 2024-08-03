@@ -691,7 +691,7 @@ pub async fn generate_ip(
     let mut lock = v.write();
     let mut insert = true;
     if virtual_ip != 0 {
-        if gateway == virtual_ip || !ip_range.contains(&virtual_ip) {
+        if gateway == virtual_ip {
             Err(Error::InvalidIp)?
         }
         //指定了ip
