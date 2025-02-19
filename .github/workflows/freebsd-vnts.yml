@@ -1,0 +1,43 @@
+name: Avnts-FreeBSD
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '请填写构建vnts的vnt-dev/vnts分支或提交记录，默认主分支master'
+        required: true
+        default: 'master'
+  
+env:
+  CARGO_TERM_COLOR: always
+  BRANCH: "${{ github.event.inputs.tag }}"
+jobs:
+ build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          repository: vnt-dev/vnts
+          ref: ${{ env.BRANCH }} #默认使用master分支
+      - name: 安装编译环境
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu qemu-user-static binfmt-support build-essential
+          rustup target add x86_64-unknown-freebsd
+          sed -i 's/const CLOCK_ID: ClockId = ClockId::CLOCK_BOOTTIME;/const CLOCK_ID: ClockId = ClockId::CLOCK_MONOTONIC;/g' ./lib/boringtun/src/sleepyinstant/unix.rs
+      - name: 安装 cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: 交叉编译 FreeBSD 的动态库 vnts 
+        env:
+          RUSTFLAGS: "-C strip=symbols"
+        run: |
+          cross build --target x86_64-unknown-freebsd --release --features ring-cipher,web
+          file target/x86_64-unknown-freebsd/release/vnts
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vnts-FreeBSD
+          path: target/x86_64-unknown-freebsd/release/vnts
