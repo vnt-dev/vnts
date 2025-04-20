@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  vnt-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: hotwa/vnt-server:latest
+    container_name: vnt-server
+    restart: unless-stopped
+    environment:
+      - VNT_PORT=29872
+      - VNT_WEB_PORT=29870
+      - VNT_WHITE_TOKEN=your_token_here
+      - VNT_USERNAME=admin
+      - VNT_PASSWORD=secure_password
+    volumes:
+      - ./data/key:/app/key
+      - ./data/log:/app/log
+    ports:
+      - "29872:29872/tcp"
+      - "29872:29872/udp"
+      - "29870:29870/tcp"
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv4.ip_forward=1
