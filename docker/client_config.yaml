@@ -1,0 +1,42 @@
+# 唯一设备 ID，可以用 `uuidgen` 生成一次后固定
+device_id:     3f3d5317-f1e7-45e6-88df-02e492d8909e
+
+# 必须和服务端的 VNT_WHITE_TOKEN 一致
+token:         22d
+
+# 设备在管理面板里显示的名字
+name:          wsl2
+
+# 客户端在 TUN 虚拟网卡上的 IP，要和服务端网段对应
+# （如果没自定义网段，默认是 10.26.0.x）
+ip:            10.26.0.10
+
+# 指向你的域名或 IP:端口
+server_address: yourdomain:29872
+
+# 是否启用服务端→客户端的 RSA/AES 加密（要改 true 时需先替换 key 目录里的私钥/公钥）
+server_encrypt: false
+
+# 虚拟网卡名
+device_name:   vnt-tun
+
+# 加密算法
+cipher_model:  aes_gcm
+
+# 如果在服务端开启了 --finger ，这里也要设 true
+finger:        false
+
+# p2p 模式，通常就留 p2p
+use_channel:   p2p
+
+# 是否允许 shell 命令通道
+cmd:           false
+
+# 是否走 TCP（可根据网络情况改为 false，让 UDP 优先）
+tcp:           true
+
+# DNS 转发
+dns:
+  - 223.5.5.5
+  - 8.8.8.8
+
