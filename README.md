@@ -37,3 +37,27 @@ Options:
 web是可选模块，如需编译则使用 cargo build --features web
 
 ```
+
+## 环境变量映射表
+将 vnts 参数转换为环境变量（全部大写，前缀 VNT_）：
+
+参数	环境变量名	示例值
+-p/--port	VNT_PORT	29872
+
+-w/--white-token	VNT_WHITE_TOKEN	mysecrettoken
+
+-g/--gateway	VNT_GATEWAY	10.10.0.1
+
+-m/--netmask	VNT_NETMASK	255.255.255.0
+
+-f/--finger	VNT_FINGER	true
+
+-l/--log-path	VNT_LOG_PATH	/var/log/vnt.log
+
+-P/--web-port	VNT_WEB_PORT	29870
+
+-U/--username	VNT_USERNAME	admin
+
+-W/--password	VNT_PASSWORD	securepass123
+
+--wg	VNT_WG_SECRET_KEY	base64_encoded_key

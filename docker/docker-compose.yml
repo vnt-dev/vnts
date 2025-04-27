@@ -1,0 +1,43 @@
+version: "3.8"
+
+services:
+  vnts:
+    image: hotwa/vnt-server:latest
+    container_name: vnts
+    restart: unless-stopped
+
+    # 加入自定义网络并指定静态 IP
+    networks:
+      headscale_network:
+        ipv4_address: 172.24.0.13
+
+    ports:
+      - "29872:29872/tcp"    # 数据通道 TCP
+      - "29872:29872/udp"    # 数据通道 UDP
+      - "29870:29870/tcp"    # Web 管理界面
+
+    volumes:
+      - ./vnts-data:/app/key   # 用于存放服务端密钥对
+      - ./vnts-log:/app/log    # 日志目录
+
+    environment:
+      # —————— 必填项 ——————
+      VNT_PORT:        "29872"        # 数据通道口
+      VNT_WEB_PORT:    "29870"        # Web 管理口
+      VNT_USERNAME:    "admin"        # 管理界面用户名
+      VNT_PASSWORD:    "admin"        # 管理界面密码
+      VNT_WHITE_TOKEN: "22d"     # 连接 token 白名单
+
+      # ——— 可选项，根据需要取消注释 ———
+      #VNT_FINGER:        "1"                  # 开启指纹校验（短 flag `--finger`）
+      #VNT_GATEWAY:       "10.26.0.1"          # 子网网关
+      #VNT_NETMASK:       "255.255.255.0"      # 子网掩码
+      #VNT_WG_SECRET_KEY: "<Base64 编码的私钥>"  # WireGuard 私钥
+
+networks:
+  headscale_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.24.0.0/24
+
