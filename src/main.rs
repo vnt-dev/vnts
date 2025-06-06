@@ -31,6 +31,9 @@ const NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
 #[derive(Parser, Debug, Clone)]
 #[command(version)]
 pub struct StartArgs {
+    /// 指定服务监听的IP地址，默认监听所有地址
+    #[arg(long)]
+    host: Option<String>,
     /// 指定端口，默认29872
     #[arg(short, long)]
     port: Option<u16>,
@@ -302,15 +305,15 @@ async fn main() {
         }
     };
     log::info!("config:{:?}", config);
-    let udp = create_udp(port).unwrap();
-    log::info!("监听udp端口: {:?}", port);
-    println!("监听udp端口: {:?}", port);
-    let tcp = create_tcp(port).unwrap();
-    log::info!("监听tcp/ws端口: {:?}", port);
-    println!("监听tcp/ws端口: {:?}", port);
+    let udp = create_udp(port, host.as_deref()).unwrap();
+    log::info!("监听host:{:?},监听udp端口: {:?}",host, port);
+    println!("监听host:{:?},监听udp端口: {:?}", host, port);
+    let tcp = create_tcp(port, host.as_deref()).unwrap();
+    log::info!("监听host:{:?},tcp/ws端口: {:?}",host, port);
+    println!("监听host:{:?},监听tcp/ws端口: {:?}",host, port);
     #[cfg(feature = "web")]
     let http = if web_port != 0 {
-        let http = create_tcp(web_port).unwrap();
+        let http = create_tcp(web_port, host.as_deref()).unwrap();
         log::info!("监听http端口: {:?}", web_port);
         println!("监听http端口: {:?}", web_port);
         Some(http)
@@ -332,16 +335,26 @@ async fn main() {
     }
 }
 
-fn create_tcp(port: u16) -> io::Result<std::net::TcpListener> {
-    let address: std::net::SocketAddr = format!("[::]:{}", port).parse().unwrap();
+fn create_tcp(port: u16, host: Option<&str>) -> io::Result<std::net::TcpListener> {
+    let address_str = match host {
+        Some(h) => format!("{}:{}", h, port),
+        None => format!("[::]:{}", port),
+    };
+    let address: std::net::SocketAddr = address_str.parse().unwrap();
+    let domain = if address.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
     let socket = io_convert(
-        socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::STREAM, None),
-        |e| format!("new IPV6 STREAM {:?}", e),
+        socket2::Socket::new(domain, socket2::Type::STREAM, None),
+        |e| format!("new STREAM {:?}", e),
     )?;
-
-    io_convert(socket.set_only_v6(false), |e| {
-        format!("set_only_v6 {:?}", e)
-    })?;
+    if domain == socket2::Domain::IPV6 {
+        io_convert(socket.set_only_v6(false), |e| {
+            format!("set_only_v6 {:?}", e)
+        })?;
+    }
     io_convert(socket.set_reuse_address(true), |e| {
         format!("set_reuse_address {:?}", e)
     })?;
@@ -357,16 +370,26 @@ fn create_tcp(port: u16) -> io::Result<std::net::TcpListener> {
     Ok(socket.into())
 }
 
-fn create_udp(port: u16) -> io::Result<std::net::UdpSocket> {
-    let address: std::net::SocketAddr = format!("[::]:{}", port).parse().unwrap();
+fn create_udp(port: u16, host: Option<&str>) -> io::Result<std::net::UdpSocket> {
+    let address_str = match host {
+        Some(h) => format!("{}:{}", h, port),
+        None => format!("[::]:{}", port),
+    };
+    let address: std::net::SocketAddr = address_str.parse().unwrap();
+    let domain = if address.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
     let socket = io_convert(
-        socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::DGRAM, None),
-        |e| format!("new IPV6 DGRAM {:?}", e),
+        socket2::Socket::new(domain, socket2::Type::DGRAM, None),
+        |e| format!("new DGRAM {:?}", e),
     )?;
-
-    io_convert(socket.set_only_v6(false), |e| {
-        format!("set_only_v6 {:?}", e)
-    })?;
+    if domain == socket2::Domain::IPV6 {
+        io_convert(socket.set_only_v6(false), |e| {
+            format!("set_only_v6 {:?}", e)
+        })?;
+    }
     io_convert(socket.set_reuse_address(true), |e| {
         format!("set_reuse_address {:?}", e)
     })?;
