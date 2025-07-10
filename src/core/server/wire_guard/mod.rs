@@ -197,14 +197,36 @@ impl WireGuard {
         self.offline();
     }
     fn offline(&self) {
-        if let Some(v) = self.cache.virtual_network.get(&self.group_id) {
-            if let Some(v) = v.write().clients.get_mut(&self.ip.into()) {
-                if v.address == self.wg_source_addr {
-                    v.online = false;
-                    v.wg_sender = None;
+        let should_check_empty_room = if let Some(v) = self.cache.virtual_network.get(&self.group_id) {
+            let mut guard = v.write();
+            if let Some(client) = guard.clients.get_mut(&self.ip.into()) {
+                if client.address == self.wg_source_addr {
+                    client.online = false;
+                    client.wg_sender = None;
+
+                    // Check if all clients are offline after this WireGuard client goes offline
+                    let all_offline = guard.clients.values().all(|c| !c.online);
+                    all_offline
+                } else {
+                    false
                 }
+            } else {
+                false
             }
+        } else {
+            false
+        };
+
+        // Schedule empty room check if all clients are offline
+        if should_check_empty_room {
+            log::info!("WireGuard client offline, all clients offline in group {}, scheduling room cleanup check", self.group_id);
+            let cache = self.cache.clone();
+            let group_id = self.group_id.clone();
+            tokio::spawn(async move {
+                cache.schedule_empty_room_check(&group_id).await;
+            });
         }
+
         self.data_channel_map.lock().remove(&self.wg_source_addr);
     }
     pub async fn start0(
