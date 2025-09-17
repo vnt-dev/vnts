@@ -180,6 +180,7 @@ async fn main() {
     let root_path = app_root();
     log_init(root_path.clone(), args.log_path);
     let port = args.port.unwrap_or(29872);
+    let host = args.host;
     #[cfg(feature = "web")]
     let web_port = {
         let web_port = args.web_port.unwrap_or(29870);
