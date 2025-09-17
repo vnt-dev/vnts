@@ -19,7 +19,7 @@ jobs:
   #    steps:
   #      - uses: actions/checkout@v2
   #      - name: Cargo cache
-  #        uses: actions/cache@v2
+  #        uses: actions/cache@v4
   #        with:
   #          path: |
   #            ~/.cargo/registry
@@ -80,9 +80,13 @@ jobs:
       OS: ${{ matrix.OS }}
       FEATURES: ${{ matrix.FEATURES }}
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
+
+      - name: Init submodules
+        run: git submodule update --init --recursive --remote && git submodule status
+
       - name: Cargo cache
-        uses: actions/cache@v2
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
@@ -95,43 +99,53 @@ jobs:
           # dependencies are only needed on ubuntu as that's the only place where
           # we make cross-compilation
           if [[ $OS =~ ^ubuntu.*$ ]]; then
-            sudo apt-get update && sudo apt-get install -qq crossbuild-essential-arm64 crossbuild-essential-armhf musl-tools
+            sudo apt-get update && sudo apt-get install clang llvm libc6-dev-i386 crossbuild-essential-arm64 crossbuild-essential-armhf musl-tools libboost-all-dev libc6-dev -y
             #  curl -s musl.cc | grep mipsel
             case $TARGET in 
               mipsel-unknown-linux-musl)
-                MUSL_URI=mipsel-linux-musl-cross
+                MUSL_URI=mipsel-linux-muslsf-cross
+                URL=mipsel-linux-muslsf
                 ;;
               aarch64-unknown-linux-musl)
                 MUSL_URI=aarch64-linux-musl-cross
                 ;;
               armv7-unknown-linux-musleabihf)
                 MUSL_URI=armv7l-linux-musleabihf-cross
-                ;;   
+                ;;    
               armv7-unknown-linux-musleabi)
                 MUSL_URI=armv7m-linux-musleabi-cross
-                ;;   
+                ;; 
               arm-unknown-linux-musleabihf)
                 MUSL_URI=arm-linux-musleabihf-cross
                 ;;    
               arm-unknown-linux-musleabi)
                 MUSL_URI=arm-linux-musleabi-cross
-                ;;     
+                ;;        
               mips-unknown-linux-musl)
-                MUSL_URI=mips-linux-musl-cross
+                MUSL_URI=mips-linux-muslsf-cross
+                URL=mips-linux-muslsf
                 ;;
             esac
-            if [[ $TARGET =~ ^mips.*$ ]]; then
-              # mips平台使用1.71.1版本
-              rustup install 1.71.1
-              rustup default 1.71.1  
-            fi
+          
+          
             if [  -n "$MUSL_URI" ]; then
               mkdir -p ./musl_gcc 
-              wget -c https://musl.cc/$MUSL_URI.tgz -P ./musl_gcc/
-              tar zxf ./musl_gcc/$MUSL_URI.tgz -C ./musl_gcc/
-              sudo ln -s $(pwd)/musl_gcc/$MUSL_URI/bin/*gcc /usr/bin/
+              wget -c https://github.com/rustp2p/musl-cross/releases/download/0.0.1/$MUSL_URI.tgz -P /opt/musl_gcc/
+              tar zxf /opt/musl_gcc/$MUSL_URI.tgz -C /opt/musl_gcc/
+              sudo ln -s /opt/musl_gcc/$MUSL_URI/bin/*gcc /usr/bin/
             fi
           fi
+          if [[ $TARGET =~ ^mips.*$ ]]; then
+            cd /opt/musl_gcc/${URL}-cross/lib/gcc/${URL}/11.2.1
+            cp libgcc_eh.a libunwind.a
+            rustup toolchain install nightly-x86_64-unknown-linux-gnu
+            rustup component add rust-src --toolchain nightly-x86_64-unknown-linux-gnu
+            RUST_LIB_SRC=$HOME/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/
+            if [[ -f $RUST_LIB_SRC/library/Cargo.lock && ! -f $RUST_LIB_SRC/Cargo.lock ]]; then 
+               cp -f $RUST_LIB_SRC/library/Cargo.lock $RUST_LIB_SRC/Cargo.lock
+            fi
+          fi
+          rustup -V
 
           # some additional configuration for cross-compilation on linux
           cat >>~/.cargo/config <<EOF
@@ -162,11 +176,17 @@ jobs:
           linker = "arm-linux-musleabi-gcc"
           rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols"]
           [target.mipsel-unknown-linux-musl]
-          linker = "mipsel-linux-musl-gcc"
-          rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols"]
+          linker = "mipsel-linux-muslsf-gcc"
+          rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols","-C", "link-arg=-static",
+          "-C", "relocation-model=static","-C", "link-arg=-no-pie","--cfg", "compiler_builtins_no_debug",
+          "-L", "/opt/musl_gcc/mipsel-linux-muslsf-cross/mipsel-linux-muslsf/lib",
+          "-L", "/opt/musl_gcc/mipsel-linux-muslsf-cross/lib/gcc/mipsel-linux-muslsf/11.2.1"]
           [target.mips-unknown-linux-musl]
-          linker = "mips-linux-musl-gcc"
-          rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols"]
+          linker = "mips-linux-muslsf-gcc"
+          rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols","-C", "link-arg=-static",
+          "-C", "relocation-model=static","-C", "link-arg=-no-pie","--cfg", "compiler_builtins_no_debug",
+          "-L", "/opt/musl_gcc/mips-linux-muslsf-cross/mips-linux-muslsf/lib",
+          "-L", "/opt/musl_gcc/mips-linux-muslsf-cross/lib/gcc/mips-linux-muslsf/11.2.1"]
           [target.x86_64-pc-windows-msvc]
           rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols"]    
           [target.i686-pc-windows-msvc]
@@ -181,9 +201,18 @@ jobs:
           rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols"]
           EOF
       - name: Install rust target
+        if: ${{ ! endsWith(matrix.TARGET, 'freebsd') &&  ! startsWith(matrix.TARGET, 'mips') }}
         run: rustup target add $TARGET
       - name: Run build
-        run: cargo build --release --verbose --target $TARGET --features $FEATURES
+        if: ${{ ! endsWith(matrix.TARGET, 'freebsd') }}
+        run: |
+          if [[ $TARGET =~ ^mips.*$ ]]; then
+            cargo +nightly build --release --verbose --target $TARGET -Z build-std=std,panic_abort --features $FEATURES
+          else
+            cargo build --release --verbose --target $TARGET --features $FEATURES
+          fi
+          ldd ./target/$TARGET/release/net_link || true
+          file ./target/$TARGET/release/net_link || true
       - name: List target
         run: find ./target
       - name: Compress
@@ -201,11 +230,12 @@ jobs:
             TAG=$GITHUB_SHA
           fi
           mv ./target/$TARGET/release/$EXEC ./$EXEC
-          tar -czf ./artifacts/$NAME-$TARGET-$TAG.tar.gz $EXEC static
+          tar -czf ./artifacts/vnts-$TARGET-$TAG.tar.gz $EXEC static
+
       - name: Archive artifact
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
-          name: vnts
+          name: vnts-${{ matrix.TARGET }}-${{ github.ref_name }}
           path: |
             ./artifacts
 
@@ -216,17 +246,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
         with:
-          name: vnts
           path: ./artifacts
-      - name: List
-        run: find ./artifacts
+      # - name: List
+      #   run: find ./artifacts
       - name: Release
         uses: svenstaro/upload-release-action@v2
         with:
-          repo_token: ${{ secrets.YOURTOKEN }}
-          file: ./artifacts/*.tar.gz
+          repo_token: ${{ secrets.MY_TOKEN }}
+          file: ./artifacts/**/*.tar.gz
           tag: ${{ github.ref }}
           overwrite: true
           file_glob: true
