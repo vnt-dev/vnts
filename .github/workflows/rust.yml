@@ -68,10 +68,10 @@ jobs:
             FEATURES: ring-cipher,web
           - TARGET: mipsel-unknown-linux-musl # openwrt
             OS: ubuntu-latest
-            FEATURES: default
+            FEATURES: normal,web
           - TARGET: mips-unknown-linux-musl # openwrt
             OS: ubuntu-latest
-            FEATURES: default
+            FEATURES: normal
     # needs: test
     runs-on: ${{ matrix.OS }}
     env:
