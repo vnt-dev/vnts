@@ -252,7 +252,7 @@ jobs:
       # - name: List
       #   run: find ./artifacts
       - name: Release
-        uses: svenstaro/upload-release-action@v4
+        uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.MY_TOKEN }}
           file: ./artifacts/**/*.tar.gz
