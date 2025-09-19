@@ -676,7 +676,12 @@ pub async fn generate_ip(
     let group_id = register_request.group_id;
     let v = cache
         .virtual_network
-        .optionally_get_with(group_id, || {
+        .optionally_get_with(group_id.clone(), || {
+            log::info!("Creating new room: group_id={}, network={}, gateway={}",
+                group_id,
+                Ipv4Addr::from(network),
+                Ipv4Addr::from(gateway)
+            );
             (
                 Duration::from_secs(7 * 24 * 3600),
                 Arc::new(parking_lot::const_rwlock(NetworkInfo::new(
