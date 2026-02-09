@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package protocol.server_message;
+
+// 服务端之间的消息
+message ServerMessage {
+  oneof payload {
+    ServerAuthRequest auth_req = 1;
+    ServerAuthResponse auth_res = 2;
+    ServerPingRequest ping_req = 4;
+    ServerPingResponse ping_res = 5;
+    ServerForwardData forward_data = 6;
+    ServerClientInfoRequest client_info_req = 7;
+    ServerClientInfoResponse client_info_res = 8;
+  }
+}
+
+// 转发数据到其他服务器
+message ServerForwardData {
+  string network_code = 1; // 网络编号
+  bytes data = 2;           // 原始数据包
+}
+
+// 服务端认证请求
+message ServerAuthRequest {
+  string token_hash = 1; // SHA256(token)
+}
+
+// 服务端认证响应
+message ServerAuthResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message NetworkInfo {
+  string network_code = 1;
+  repeated ClientLatencyInfo clients = 2;
+}
+
+message ClientLatencyInfo {
+  fixed32 ip = 1;
+  uint32 latency_ms = 2; // 客户端到本服务器的延迟（毫秒），目前用默认值
+}
+
+// Ping请求（用于探测服务器间延迟）
+message ServerPingRequest {
+  uint64 timestamp = 1; // 发送时间戳（毫秒）
+}
+
+// Ping响应
+message ServerPingResponse {
+  uint64 request_timestamp = 1; // 原始请求的时间戳
+  uint64 response_timestamp = 2; // 响应时间戳
+}
+
+// 客户端信息请求（主动拉取）
+message ServerClientInfoRequest {
+  repeated string network_codes = 1; // 请求的网络编号列表
+}
+
+// 客户端信息响应
+message ServerClientInfoResponse {
+  repeated NetworkInfo networks = 1; // 返回请求的网络信息
+}

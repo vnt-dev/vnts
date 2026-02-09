@@ -1,412 +1,161 @@
-use aes_gcm::aead::rand_core::RngCore;
-use anyhow::{anyhow, Context};
-use base64::engine::general_purpose;
-use base64::Engine;
-use boringtun::x25519::{PublicKey, StaticSecret};
+use crate::server::TurnConfig;
+use crate::server::control_server::service::ControlService;
+use crate::server::peer_server::PeerServerManager;
+use crate::utils::config::ConfigFile;
 use clap::Parser;
-use std::collections::HashSet;
-use std::fmt::{Debug, Display, Formatter};
-use std::io;
-use std::io::Write;
-use std::net::Ipv4Addr;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
-use crate::cipher::RsaCipher;
-
-mod cipher;
-mod core;
-mod error;
-mod generated_serial_number;
-mod proto;
+mod http;
 mod protocol;
+mod server;
+mod utils;
 
-pub const VNT_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// 默认网关信息
-const GATEWAY: Ipv4Addr = Ipv4Addr::new(10, 26, 0, 1);
-const NETMASK: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 0);
-
-/// vnt服务端,
-/// 默认情况服务日志输出在 './log/'下,可通过编写'./log/log4rs.yaml'文件自定义日志配置
-#[derive(Parser, Debug, Clone)]
-#[command(version)]
-pub struct StartArgs {
-    /// 指定服务监听的IP地址，默认监听所有地址
-    #[arg(long)]
-    host: Option<String>,
-    /// 指定端口，默认29872
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// 配置文件路径，默认 ./config.toml
     #[arg(short, long)]
-    port: Option<u16>,
-    /// token白名单，例如 --white-token 1234 --white-token 123
-    #[arg(short, long)]
-    white_token: Option<Vec<String>>,
-    /// 网关，例如 --gateway 10.10.0.1
-    #[arg(short, long)]
-    gateway: Option<String>,
-    /// 子网掩码，例如 --netmask 255.255.255.0
-    #[arg(short = 'm', long)]
-    netmask: Option<String>,
-    ///开启指纹校验，开启后只会转发指纹正确的客户端数据包，增强安全性，这会损失一部分性能
-    #[arg(short, long, default_value_t = false)]
-    finger: bool,
-    /// log路径，默认为当前程序路径，为/dev/null时表示不输出log
-    #[arg(short, long)]
-    log_path: Option<String>,
-    #[cfg(feature = "web")]
-    ///web后台端口，默认29870，如果设置为0则表示不启动web后台
-    #[arg(short = 'P', long)]
-    web_port: Option<u16>,
-    #[cfg(feature = "web")]
-    /// web后台用户名，默认为admin
-    #[arg(short = 'U', long)]
-    username: Option<String>,
-    #[cfg(feature = "web")]
-    /// web后台用户密码，默认为admin
-    #[arg(short = 'W', long)]
-    password: Option<String>,
-    /// wg私钥，使用base64编码
-    #[arg(long = "wg")]
-    wg_secret_key: Option<String>,
-}
-
-#[derive(Clone)]
-pub struct ConfigInfo {
-    pub port: u16,
-    pub white_token: Option<HashSet<String>>,
-    pub gateway: Ipv4Addr,
-    pub broadcast: Ipv4Addr,
-    pub netmask: Ipv4Addr,
-    pub check_finger: bool,
-    #[cfg(feature = "web")]
-    pub username: String,
-    #[cfg(feature = "web")]
-    pub password: String,
-    pub wg_secret_key: StaticSecret,
-    pub wg_public_key: PublicKey,
-}
-impl Debug for ConfigInfo {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ConfigInfo")
-            .field("port", &self.port)
-            .field("white_token", &self.white_token)
-            .field("gateway", &self.gateway)
-            .field("broadcast", &self.broadcast)
-            .field("netmask", &self.netmask)
-            .field("check_finger", &self.check_finger)
-            .field(
-                "wg_secret_key",
-                &general_purpose::STANDARD.encode(&self.wg_secret_key),
-            )
-            .field(
-                "wg_public_key",
-                &general_purpose::STANDARD.encode(&self.wg_public_key),
-            )
-            .finish()
-    }
-}
-
-fn log_init(root_path: PathBuf, log_path: Option<String>) {
-    let log_path = match log_path {
-        None => root_path.join("log"),
-        Some(log_path) => {
-            if &log_path == "/dev/null" {
-                return;
-            }
-            PathBuf::from(log_path)
-        }
-    };
-    if !log_path.exists() {
-        let _ = std::fs::create_dir(&log_path);
-    }
-
-    let log_config = log_path.join("log4rs.yaml");
-    if !log_config.exists() {
-        if let Ok(mut f) = std::fs::File::create(&log_config) {
-            let log_path = log_path.to_str().unwrap();
-            let c = format!(
-                "refresh_rate: 30 seconds
-appenders:
-  rolling_file:
-    kind: rolling_file
-    path: {}/vnts.log
-    append: true
-    encoder:
-      pattern: \"{{d}} [{{f}}:{{L}}] {{h({{l}})}} {{M}}:{{m}}{{n}}\"
-    policy:
-      kind: compound
-      trigger:
-        kind: size
-        limit: 10 mb
-      roller:
-        kind: fixed_window
-        pattern: {}/vnts.{{}}.log
-        base: 1
-        count: 5
-
-root:
-  level: info
-  appenders:
-    - rolling_file",
-                log_path, log_path
-            );
-            let _ = f.write_all(c.as_bytes());
-        }
-    }
-    let _ = log4rs::init_file(log_config, Default::default());
-}
-
-pub fn app_root() -> PathBuf {
-    match std::env::current_exe() {
-        Ok(path) => {
-            if let Some(v) = path.as_path().parent() {
-                v.to_path_buf()
-            } else {
-                log::warn!("current_exe parent none:{:?}", path);
-                PathBuf::new()
-            }
-        }
-        Err(e) => {
-            log::warn!("current_exe err:{:?}", e);
-            PathBuf::new()
-        }
-    }
+    conf: Option<PathBuf>,
+    /// 输出配置文件示例
+    #[clap(long)]
+    pub conf_example: bool,
 }
 
 #[tokio::main]
 async fn main() {
-    println!("version: {}", VNT_VERSION);
-    println!("Serial: {}", generated_serial_number::SERIAL_NUMBER);
-    let args = StartArgs::parse();
-    let root_path = app_root();
-    log_init(root_path.clone(), args.log_path);
-    let port = args.port.unwrap_or(29872);
-    let host = args.host;
-    #[cfg(feature = "web")]
-    let web_port = {
-        let web_port = args.web_port.unwrap_or(29870);
-        println!("端口: {}", port);
-        if web_port != 0 {
-            println!("web端口: {}", web_port);
-            if web_port == port {
-                panic!("web-port == port");
-            }
-        } else {
-            println!("不启用web后台")
-        }
-        web_port
-    };
-
-    let white_token = args
-        .white_token
-        .map(|white_token| HashSet::from_iter(white_token.into_iter()));
-    println!("token白名单: {:?}", white_token);
-    let gateway = if let Some(gateway) = args.gateway {
-        match gateway.parse::<Ipv4Addr>() {
-            Ok(ip) => ip,
-            Err(e) => {
-                log::error!("网关错误，必须为有效的ipv4地址 gateway={},e={}", gateway, e);
-                panic!("网关错误，必须为有效的ipv4地址")
-            }
-        }
-    } else {
-        GATEWAY
-    };
-    println!("网关: {:?}", gateway);
-    if gateway.is_unspecified() {
-        println!("网关地址无效");
-        log::error!("网关错误，必须为有效的ipv4地址 gateway={}", gateway);
+    let args = Args::parse();
+    if args.conf_example {
+        utils::config::print_example();
         return;
     }
-    if gateway.is_broadcast() {
-        println!("网关错误，不能为广播地址");
-        log::error!("网关错误，不能为广播地址 gateway={}", gateway);
-        return;
-    }
-    if gateway.is_multicast() {
-        println!("网关错误，不能为组播地址");
-        log::error!("网关错误，不能为组播地址 gateway={}", gateway);
-        return;
-    }
-    if !gateway.is_private() {
-        println!(
-            "Warning 不是一个私有地址：{:?}，将有可能和公网ip冲突",
-            gateway
-        );
-        log::warn!("网关错误，不是一个私有地址 gateway={}", gateway);
-    }
-    let netmask = if let Some(netmask) = args.netmask {
-        match netmask.parse::<Ipv4Addr>() {
-            Ok(ip) => ip,
-            Err(e) => {
-                log::error!(
-                    "子网掩码错误，必须为有效的ipv4地址 netmask={},e={}",
-                    netmask,
-                    e
-                );
-                panic!("子网掩码错误，必须为有效的ipv4地址")
-            }
-        }
-    } else {
-        NETMASK
-    };
-    println!("子网掩码: {:?}", netmask);
-    if netmask.is_broadcast()
-        || netmask.is_unspecified()
-        || !(!u32::from_be_bytes(netmask.octets()) + 1).is_power_of_two()
-    {
-        println!("子网掩码错误");
-        log::error!("子网掩码错误 netmask={}", netmask);
-        return;
-    }
-
-    let broadcast = (!u32::from_be_bytes(netmask.octets())) | u32::from_be_bytes(gateway.octets());
-    let broadcast = Ipv4Addr::from(broadcast);
-    let check_finger = args.finger;
-    if check_finger {
-        println!("转发校验数据指纹，客户端必须增加--finger参数");
-    }
-    let wg_secret_key: [u8; 32] = if let Some(wg_secret_key) = args.wg_secret_key {
-        let wg_secret_key = general_purpose::STANDARD
-            .decode(wg_secret_key)
-            .context("wg私钥错误")
-            .unwrap();
-        wg_secret_key
-            .try_into()
-            .map_err(|_| anyhow!("wg私钥错误"))
-            .unwrap()
-    } else {
-        let mut wg_secret_key = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut wg_secret_key);
-        wg_secret_key
-    };
-    let wg_secret_key = boringtun::x25519::StaticSecret::from(wg_secret_key);
-    let wg_public_key = boringtun::x25519::PublicKey::from(&wg_secret_key);
-    let config = ConfigInfo {
-        port,
-        white_token,
-        gateway,
-        broadcast,
-        netmask,
-        check_finger,
-        #[cfg(feature = "web")]
-        username: args.username.unwrap_or_else(|| "admin".into()),
-        #[cfg(feature = "web")]
-        password: args.password.unwrap_or_else(|| "admin".into()),
-        wg_secret_key,
-        wg_public_key,
-    };
-    let rsa = match RsaCipher::new(root_path) {
-        Ok(rsa) => {
-            println!("密钥指纹: {}", rsa.finger());
-            Some(rsa)
-        }
+    utils::log::log_init("vnts2");
+    log::info!("version: {:?}", env!("CARGO_PKG_VERSION"));
+    let conf = match ConfigFile::load_from(args.conf) {
+        Ok(conf) => conf,
         Err(e) => {
-            log::error!("获取密钥错误：{:?}", e);
-            panic!("获取密钥错误:{}", e);
+            log::error!("{e:?}");
+            panic!("{e:?}")
         }
     };
-    log::info!("config:{:?}", config);
-    let udp = create_udp(port, host.as_deref()).unwrap();
-    log::info!("监听host:{:?},监听udp端口: {:?}",host, port);
-    println!("监听host:{:?},监听udp端口: {:?}", host, port);
-    let tcp = create_tcp(port, host.as_deref()).unwrap();
-    log::info!("监听host:{:?},tcp/ws端口: {:?}",host, port);
-    println!("监听host:{:?},监听tcp/ws端口: {:?}",host, port);
-    #[cfg(feature = "web")]
-    let http = if web_port != 0 {
-        let http = create_tcp(web_port, host.as_deref()).unwrap();
-        log::info!("监听http端口: {:?}", web_port);
-        println!("监听http端口: {:?}", web_port);
-        Some(http)
-    } else {
-        None
+    if conf.persistence {
+        if let Err(e) = server::control_server::db::init_db_pool().await {
+            log::error!("{:?}", e);
+        }
+    }
+
+    // 提前提取需要在 move 之后使用的字段
+    let need_peer_manager = !conf.peer_servers.is_empty() || conf.web_bind.is_some();
+    let peer_conf = PeerConf {
+        persistence: conf.persistence,
+        server_quic_bind: conf.server_quic_bind,
+        peer_servers: conf.peer_servers.clone(),
+        server_token: conf.server_token.clone(),
+        cert: conf.cert.clone(),
+        key: conf.key.clone(),
     };
-    let config = config.clone();
-    if let Err(e) = core::start(
-        udp,
-        tcp,
-        #[cfg(feature = "web")]
-        http,
-        config,
-        rsa,
+
+    let turn_config = TurnConfig {
+        tcp_bind: conf.tcp_bind,
+        quic_bind: conf.quic_bind,
+        ws_bind: conf.ws_bind,
+        cert: conf.cert.clone(),
+        key: conf.key.clone(),
+    };
+
+    let web_bind = conf.web_bind;
+    let username = conf.username.unwrap_or("admin".to_string());
+    let password = conf.password.unwrap_or("admin".to_string());
+
+    let control_service = ControlService::new(
+        conf.network,
+        conf.custom_nets,
+        Duration::from_secs(conf.lease_duration),
     )
-    .await
-    {
-        log::error!("{:?}", e)
+    .await;
+
+    if let Err(e) = server::turn_server_start(turn_config, control_service.clone()).await {
+        log::error!("{:?}", e);
+        panic!("{:?}", e)
     }
+
+    if need_peer_manager {
+        init_peer_manager(&peer_conf, &control_service).await;
+    }
+
+    if let Some(web_bind) = web_bind {
+        http::web_server::start_http_server(control_service, username, password, web_bind).await
+    }
+
+    tokio::signal::ctrl_c().await.unwrap();
 }
 
-fn create_tcp(port: u16, host: Option<&str>) -> io::Result<std::net::TcpListener> {
-    let address_str = match host {
-        Some(h) => format!("{}:{}", h, port),
-        None => format!("[::]:{}", port),
-    };
-    let address: std::net::SocketAddr = address_str.parse().unwrap();
-    let domain = if address.is_ipv4() {
-        socket2::Domain::IPV4
+struct PeerConf {
+    persistence: bool,
+    server_quic_bind: Option<std::net::SocketAddr>,
+    peer_servers: Vec<String>,
+    server_token: Option<String>,
+    cert: Option<PathBuf>,
+    key: Option<PathBuf>,
+}
+
+async fn init_peer_manager(conf: &PeerConf, control_service: &ControlService) {
+    let server_token = conf.server_token.clone().unwrap_or_else(|| "default_token".to_string());
+    let network_state_provider = control_service.get_network_state_provider().clone();
+
+    let peer_manager = Arc::new(PeerServerManager::new(server_token, network_state_provider));
+    control_service.set_peer_manager(peer_manager.clone());
+
+    if let Some(server_quic_bind) = conf.server_quic_bind {
+        let (certs, key) = match crate::utils::cert::get_cert_and_key(conf.cert.clone(), conf.key.clone()) {
+            Ok((certs, key)) => (certs, key),
+            Err(e) => {
+                log::error!("Failed to load cert/key for peer server: {:?}", e);
+                panic!("{:?}", e)
+            }
+        };
+        if let Err(e) = peer_manager.clone().start_server(server_quic_bind, certs, key).await {
+            log::error!("Failed to start peer server: {:?}", e);
+        } else {
+            log::info!("Peer server started on {}", server_quic_bind);
+        }
+    }
+
+    if conf.persistence {
+        sync_peer_servers_to_db(&conf.peer_servers).await;
+        if let Err(e) = peer_manager.clone().load_and_start_outbound_peers().await {
+            log::error!("Failed to load and start outbound peers: {:?}", e);
+        }
     } else {
-        socket2::Domain::IPV6
-    };
-    let socket = io_convert(
-        socket2::Socket::new(domain, socket2::Type::STREAM, None),
-        |e| format!("new STREAM {:?}", e),
-    )?;
-    if domain == socket2::Domain::IPV6 {
-        io_convert(socket.set_only_v6(false), |e| {
-            format!("set_only_v6 {:?}", e)
-        })?;
+        for peer_addr in conf.peer_servers.clone() {
+            let manager = peer_manager.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                manager.connect_to_peer(peer_addr);
+            });
+        }
     }
-    io_convert(socket.set_reuse_address(true), |e| {
-        format!("set_reuse_address {:?}", e)
-    })?;
-    io_convert(socket.set_nonblocking(true), |e| {
-        format!("set_nonblocking {:?}", e)
-    })?;
-    io_convert(socket.bind(&address.into()), |e| {
-        format!("bind {:?},{:?}", address, e)
-    })?;
-    io_convert(socket.listen(1024), |e| {
-        format!("listen {:?},{:?}", address, e)
-    })?;
-    Ok(socket.into())
 }
 
-fn create_udp(port: u16, host: Option<&str>) -> io::Result<std::net::UdpSocket> {
-    let address_str = match host {
-        Some(h) => format!("{}:{}", h, port),
-        None => format!("[::]:{}", port),
-    };
-    let address: std::net::SocketAddr = address_str.parse().unwrap();
-    let domain = if address.is_ipv4() {
-        socket2::Domain::IPV4
-    } else {
-        socket2::Domain::IPV6
-    };
-    let socket = io_convert(
-        socket2::Socket::new(domain, socket2::Type::DGRAM, None),
-        |e| format!("new DGRAM {:?}", e),
-    )?;
-    if domain == socket2::Domain::IPV6 {
-        io_convert(socket.set_only_v6(false), |e| {
-            format!("set_only_v6 {:?}", e)
-        })?;
-    }
-    io_convert(socket.set_reuse_address(true), |e| {
-        format!("set_reuse_address {:?}", e)
-    })?;
-    io_convert(socket.set_nonblocking(true), |e| {
-        format!("set_nonblocking {:?}", e)
-    })?;
-    io_convert(socket.bind(&address.into()), |e| {
-        format!("bind {:?},{:?}", address, e)
-    })?;
-    Ok(socket.into())
-}
+/// 将配置文件中的 peer server 写入数据库（已存在的跳过）
+async fn sync_peer_servers_to_db(peer_servers: &[String]) {
+    use server::control_server::db::{PeerServerRecord, PeerServerSource};
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
 
-#[inline]
-pub fn io_convert<T, R: Display, F: FnOnce(&io::Error) -> R>(
-    rs: io::Result<T>,
-    f: F,
-) -> io::Result<T> {
-    rs.map_err(|e| io::Error::new(e.kind(), format!("{},internal error:{:?}", f(&e), e)))
+    for peer_addr in peer_servers {
+        let record = PeerServerRecord {
+            server_addr: peer_addr.clone(),
+            source: PeerServerSource::Config,
+            created_at: now,
+        };
+        match server::control_server::db::save_peer_server_if_not_exists(&record).await {
+            Ok(true) => log::info!("Initialized peer server '{}' from config", peer_addr),
+            Ok(false) => {}
+            Err(e) => log::error!("Failed to save peer server {}: {}", peer_addr, e),
+        }
+    }
 }
