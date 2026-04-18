@@ -1,1 +1,8 @@
 /target
+/data/*
+!/data/.gitkeep
+/config.toml
+/cert.pem
+/key.pem
+/network_control.db
+/logs/

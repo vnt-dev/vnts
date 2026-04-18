@@ -1,0 +1,19 @@
+services:
+  vnts:
+    build:
+      context: .
+      args:
+        RUST_VERSION: 1.93.1
+    image: vnts2:local
+    container_name: vnts2
+    restart: unless-stopped
+    volumes:
+      # The app writes config.toml, network_control.db, cert.pem, key.pem and logs
+      # relative to its working directory. Persist all of them in ./data.
+      - ./data:/app/data
+    ports:
+      - "29871:29871/tcp"
+      - "29872:29872/tcp"
+      - "29872:29872/udp"
+      # Optional peer server port used by server_quic_bind.
+      - "29873:29873/udp"

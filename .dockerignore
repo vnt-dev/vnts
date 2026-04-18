@@ -1,0 +1,10 @@
+.git
+.github
+target
+data
+logs
+config.toml
+cert.pem
+key.pem
+network_control.db
+*.log
