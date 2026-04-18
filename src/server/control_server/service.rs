@@ -33,9 +33,9 @@ pub struct NetworkConfig {
 
 #[derive(Clone)]
 pub struct ControlService {
-    default_net: Ipv4Net,
     default_lease_duration: Duration,
     db_nets: Arc<RwLock<HashMap<String, NetworkConfig>>>,
+    network_secrets: Arc<HashMap<String, String>>,
     network_state_provider: NetworkStateProvider,
     network_init_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     peer_manager: Arc<RwLock<Option<Arc<crate::server::peer_server::PeerServerManager>>>>,
@@ -43,19 +43,27 @@ pub struct ControlService {
 
 impl ControlService {
     pub async fn new(
+        default_network_code: String,
         default_net: Ipv4Net,
         custom_nets: HashMap<String, Ipv4Net>,
+        network_secrets: HashMap<String, String>,
         lease_duration: Duration,
     ) -> Self {
         let network_states = Arc::new(DashMap::new());
 
-        Self::save_config_networks_to_db(&default_net, &custom_nets, lease_duration).await;
+        Self::save_config_networks_to_db(
+            &default_network_code,
+            &default_net,
+            &custom_nets,
+            lease_duration,
+        )
+        .await;
         let db_nets = Self::load_networks_from_db().await;
 
         let service = Self {
-            default_net,
             default_lease_duration: lease_duration,
             db_nets: Arc::new(RwLock::new(db_nets)),
+            network_secrets: Arc::new(network_secrets),
             network_state_provider: NetworkStateProvider::new(network_states),
             network_init_locks: Arc::new(DashMap::new()),
             peer_manager: Arc::new(RwLock::new(None)),
@@ -71,7 +79,8 @@ impl ControlService {
     }
 
     async fn save_config_networks_to_db(
-        _default_net: &Ipv4Net,
+        default_network_code: &str,
+        default_net: &Ipv4Net,
         custom_nets: &HashMap<String, Ipv4Net>,
         lease_duration: Duration,
     ) {
@@ -80,6 +89,28 @@ impl ControlService {
             .unwrap_or_default()
             .as_secs() as i64;
         let lease_secs = lease_duration.as_secs() as i64;
+
+        let default_gateway = Ipv4Addr::from(u32::from(default_net.network()) + 1);
+        let default_record = NetworkRecord {
+            network_code: default_network_code.to_string(),
+            gateway: default_gateway.to_string(),
+            netmask: default_net.prefix_len(),
+            lease_duration: lease_secs,
+            source: NetworkSource::Config,
+            created_at: now,
+        };
+        match db::save_network_if_not_exists(&default_record).await {
+            Ok(true) => log::info!(
+                "Initialized default network '{}' from config",
+                default_network_code
+            ),
+            Ok(false) => {}
+            Err(e) => log::error!(
+                "Failed to save default network {}: {}",
+                default_network_code,
+                e
+            ),
+        }
 
         for (code, net) in custom_nets {
             let gateway = Ipv4Addr::from(u32::from(net.network()) + 1);
@@ -129,15 +160,10 @@ impl ControlService {
         sender: Sender<Bytes>,
     ) -> anyhow::Result<Session> {
         reg_req.check()?;
+        self.validate_registration(&reg_req)?;
         let network_code = reg_req.network_code.clone();
         let registration_mode = reg_req.registration_mode;
-
-        let is_new_network = !self.db_nets.read().contains_key(&reg_req.network_code);
-        let config = self.network_config(&reg_req.network_code, reg_req.ip);
-
-        if is_new_network {
-            self.db_nets.write().insert(reg_req.network_code.clone(), config);
-        }
+        let config = self.network_config(&reg_req.network_code)?;
 
         let state = self
             .get_or_create_network_state(reg_req.network_code.clone(), config)
@@ -172,27 +198,6 @@ impl ControlService {
             )
         };
 
-        if is_new_network {
-            let gateway = Ipv4Addr::from(u32::from(config.net.network()) + 1);
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
-            let record = NetworkRecord {
-                network_code: network_code.clone(),
-                gateway: gateway.to_string(),
-                netmask: config.net.prefix_len(),
-                lease_duration: config.lease_duration.as_secs() as i64,
-                source: NetworkSource::DeviceRegister,
-                created_at: now,
-            };
-            tokio::spawn(async move {
-                if let Err(e) = db::save_network(&record).await {
-                    log::error!("Failed to save new network: {:?}", e);
-                }
-            });
-        }
-
         if matches!(registration_mode, RegistrationMode::Normal) {
             if let Some(entry) = entry {
                 let nc = network_code.clone();
@@ -208,20 +213,47 @@ impl ControlService {
         Ok(session)
     }
 
-    fn network_config(&self, network_code: &str, ip: Option<Ipv4Addr>) -> NetworkConfig {
-        if let Some(config) = self.db_nets.read().get(network_code) {
-            return *config;
-        }
-        let net = if let Some(ip) = ip {
-            Ipv4Net::new_assert(Ipv4Net::new_assert(ip, 24).network(), 24)
-        } else {
-            self.default_net
+    fn network_config(&self, network_code: &str) -> anyhow::Result<NetworkConfig> {
+        self.db_nets
+            .read()
+            .get(network_code)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("network_code '{}' is not allowed", network_code))
+    }
+
+    fn validate_registration(&self, reg_req: &RegRequestMsg) -> anyhow::Result<()> {
+        let Some(expected_secret) = self.network_secrets.get(&reg_req.network_code) else {
+            bail!(
+                "network_code '{}' is not allowed by server configuration",
+                reg_req.network_code
+            );
         };
-        NetworkConfig {
-            net,
-            lease_duration: self.default_lease_duration,
-            source: NetworkSource::DeviceRegister,
+
+        let Some(provided_secret) = reg_req.key_sign.as_deref() else {
+            bail!(
+                "network_code '{}' requires a network secret",
+                reg_req.network_code
+            );
+        };
+
+        if provided_secret != expected_secret {
+            bail!(
+                "invalid network secret for network_code '{}'",
+                reg_req.network_code
+            );
         }
+
+        Ok(())
+    }
+
+    fn ensure_network_secret_configured(&self, network_code: &str) -> anyhow::Result<()> {
+        if !self.network_secrets.contains_key(network_code) {
+            bail!(
+                "network_code '{}' has no configured secret. Add it under [network_secrets] and restart the server",
+                network_code
+            );
+        }
+        Ok(())
     }
 
     /// DCL: 获取或创建 NetworkState
@@ -378,6 +410,8 @@ impl ControlService {
         netmask: u8,
         lease_duration: Option<Duration>,
     ) -> anyhow::Result<()> {
+        self.ensure_network_secret_configured(&network_code)?;
+
         if self.db_nets.read().contains_key(&network_code) {
             bail!("网络编号 '{}' 已存在", network_code);
         }
