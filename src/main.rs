@@ -106,9 +106,15 @@ async fn main() {
         }
     }
 
+    log::info!(
+        "Loaded {} configured networks and {} network secrets",
+        conf.custom_nets.len(),
+        conf.network_secrets.len()
+    );
+
     let control_service = ControlService::new(
-        conf.network,
         conf.custom_nets,
+        conf.network_secrets,
         Duration::from_secs(conf.lease_duration),
     )
     .await;

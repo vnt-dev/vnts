@@ -7,6 +7,8 @@ use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
+pub const DEFAULT_NETWORK_CODE: &str = "default";
+
 #[derive(Debug)]
 pub struct LoadedConfig {
     pub path: PathBuf,
@@ -21,13 +23,6 @@ pub struct ConfigFile {
     pub ws_bind: Option<SocketAddr>,
     pub cert: Option<PathBuf>,
     pub key: Option<PathBuf>,
-    #[serde(default = "default_network_code")]
-    pub default_network_code: String,
-    pub network: Ipv4Net,
-    #[serde(default)]
-    pub custom_nets: HashMap<String, Ipv4Net>,
-    #[serde(default)]
-    pub network_secrets: HashMap<String, String>,
     #[serde(default)]
     pub white_list: HashSet<String>,
     pub lease_duration: u64,
@@ -40,10 +35,10 @@ pub struct ConfigFile {
     #[serde(default)]
     pub peer_servers: Vec<String>,
     pub server_token: Option<String>,
-}
-
-fn default_network_code() -> String {
-    "default".to_string()
+    #[serde(default)]
+    pub custom_nets: HashMap<String, Ipv4Net>,
+    #[serde(default)]
+    pub network_secrets: HashMap<String, String>,
 }
 
 fn generate_strong_secret() -> String {
@@ -65,9 +60,14 @@ fn generate_strong_secret() -> String {
 
 impl Default for ConfigFile {
     fn default() -> Self {
-        let default_network_code = default_network_code();
+        let mut custom_nets = HashMap::new();
+        custom_nets.insert(
+            DEFAULT_NETWORK_CODE.to_string(),
+            Ipv4Net::new_assert(Ipv4Addr::new(10, 26, 0, 0), 24),
+        );
+
         let mut network_secrets = HashMap::new();
-        network_secrets.insert(default_network_code.clone(), generate_strong_secret());
+        network_secrets.insert(DEFAULT_NETWORK_CODE.to_string(), generate_strong_secret());
 
         Self {
             tcp_bind: Some("0.0.0.0:29872".parse().unwrap()),
@@ -75,9 +75,7 @@ impl Default for ConfigFile {
             ws_bind: Some("0.0.0.0:29872".parse().unwrap()),
             cert: None,
             key: None,
-            default_network_code,
-            network: Ipv4Net::new_assert(Ipv4Addr::new(10, 26, 0, 0), 24),
-            custom_nets: Default::default(),
+            custom_nets,
             network_secrets,
             white_list: Default::default(),
             lease_duration: 24 * 60 * 60,
@@ -110,6 +108,8 @@ impl ConfigFile {
         let path = path.unwrap_or_else(|| Path::new("config.toml").to_path_buf());
         if !path.exists() {
             let file = Self::default();
+            file.validate()
+                .with_context(|| "Generated default config is invalid".to_string())?;
             file.save_to(&path)?;
             return Ok(LoadedConfig {
                 path,
@@ -132,12 +132,18 @@ impl ConfigFile {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
-        validate_network_code(&self.default_network_code, "default_network_code")?;
-
-        if self.custom_nets.contains_key(&self.default_network_code) {
+        if self.custom_nets.is_empty() {
             bail!(
-                "default_network_code '{}' must not also appear in [custom_nets]",
-                self.default_network_code
+                "custom_nets must contain at least one network, and it must include '{}'",
+                DEFAULT_NETWORK_CODE
+            );
+        }
+
+        if !self.custom_nets.contains_key(DEFAULT_NETWORK_CODE) {
+            bail!(
+                "custom_nets must contain '{}'. Clients must use network_code='{}' to join the default network",
+                DEFAULT_NETWORK_CODE,
+                DEFAULT_NETWORK_CODE
             );
         }
 
@@ -149,11 +155,12 @@ impl ConfigFile {
             validate_network_code(code, "white_list")?;
         }
 
-        let mut required_codes = HashSet::new();
-        required_codes.insert(self.default_network_code.clone());
-        required_codes.extend(self.custom_nets.keys().cloned());
+        for (code, secret) in self.network_secrets.iter() {
+            validate_network_code(code, "network_secrets")?;
+            validate_network_secret(code, secret)?;
+        }
 
-        for code in required_codes.iter() {
+        for code in self.custom_nets.keys() {
             let Some(secret) = self.network_secrets.get(code) else {
                 bail!(
                     "Missing secret for network_code '{}'. Add it under [network_secrets]",
@@ -161,16 +168,6 @@ impl ConfigFile {
                 );
             };
             validate_network_secret(code, secret)?;
-        }
-
-        for code in self.network_secrets.keys() {
-            validate_network_code(code, "network_secrets")?;
-            if !required_codes.contains(code) {
-                bail!(
-                    "network_secrets contains unknown network_code '{}'. Add it to custom_nets or make it the default_network_code",
-                    code
-                );
-            }
         }
 
         Ok(())
@@ -230,11 +227,7 @@ tcp_bind = "0.0.0.0:29872"
 quic_bind = "0.0.0.0:29872"
 ws_bind = "0.0.0.0:29872"
 
-# Default network name and CIDR.
-default_network_code = "default"
-network = "10.26.0.0/24"
-
-# Optional allow-list. This does not replace network secrets.
+# Optional allow-list. Currently not enforced for registration.
 white_list = []
 
 # Lease duration in seconds.
@@ -257,13 +250,18 @@ persistence = true
 # peer_servers = ["server1.example.com:29873", "192.168.1.100:29873"]
 # server_token = "your-secret-token"
 
-# Every allowed network_code must have a strong secret here.
-[network_secrets]
-default = "Use-A-Long-Strong-Secret-At-Least-24-Chars!"
-
+# Every allowed network_code must be declared here.
+# Clients must explicitly use network_code = "default" to join the default network.
 [custom_nets]
+default = "10.26.0.0/24"
 # office = "10.25.0.0/24"
 # dev = "10.27.1.0/24"
+
+# Every configured network_code must have a strong secret here.
+[network_secrets]
+default = "Use-A-Long-Strong-Secret-At-Least-24-Chars!"
+# office = "Replace-With-A-Different-Long-Strong-Secret!"
+# dev = "Another-Different-Long-Strong-Secret!"
 "#;
     println!("{}", str);
 }

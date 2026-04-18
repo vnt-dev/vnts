@@ -43,21 +43,13 @@ pub struct ControlService {
 
 impl ControlService {
     pub async fn new(
-        default_network_code: String,
-        default_net: Ipv4Net,
         custom_nets: HashMap<String, Ipv4Net>,
         network_secrets: HashMap<String, String>,
         lease_duration: Duration,
     ) -> Self {
         let network_states = Arc::new(DashMap::new());
 
-        Self::save_config_networks_to_db(
-            &default_network_code,
-            &default_net,
-            &custom_nets,
-            lease_duration,
-        )
-        .await;
+        Self::save_config_networks_to_db(&custom_nets, lease_duration).await;
         let db_nets = Self::load_networks_from_db().await;
 
         let service = Self {
@@ -78,39 +70,12 @@ impl ControlService {
         service
     }
 
-    async fn save_config_networks_to_db(
-        default_network_code: &str,
-        default_net: &Ipv4Net,
-        custom_nets: &HashMap<String, Ipv4Net>,
-        lease_duration: Duration,
-    ) {
+    async fn save_config_networks_to_db(custom_nets: &HashMap<String, Ipv4Net>, lease_duration: Duration) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
         let lease_secs = lease_duration.as_secs() as i64;
-
-        let default_gateway = Ipv4Addr::from(u32::from(default_net.network()) + 1);
-        let default_record = NetworkRecord {
-            network_code: default_network_code.to_string(),
-            gateway: default_gateway.to_string(),
-            netmask: default_net.prefix_len(),
-            lease_duration: lease_secs,
-            source: NetworkSource::Config,
-            created_at: now,
-        };
-        match db::save_network_if_not_exists(&default_record).await {
-            Ok(true) => log::info!(
-                "Initialized default network '{}' from config",
-                default_network_code
-            ),
-            Ok(false) => {}
-            Err(e) => log::error!(
-                "Failed to save default network {}: {}",
-                default_network_code,
-                e
-            ),
-        }
 
         for (code, net) in custom_nets {
             let gateway = Ipv4Addr::from(u32::from(net.network()) + 1);
