@@ -148,16 +148,16 @@ impl ConfigFile {
         }
 
         for code in self.custom_nets.keys() {
-            validate_network_code(code, "custom_nets")?;
+            validate_network_code_value(code, "custom_nets")?;
         }
 
         for code in self.white_list.iter() {
-            validate_network_code(code, "white_list")?;
+            validate_network_code_value(code, "white_list")?;
         }
 
         for (code, secret) in self.network_secrets.iter() {
-            validate_network_code(code, "network_secrets")?;
-            validate_network_secret(code, secret)?;
+            validate_network_code_value(code, "network_secrets")?;
+            validate_network_secret_value(code, secret)?;
         }
 
         for code in self.custom_nets.keys() {
@@ -167,14 +167,14 @@ impl ConfigFile {
                     code
                 );
             };
-            validate_network_secret(code, secret)?;
+            validate_network_secret_value(code, secret)?;
         }
 
         Ok(())
     }
 }
 
-fn validate_network_code(code: &str, field_name: &str) -> anyhow::Result<()> {
+pub fn validate_network_code_value(code: &str, field_name: &str) -> anyhow::Result<()> {
     if code.trim().is_empty() {
         bail!("{field_name} contains an empty network_code");
     }
@@ -187,7 +187,7 @@ fn validate_network_code(code: &str, field_name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_network_secret(network_code: &str, secret: &str) -> anyhow::Result<()> {
+pub fn validate_network_secret_value(network_code: &str, secret: &str) -> anyhow::Result<()> {
     if secret.len() < 24 {
         bail!(
             "Secret for network_code '{}' is too short. Use at least 24 characters",
@@ -250,14 +250,14 @@ persistence = true
 # peer_servers = ["server1.example.com:29873", "192.168.1.100:29873"]
 # server_token = "your-secret-token"
 
-# Every allowed network_code must be declared here.
-# Clients must explicitly use network_code = "default" to join the default network.
+# Bootstrap networks. When persistence is enabled and the database is empty,
+# these entries are imported into the DB on first start.
 [custom_nets]
 default = "10.26.0.0/24"
 # office = "10.25.0.0/24"
 # dev = "10.27.1.0/24"
 
-# Every configured network_code must have a strong secret here.
+# Bootstrap secrets for the first import.
 [network_secrets]
 default = "Use-A-Long-Strong-Secret-At-Least-24-Chars!"
 # office = "Replace-With-A-Different-Long-Strong-Secret!"

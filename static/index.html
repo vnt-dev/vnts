@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>IoT 控制中心</title>
+    <title>VNTS Network Console</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
@@ -33,7 +33,7 @@
                 <div class="flex items-center space-x-6">
                     <div class="flex items-center">
                         <i class="fa-solid fa-network-wired text-blue-600 text-xl mr-2"></i>
-                        <span class="font-bold text-xl">IoT Control Center</span>
+                        <span class="font-bold text-xl">VNTS Network Console</span>
                     </div>
                     <nav v-if="isLoggedIn" class="flex space-x-4">
                         <button @click="navigateToNetworks"
@@ -111,7 +111,10 @@
                         class="bg-white p-6 rounded-lg shadow hover:shadow-md transition border-l-4 border-blue-500 group">
                         <div class="flex justify-between items-start">
                             <div class="cursor-pointer flex-1" @click="selectNetwork(net.network_code)">
-                                <h3 class="text-lg font-bold text-gray-800 group-hover:text-blue-600">{{ net.network_code }}</h3>
+                                <div class="flex items-center gap-2">
+                                    <h3 class="text-lg font-bold text-gray-800 group-hover:text-blue-600">{{ net.network_code }}</h3>
+                                    <span v-if="net.is_default" class="px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 text-[10px] font-semibold uppercase tracking-wide">default</span>
+                                </div>
                                 <p class="text-gray-500 text-sm mt-1">{{ net.net }}</p>
                                 <p class="text-gray-400 text-xs mt-1">
                                     <i class="fa-solid fa-server mr-1"></i>网关: {{ net.gateway }}
@@ -134,11 +137,28 @@
                                         <i class="fa-solid fa-pen-to-square"></i>
                                     </button>
                                     <button @click.stop="confirmDeleteNetwork(net)"
-                                        class="text-red-500 hover:text-red-700 p-1" title="删除">
+                                        :disabled="!net.can_delete"
+                                        :class="net.can_delete ? 'text-red-500 hover:text-red-700' : 'text-gray-300 cursor-not-allowed'"
+                                        :title="net.can_delete ? '删除' : '默认 network 不允许删除'"
+                                        class="p-1">
                                         <i class="fa-solid fa-trash"></i>
                                     </button>
                                 </div>
                             </div>
+                        </div>
+                        <div class="mt-4 rounded-lg bg-slate-900 p-3 text-slate-100">
+                            <div class="flex items-center justify-between gap-3 text-xs text-slate-300">
+                                <span class="flex items-center">
+                                    <i class="fa-solid fa-key mr-1"></i>Network Secret
+                                </span>
+                                <button
+                                    @click.stop="copySecret(net.network_code, net.secret)"
+                                    class="text-blue-300 hover:text-blue-100 transition"
+                                >
+                                    {{ copiedSecretCode === net.network_code ? 'Copied' : 'Copy' }}
+                                </button>
+                            </div>
+                            <code class="mt-2 block break-all text-[12px] leading-5">{{ net.secret || '(empty)' }}</code>
                         </div>
                         <div class="mt-4 flex items-center text-xs text-gray-400 cursor-pointer" @click="selectNetwork(net.network_code)">
                             <span class="mr-2">点击查看设备</span>
@@ -446,6 +466,13 @@
                         class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500"
                         placeholder="如: 24" required>
                 </div>
+                <div class="mb-4">
+                    <label class="block text-gray-700 text-sm font-bold mb-2">Network Secret</label>
+                    <input v-model="networkForm.secret" type="text" minlength="24"
+                        class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm"
+                        placeholder="At least 24 chars, no whitespace" required>
+                    <p class="text-gray-400 text-xs mt-1">每个 network_code 都必须使用长强密钥。</p>
+                </div>
                 <div class="mb-6">
                     <label class="block text-gray-700 text-sm font-bold mb-2">IP租期（秒）</label>
                     <input v-model.number="networkForm.lease_duration" type="number" min="60"
@@ -585,7 +612,8 @@ createApp({
         // 网络表单
         const showNetworkModal = ref(false);
         const isEditMode = ref(false);
-        const networkForm = ref({ network_code: '', gateway: '', netmask: 24, lease_duration: null });
+        const networkForm = ref({ network_code: '', gateway: '', netmask: 24, secret: '', lease_duration: null });
+        const copiedSecretCode = ref('');
 
         // 确认删除
         const showConfirmModal = ref(false);
@@ -601,12 +629,13 @@ createApp({
             loading.value = true;
             modalErrorMsg.value = '';
             errorMsg.value = '';
+            const isLoginRequest = endpoint === '/login';
             const headers = { 'Content-Type': 'application/json', ...options.headers };
             if (token.value) headers['Authorization'] = `Bearer ${token.value}`;
             try {
                 const res = await fetch(`${API_BASE}${endpoint}`, { ...options, headers });
                 const json = await res.json();
-                if (res.status === 401 || json.code === 401) {
+                if (!isLoginRequest && (res.status === 401 || json.code === 401)) {
                     logout();
                     errorMsg.value = '登录已过期';
                     return null;
@@ -685,7 +714,7 @@ createApp({
                 localStorage.setItem('jwt_token', data.token);
                 localStorage.setItem('username', loginForm.value.username);
                 username.value = loginForm.value.username;
-                fetchNetworks();
+                handleRouteChange();
             }
         };
 
@@ -708,6 +737,21 @@ createApp({
             if (!isLoggedIn.value) return;
             const data = await request('/peer_servers');
             if (data) peerServers.value = data;
+        };
+
+        const copySecret = async (networkCode, secret) => {
+            if (!secret) return;
+            try {
+                await navigator.clipboard.writeText(secret);
+                copiedSecretCode.value = networkCode;
+                setTimeout(() => {
+                    if (copiedSecretCode.value === networkCode) {
+                        copiedSecretCode.value = '';
+                    }
+                }, 1500);
+            } catch (e) {
+                modalErrorMsg.value = '复制 secret 失败';
+            }
         };
 
         // 停止设备自动刷新
@@ -832,7 +876,7 @@ createApp({
         // 网络管理
         const openAddNetworkModal = () => {
             isEditMode.value = false;
-            networkForm.value = { network_code: '', gateway: '', netmask: 24, lease_duration: null };
+            networkForm.value = { network_code: '', gateway: '', netmask: 24, secret: '', lease_duration: null };
             modalErrorMsg.value = '';
             showNetworkModal.value = true;
         };
@@ -843,6 +887,7 @@ createApp({
                 network_code: net.network_code,
                 gateway: net.gateway,
                 netmask: net.netmask,
+                secret: net.secret || '',
                 lease_duration: net.lease_duration
             };
             modalErrorMsg.value = '';
@@ -862,6 +907,7 @@ createApp({
                     body: JSON.stringify({
                         gateway: form.gateway,
                         netmask: form.netmask,
+                        secret: form.secret,
                         lease_duration: form.lease_duration
                     })
                 });
@@ -869,7 +915,8 @@ createApp({
                 const body = {
                     network_code: form.network_code,
                     gateway: form.gateway,
-                    netmask: form.netmask
+                    netmask: form.netmask,
+                    secret: form.secret
                 };
                 if (form.lease_duration) body.lease_duration = form.lease_duration;
                 result = await request('/networks', { method: 'POST', body: JSON.stringify(body) });
@@ -882,6 +929,10 @@ createApp({
 
         // 删除确认
         const confirmDeleteNetwork = (net) => {
+            if (!net.can_delete) {
+                modalErrorMsg.value = '默认 network 不允许删除';
+                return;
+            }
             deleteType.value = 'network';
             deleteTarget.value = net;
             confirmMessage.value = `确定要删除网络 "${net.network_code}" 吗？此操作不可撤销。`;
@@ -1174,9 +1225,9 @@ createApp({
         };
 
         onMounted(() => {
+            window.addEventListener('hashchange', handleRouteChange);
             if (isLoggedIn.value) {
                 handleRouteChange();
-                window.addEventListener('hashchange', handleRouteChange);
             }
         });
 
@@ -1198,6 +1249,8 @@ createApp({
             networks,
             networkSearch,
             filteredNetworks,
+            copiedSecretCode,
+            copySecret,
             selectNetwork,
             devices,
             deviceSearch,

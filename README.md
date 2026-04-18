@@ -17,7 +17,7 @@ The server reads `config.toml` from its current working directory by default.
 - In Docker, the working directory is `/app/data`, so the effective config path is `/app/data/config.toml`.
 - You can also pass a custom config path with `--conf /path/to/config.toml`.
 
-The repository includes a sample file at `config.example.toml`.
+The repository includes a sample file at `data/config.example.toml`.
 
 ### Configuration fields
 
@@ -173,7 +173,7 @@ That means the following files will persist on the host:
 1. Copy the sample config:
 
 ```bash
-cp config.example.toml data/config.toml
+cp data/config.example.toml data/config.toml
 ```
 
 2. Edit `data/config.toml` as needed.
@@ -223,7 +223,7 @@ docker compose up -d --build
 
 3. After the first start, inspect the generated files in `./data`.
 
-This is convenient for initial setup, but for controlled deployments it is better to create `data/config.toml` explicitly from `config.example.toml`.
+This is convenient for initial setup, but for controlled deployments it is better to create `data/config.toml` explicitly from `data/config.example.toml`.
 
 ### Updating the deployment
 

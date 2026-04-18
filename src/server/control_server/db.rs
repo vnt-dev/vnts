@@ -10,6 +10,10 @@ use std::path::Path;
 static DB_POOL: OnceCell<SqlitePool> = OnceCell::new();
 const DB_FILE: &str = "network_control.db";
 
+pub fn db_pool_initialized() -> bool {
+    DB_POOL.get().is_some()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NetworkSource {
     Config = 0,
@@ -66,6 +70,7 @@ pub struct NetworkRecord {
     pub network_code: String,
     pub gateway: String,
     pub netmask: u8,
+    pub secret: String,
     pub lease_duration: i64,
     pub source: NetworkSource,
     pub created_at: i64,
@@ -74,7 +79,7 @@ pub struct NetworkRecord {
 impl NetworkRecord {
     pub fn to_ipv4_net(&self) -> Option<Ipv4Net> {
         let gateway: Ipv4Addr = self.gateway.parse().ok()?;
-        let network_ip = Ipv4Addr::from(u32::from(gateway) - 1);
+        let network_ip = Ipv4Addr::from(u32::from(gateway).checked_sub(1)?);
         Ipv4Net::new(network_ip, self.netmask).ok()
     }
 }
@@ -116,6 +121,7 @@ pub async fn init_db_pool() -> anyhow::Result<()> {
             network_code TEXT PRIMARY KEY,
             gateway TEXT NOT NULL,
             netmask INTEGER NOT NULL,
+            secret TEXT NOT NULL DEFAULT '',
             lease_duration INTEGER NOT NULL,
             source INTEGER NOT NULL DEFAULT 0,
             created_at INTEGER NOT NULL
@@ -127,6 +133,9 @@ pub async fn init_db_pool() -> anyhow::Result<()> {
 
     // migration: 旧表可能缺少 source 字段
     let _ = sqlx::query("ALTER TABLE networks ADD COLUMN source INTEGER NOT NULL DEFAULT 0")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE networks ADD COLUMN secret TEXT NOT NULL DEFAULT ''")
         .execute(&pool)
         .await;
 
@@ -170,12 +179,13 @@ pub async fn save_network(record: &NetworkRecord) -> anyhow::Result<()> {
     };
 
     sqlx::query(
-        r#"INSERT OR REPLACE INTO networks (network_code, gateway, netmask, lease_duration, source, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)"#,
+        r#"INSERT OR REPLACE INTO networks (network_code, gateway, netmask, secret, lease_duration, source, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)"#,
     )
     .bind(&record.network_code)
     .bind(&record.gateway)
     .bind(record.netmask as i32)
+    .bind(&record.secret)
     .bind(record.lease_duration)
     .bind(record.source as i32)
     .bind(record.created_at)
@@ -192,12 +202,13 @@ pub async fn save_network_if_not_exists(record: &NetworkRecord) -> anyhow::Resul
     };
 
     let result = sqlx::query(
-        r#"INSERT OR IGNORE INTO networks (network_code, gateway, netmask, lease_duration, source, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)"#,
+        r#"INSERT OR IGNORE INTO networks (network_code, gateway, netmask, secret, lease_duration, source, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)"#,
     )
     .bind(&record.network_code)
     .bind(&record.gateway)
     .bind(record.netmask as i32)
+    .bind(&record.secret)
     .bind(record.lease_duration)
     .bind(record.source as i32)
     .bind(record.created_at)
@@ -212,6 +223,7 @@ pub async fn update_network(
     network_code: &str,
     gateway: &str,
     netmask: u8,
+    secret: &str,
     lease_duration: i64,
 ) -> anyhow::Result<bool> {
     let Some(pool) = DB_POOL.get() else {
@@ -219,10 +231,11 @@ pub async fn update_network(
     };
 
     let result = sqlx::query(
-        r#"UPDATE networks SET gateway = ?, netmask = ?, lease_duration = ? WHERE network_code = ?"#,
+        r#"UPDATE networks SET gateway = ?, netmask = ?, secret = ?, lease_duration = ? WHERE network_code = ?"#,
     )
     .bind(gateway)
     .bind(netmask as i32)
+    .bind(secret)
     .bind(lease_duration)
     .bind(network_code)
     .execute(pool)
@@ -253,7 +266,7 @@ pub async fn get_network(network_code: &str) -> anyhow::Result<Option<NetworkRec
     };
 
     let row_option = sqlx::query(
-        r#"SELECT network_code, gateway, netmask, lease_duration, source, created_at FROM networks WHERE network_code = ?"#,
+        r#"SELECT network_code, gateway, netmask, secret, lease_duration, source, created_at FROM networks WHERE network_code = ?"#,
     )
     .bind(network_code)
     .fetch_optional(pool)
@@ -268,6 +281,7 @@ pub async fn get_network(network_code: &str) -> anyhow::Result<Option<NetworkRec
                 network_code: row.get("network_code"),
                 gateway: row.get("gateway"),
                 netmask: netmask as u8,
+                secret: row.get("secret"),
                 lease_duration: row.get("lease_duration"),
                 source: NetworkSource::from_i32(source),
                 created_at: row.get("created_at"),
@@ -283,7 +297,7 @@ pub async fn load_all_networks() -> anyhow::Result<Vec<NetworkRecord>> {
     };
 
     let records: Vec<NetworkRecord> = sqlx::query(
-        r#"SELECT network_code, gateway, netmask, lease_duration, source, created_at FROM networks ORDER BY created_at"#,
+        r#"SELECT network_code, gateway, netmask, secret, lease_duration, source, created_at FROM networks ORDER BY created_at"#,
     )
     .fetch(pool)
     .try_filter_map(|row| async move {
@@ -293,6 +307,7 @@ pub async fn load_all_networks() -> anyhow::Result<Vec<NetworkRecord>> {
             network_code: row.try_get("network_code")?,
             gateway: row.try_get("gateway")?,
             netmask: netmask as u8,
+            secret: row.try_get("secret")?,
             lease_duration: row.try_get("lease_duration")?,
             source: NetworkSource::from_i32(source),
             created_at: row.try_get("created_at")?,

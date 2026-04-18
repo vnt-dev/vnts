@@ -107,7 +107,7 @@ async fn main() {
     }
 
     log::info!(
-        "Loaded {} configured networks and {} network secrets",
+        "Loaded {} bootstrap networks and {} bootstrap secrets from config",
         conf.custom_nets.len(),
         conf.network_secrets.len()
     );

@@ -17,7 +17,7 @@ vnt 兼容服务端，支持以下能力：
 - 在 Docker 中，工作目录是 `/app/data`，所以默认配置文件路径是 `/app/data/config.toml`。
 - 也可以通过 `--conf /path/to/config.toml` 指定自定义配置文件路径。
 
-仓库中已提供示例配置文件：`config.example.toml`。
+仓库中已提供示例配置文件：`data/config.example.toml`。
 
 ### 配置项说明
 
@@ -173,7 +173,7 @@ Docker 中容器运行时的工作目录为：
 1. 复制示例配置：
 
 ```bash
-cp config.example.toml data/config.toml
+cp data/config.example.toml data/config.toml
 ```
 
 2. 按需修改 `data/config.toml`。
@@ -223,7 +223,7 @@ docker compose up -d --build
 
 3. 首次启动完成后，检查 `./data` 下自动生成的文件。
 
-这种方式适合初始化测试；正式部署时，建议先基于 `config.example.toml` 手动生成 `data/config.toml`。
+这种方式适合初始化测试；正式部署时，建议先基于 `data/config.example.toml` 手动生成 `data/config.toml`。
 
 ### 更新部署
 

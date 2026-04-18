@@ -205,6 +205,7 @@ struct CreateNetworkRequest {
     network_code: String,
     gateway: String,
     netmask: u8,
+    secret: String,
     lease_duration: Option<u64>,
 }
 
@@ -229,7 +230,13 @@ async fn create_network(
 
     match state
         .control_service
-        .add_network(body.network_code, gateway, body.netmask, lease_duration)
+        .add_network(
+            body.network_code,
+            gateway,
+            body.netmask,
+            lease_duration,
+            body.secret,
+        )
         .await
     {
         Ok(()) => ApiResponse::<()>::ok_msg("创建成功").into_response(),
@@ -241,6 +248,7 @@ async fn create_network(
 struct UpdateNetworkRequest {
     gateway: String,
     netmask: u8,
+    secret: String,
     lease_duration: u64,
 }
 
@@ -264,7 +272,13 @@ async fn update_network(
 
     match state
         .control_service
-        .update_network(&network_code, gateway, body.netmask, lease_duration)
+        .update_network(
+            &network_code,
+            gateway,
+            body.netmask,
+            lease_duration,
+            body.secret,
+        )
         .await
     {
         Ok(()) => ApiResponse::<()>::ok_msg("更新成功").into_response(),
