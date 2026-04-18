@@ -1,7 +1,7 @@
 use crate::server::TurnConfig;
 use crate::server::control_server::service::ControlService;
 use crate::server::peer_server::PeerServerManager;
-use crate::utils::config::ConfigFile;
+use crate::utils::config::{ConfigFile, LoadedConfig};
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,13 +32,25 @@ async fn main() {
     }
     utils::log::log_init("vnts2");
     log::info!("version: {:?}", env!("CARGO_PKG_VERSION"));
-    let conf = match ConfigFile::load_from(args.conf) {
+    let loaded = match ConfigFile::load_with_meta(args.conf) {
         Ok(conf) => conf,
         Err(e) => {
             log::error!("{e:?}");
             panic!("{e:?}")
         }
     };
+    let LoadedConfig {
+        path: config_path,
+        config: conf,
+        created_default,
+    } = loaded;
+    log::info!("Loaded config from {}", config_path.display());
+    if created_default {
+        log::warn!(
+            "Config file did not exist. A default config was created at {}",
+            config_path.display()
+        );
+    }
     if conf.persistence {
         if let Err(e) = server::control_server::db::init_db_pool().await {
             log::error!("{:?}", e);
@@ -65,8 +77,34 @@ async fn main() {
     };
 
     let web_bind = conf.web_bind;
-    let username = conf.username.unwrap_or("admin".to_string());
-    let password = conf.password.unwrap_or("admin".to_string());
+    let username = conf.username.unwrap_or_else(|| {
+        log::warn!(
+            "username is not set in {}. Falling back to default username 'admin'",
+            config_path.display()
+        );
+        "admin".to_string()
+    });
+    let password = conf.password.unwrap_or_else(|| {
+        log::warn!(
+            "password is not set in {}. Falling back to default password",
+            config_path.display()
+        );
+        "admin".to_string()
+    });
+    if let Some(bind_addr) = web_bind {
+        let using_default_credentials = username == "admin" && password == "admin";
+        log::info!(
+            "Web auth loaded for {} with username '{}'",
+            bind_addr,
+            username
+        );
+        if using_default_credentials {
+            log::warn!(
+                "Web auth is still using default credentials admin/admin from {}",
+                config_path.display()
+            );
+        }
+    }
 
     let control_service = ControlService::new(
         conf.network,

@@ -7,6 +7,7 @@ services:
     image: vnts2:local
     container_name: vnts2
     restart: unless-stopped
+    command: ["vnts2", "--conf", "/app/data/config.toml"]
     volumes:
       # The app writes config.toml, network_control.db, cert.pem, key.pem and logs
       # relative to its working directory. Persist all of them in ./data.

@@ -5,6 +5,13 @@ use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
+#[derive(Debug)]
+pub struct LoadedConfig {
+    pub path: PathBuf,
+    pub config: ConfigFile,
+    pub created_default: bool,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ConfigFile {
     pub tcp_bind: Option<SocketAddr>,
@@ -59,20 +66,28 @@ impl ConfigFile {
         Ok(())
     }
     pub fn load_from(path: Option<PathBuf>) -> anyhow::Result<Self> {
-        let path = if let Some(path) = path {
-            path
-        } else {
-            let path = Path::new("config.toml");
-            if !path.exists() {
-                let file = Self::default();
-                _ = file.save_to(path);
-                return Ok(file);
-            }
-            path.to_path_buf()
-        };
-        let content = std::fs::read_to_string(path)?;
+        Ok(Self::load_with_meta(path)?.config)
+    }
+
+    pub fn load_with_meta(path: Option<PathBuf>) -> anyhow::Result<LoadedConfig> {
+        let path = path.unwrap_or_else(|| Path::new("config.toml").to_path_buf());
+        if !path.exists() {
+            let file = Self::default();
+            file.save_to(&path)?;
+            return Ok(LoadedConfig {
+                path,
+                config: file,
+                created_default: true,
+            });
+        }
+
+        let content = std::fs::read_to_string(&path)?;
         let cfg: ConfigFile = toml::from_str(&content)?;
-        Ok(cfg)
+        Ok(LoadedConfig {
+            path,
+            config: cfg,
+            created_default: false,
+        })
     }
 }
 
