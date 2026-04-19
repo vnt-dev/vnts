@@ -1,0 +1,40 @@
+# Listener addresses. Remove a line to disable that protocol.
+tcp_bind = "0.0.0.0:29872"
+quic_bind = "0.0.0.0:29872"
+ws_bind = "0.0.0.0:29872"
+
+# Optional allow-list. Currently not enforced for registration.
+white_list = []
+
+# Lease duration in seconds.
+lease_duration = 86400
+
+# Web admin UI/API login.
+web_bind = "0.0.0.0:29871"
+username = "admin"
+password = "Change-This-Web-Password"
+
+# SQLite persistence.
+persistence = true
+
+# Leave these unset to auto-generate cert.pem and key.pem.
+# cert = "cert.pem"
+# key = "key.pem"
+
+# Optional peer-server settings.
+# server_quic_bind = "0.0.0.0:29873"
+# peer_servers = ["server1.example.com:29873", "192.168.1.100:29873"]
+# server_token = "your-secret-token"
+
+# Bootstrap networks. When persistence is enabled and the database is empty,
+# these entries are imported into the DB on first start.
+[custom_nets]
+default = "172.16.57.0/24"
+# office = "172.16.58.0/24"
+# dev = "172.16.59.0/24"
+
+# Bootstrap secrets for the first import.
+[network_secrets]
+default = "Change-This-Default-Secret-To-A-Strong-One-123!"
+# office = "Change-This-Office-Secret-To-A-Strong-One-456!"
+# dev = "Change-This-Dev-Secret-To-A-Strong-One-789!"
