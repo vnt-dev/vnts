@@ -1,6 +1,6 @@
 use crate::protocol::control_message::{
-    ClientSimpleInfoList, ConfirmRegResponseMsg, ErrorResponseMsg, RegResponseMsg, RequestMessage, ResponseMessage,
-    SelectiveBroadcast,
+    ClientSimpleInfoList, ConfirmRegResponseMsg, ErrorResponseMsg, RegResponseMsg, RequestMessage,
+    ResponseMessage, SelectiveBroadcast,
 };
 use crate::protocol::ip_packet_protocol::{HEAD_LENGTH, MsgType, NetPacket};
 use crate::protocol::rpc_message::rpc_message_request::RpcReqPayload;
@@ -100,7 +100,11 @@ impl ControlHandler {
             bail!("Session is not in pending confirmation state");
         }
 
-        if let Err(e) = session.network_state.confirm_registration(&session.network_code, &session.device_id).await {
+        if let Err(e) = session
+            .network_state
+            .confirm_registration(&session.network_code, &session.device_id)
+            .await
+        {
             log::error!("Failed to save confirmed device: {:?}", e);
             let msg_response = ErrorResponseMsg {
                 code: 500,
@@ -242,7 +246,9 @@ impl ControlHandler {
                     let network_code = session.network_code.clone();
                     let data = buf.freeze();
 
-                    let forwarded = peer_manager.forward_with_best_route(&network_code, dest, data.clone()).await;
+                    let forwarded = peer_manager
+                        .forward_with_best_route(&network_code, dest, data.clone())
+                        .await;
 
                     if !forwarded {
                         if let Some(sender) = session.network_state.sender_map().get(&dest) {

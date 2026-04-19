@@ -1,7 +1,9 @@
 use crate::protocol::control_message::{RegRequestMsg, RegistrationMode};
 use crate::server::control_server::db;
 use crate::server::control_server::db::{NetworkRecord, NetworkSource};
-use crate::server::network_state_provider::{i64_to_system_time, NetworkState, NetworkStateProvider};
+use crate::server::network_state_provider::{
+    NetworkState, NetworkStateProvider, i64_to_system_time,
+};
 use crate::utils::config::{
     DEFAULT_NETWORK_CODE, validate_network_code_value, validate_network_secret_value,
 };
@@ -110,7 +112,10 @@ impl ControlService {
             .into_iter()
             .filter_map(|(code, net)| {
                 let Some(secret) = network_secrets.get(&code).cloned() else {
-                    log::error!("Missing secret for network '{}' while building config fallback", code);
+                    log::error!(
+                        "Missing secret for network '{}' while building config fallback",
+                        code
+                    );
                     return None;
                 };
 
@@ -142,7 +147,10 @@ impl ControlService {
 
         for (code, net) in custom_nets {
             let Some(secret) = network_secrets.get(code) else {
-                log::error!("Skip seeding network '{}' because its secret is missing", code);
+                log::error!(
+                    "Skip seeding network '{}' because its secret is missing",
+                    code
+                );
                 continue;
             };
             let gateway = Ipv4Addr::from(u32::from(net.network()) + 1);
@@ -212,7 +220,9 @@ impl ControlService {
         }
     }
 
-    fn managed_networks_from_records(records: Vec<NetworkRecord>) -> HashMap<String, ManagedNetwork> {
+    fn managed_networks_from_records(
+        records: Vec<NetworkRecord>,
+    ) -> HashMap<String, ManagedNetwork> {
         let mut nets = HashMap::new();
 
         for record in records {
@@ -258,13 +268,14 @@ impl ControlService {
             let random_id = rand::rng().next_u64();
             let device_id = reg_req.device_id.clone();
 
-            let (ip, _old_ip, entry) = match state.allocate_ip_and_get_entry(reg_req, random_id, sender) {
-                Ok(rs) => rs,
-                Err(e) => {
-                    log::warn!("network_code={network_code},device_id={device_id},e={e:?}");
-                    return Err(e);
-                }
-            };
+            let (ip, _old_ip, entry) =
+                match state.allocate_ip_and_get_entry(reg_req, random_id, sender) {
+                    Ok(rs) => rs,
+                    Err(e) => {
+                        log::warn!("network_code={network_code},device_id={device_id},e={e:?}");
+                        return Err(e);
+                    }
+                };
 
             (
                 Session {
@@ -384,7 +395,10 @@ impl ControlService {
             .map(|v| v.key().clone())
             .collect();
         for network_code in keys {
-            let option = self.network_state_provider.get(&network_code).map(|v| v.clone());
+            let option = self
+                .network_state_provider
+                .get(&network_code)
+                .map(|v| v.clone());
             if let Some(state) = option {
                 if !state.is_empty() {
                     continue;
@@ -621,11 +635,7 @@ impl ControlService {
         Ok(())
     }
 
-    pub async fn delete_device(
-        &self,
-        network_code: &str,
-        device_id: &str,
-    ) -> anyhow::Result<()> {
+    pub async fn delete_device(&self, network_code: &str, device_id: &str) -> anyhow::Result<()> {
         if let Some(state) = self.network_state_provider.get(network_code) {
             if state.is_device_online(device_id) {
                 bail!("设备在线，无法删除");
@@ -647,7 +657,9 @@ impl ControlService {
     }
 
     pub fn get_network_state(&self, network_code: &str) -> Option<Arc<NetworkState>> {
-        self.network_state_provider.get(network_code).map(|s| s.clone())
+        self.network_state_provider
+            .get(network_code)
+            .map(|s| s.clone())
     }
 
     pub fn set_peer_manager(&self, manager: Arc<crate::server::peer_server::PeerServerManager>) {
@@ -657,7 +669,6 @@ impl ControlService {
     pub fn get_peer_manager(&self) -> Option<Arc<crate::server::peer_server::PeerServerManager>> {
         self.peer_manager.read().clone()
     }
-
 
     pub fn get_network_state_provider(&self) -> &NetworkStateProvider {
         &self.network_state_provider
@@ -700,7 +711,8 @@ impl ControlService {
         } else {
             match db::load_all_devices(network_code).await {
                 Ok(records) => {
-                    let format = format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
+                    let format =
+                        format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
                     records
                         .into_iter()
                         .map(|r| {
@@ -712,7 +724,9 @@ impl ControlService {
                                 device_version: r.device_version,
                                 ip: r.ip.as_ref().and_then(|s| s.parse().ok()),
                                 status: "Offline".to_string(),
-                                last_connect_time: last_connect_time.format(&format).unwrap_or_default(),
+                                last_connect_time: last_connect_time
+                                    .format(&format)
+                                    .unwrap_or_default(),
                                 disconnect_time: None,
                                 latency_ms: None,
                                 server_addr: None,
@@ -767,7 +781,9 @@ impl Drop for Session {
     fn drop(&mut self) {
         match self.registration_status {
             RegistrationStatus::Confirmed => {
-                let record = self.network_state.offline_ip(&self.device_id, self.ip, self.random_id);
+                let record =
+                    self.network_state
+                        .offline_ip(&self.device_id, self.ip, self.random_id);
                 if let Some(record) = record {
                     tokio::spawn(async move {
                         if let Err(e) = db::save_or_update_device(&record).await {
@@ -783,7 +799,11 @@ impl Drop for Session {
                     self.device_id,
                     self.ip
                 );
-                self.network_state.release_pre_registered_ip(&self.device_id, self.ip, self.random_id);
+                self.network_state.release_pre_registered_ip(
+                    &self.device_id,
+                    self.ip,
+                    self.random_id,
+                );
             }
         }
     }

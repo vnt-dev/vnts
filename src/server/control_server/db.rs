@@ -383,7 +383,10 @@ pub async fn release_device_ip(network_code: &str, device_id: &str) -> anyhow::R
 }
 
 #[allow(dead_code)]
-pub async fn get_device(network_code: &str, device_id: &str) -> anyhow::Result<Option<DeviceRecord>> {
+pub async fn get_device(
+    network_code: &str,
+    device_id: &str,
+) -> anyhow::Result<Option<DeviceRecord>> {
     let Some(pool) = DB_POOL.get() else {
         return Ok(None);
     };

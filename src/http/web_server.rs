@@ -1,13 +1,13 @@
 use crate::ControlService;
 use crate::server::control_server::service::{DeviceInfoVO, NetworkInfoVO};
 use axum::{
+    Json, Router,
     body::Body,
     extract::{Path, Query, State},
-    http::{header, HeaderMap, Request, StatusCode, Uri},
+    http::{HeaderMap, Request, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
-    Json, Router,
 };
 use jsonwebtoken::{DecodingKey, EncodingKey, Validation};
 use mime_guess::from_path;
@@ -224,9 +224,7 @@ async fn create_network(
         return ApiResponse::<()>::err("无效的掩码").into_response();
     }
 
-    let lease_duration = body
-        .lease_duration
-        .map(std::time::Duration::from_secs);
+    let lease_duration = body.lease_duration.map(std::time::Duration::from_secs);
 
     match state
         .control_service
@@ -406,7 +404,7 @@ async fn static_handler(uri: Uri) -> impl IntoResponse {
             [(header::CONTENT_TYPE, mime.as_ref())],
             Body::from(content.data),
         )
-        .into_response();
+            .into_response();
     }
 
     (StatusCode::NOT_FOUND, "404 Not Found").into_response()

@@ -145,21 +145,29 @@ struct PeerConf {
 }
 
 async fn init_peer_manager(conf: &PeerConf, control_service: &ControlService) {
-    let server_token = conf.server_token.clone().unwrap_or_else(|| "default_token".to_string());
+    let server_token = conf
+        .server_token
+        .clone()
+        .unwrap_or_else(|| "default_token".to_string());
     let network_state_provider = control_service.get_network_state_provider().clone();
 
     let peer_manager = Arc::new(PeerServerManager::new(server_token, network_state_provider));
     control_service.set_peer_manager(peer_manager.clone());
 
     if let Some(server_quic_bind) = conf.server_quic_bind {
-        let (certs, key) = match crate::utils::cert::get_cert_and_key(conf.cert.clone(), conf.key.clone()) {
-            Ok((certs, key)) => (certs, key),
-            Err(e) => {
-                log::error!("Failed to load cert/key for peer server: {:?}", e);
-                panic!("{:?}", e)
-            }
-        };
-        if let Err(e) = peer_manager.clone().start_server(server_quic_bind, certs, key).await {
+        let (certs, key) =
+            match crate::utils::cert::get_cert_and_key(conf.cert.clone(), conf.key.clone()) {
+                Ok((certs, key)) => (certs, key),
+                Err(e) => {
+                    log::error!("Failed to load cert/key for peer server: {:?}", e);
+                    panic!("{:?}", e)
+                }
+            };
+        if let Err(e) = peer_manager
+            .clone()
+            .start_server(server_quic_bind, certs, key)
+            .await
+        {
             log::error!("Failed to start peer server: {:?}", e);
         } else {
             log::info!("Peer server started on {}", server_quic_bind);

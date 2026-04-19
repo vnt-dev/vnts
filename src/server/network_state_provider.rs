@@ -189,7 +189,12 @@ impl NetworkState {
     }
 
     /// 设备离线，返回需要持久化的记录。random_id 用于判断是否为当前会话。
-    pub fn offline_ip(&self, device_id: &String, ip: Ipv4Addr, random_id: u64) -> Option<DeviceRecord> {
+    pub fn offline_ip(
+        &self,
+        device_id: &String,
+        ip: Ipv4Addr,
+        random_id: u64,
+    ) -> Option<DeviceRecord> {
         let mut guard = self.lease_state.lock();
         let (success, record) = guard.offline_ip(&self.network_code, device_id, ip, random_id);
         if success {
@@ -264,7 +269,11 @@ impl NetworkState {
         if should_remove {
             self.sender_map.remove(&ip);
             self.traffic_stats_map.remove(&ip);
-            log::info!("Released pre-registered IP device_id={}, ip={}", device_id, ip);
+            log::info!(
+                "Released pre-registered IP device_id={}, ip={}",
+                device_id,
+                ip
+            );
         }
     }
 
@@ -275,12 +284,18 @@ impl NetworkState {
 
     pub fn get_device_entry_by_ip(&self, ip: Ipv4Addr) -> Option<DeviceEntry> {
         let guard = self.lease_state.lock();
-        guard.device_ip_map.get(&ip)
+        guard
+            .device_ip_map
+            .get(&ip)
             .and_then(|device_id| guard.device_map.get(device_id).cloned())
     }
 
     /// 同步保存到 DB 后再确认，防止 Drop 时状态不一致
-    pub async fn confirm_registration(&self, network_code: &str, device_id: &str) -> anyhow::Result<()> {
+    pub async fn confirm_registration(
+        &self,
+        network_code: &str,
+        device_id: &str,
+    ) -> anyhow::Result<()> {
         if let Some(entry) = self.get_device_entry(device_id) {
             let record = entry.to_record(network_code);
             db::save_or_update_device(&record).await?;
@@ -296,7 +311,8 @@ impl NetworkState {
         sender: Sender<Bytes>,
     ) -> anyhow::Result<(Ipv4Addr, Option<Ipv4Addr>, Option<DeviceEntry>)> {
         let mut guard = self.lease_state.lock();
-        let (ip, old_ip) = guard.allocate_ip(&self.net, self.gateway, reg_req.clone(), random_id)?;
+        let (ip, old_ip) =
+            guard.allocate_ip(&self.net, self.gateway, reg_req.clone(), random_id)?;
 
         if let Some(old_ip) = old_ip {
             self.sender_map.remove(&old_ip);
@@ -307,7 +323,8 @@ impl NetworkState {
         self.sender_map.insert(ip, sender);
 
         if let Some(entry) = &entry {
-            self.traffic_stats_map.insert(ip, entry.traffic_stats.clone());
+            self.traffic_stats_map
+                .insert(ip, entry.traffic_stats.clone());
         }
 
         Ok((ip, old_ip, entry))
@@ -330,14 +347,18 @@ impl NetworkState {
 
     pub fn get_all_device_simple_info(&self) -> Vec<(String, Option<Ipv4Addr>, bool, u64)> {
         let guard = self.lease_state.lock();
-        guard.device_map.values().map(|entry| {
-            (
-                entry.device_id.clone(),
-                entry.ip,
-                entry.is_connected,
-                entry.data_version,
-            )
-        }).collect()
+        guard
+            .device_map
+            .values()
+            .map(|entry| {
+                (
+                    entry.device_id.clone(),
+                    entry.ip,
+                    entry.is_connected,
+                    entry.data_version,
+                )
+            })
+            .collect()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -354,8 +375,8 @@ impl NetworkState {
     }
 
     pub fn get_device_infos(&self) -> Vec<crate::server::control_server::service::DeviceInfoVO> {
-        use time::macros::format_description;
         use time::OffsetDateTime;
+        use time::macros::format_description;
 
         let guard = self.lease_state.lock();
         let mut list = Vec::new();
@@ -431,7 +452,10 @@ impl NetworkState {
         })
     }
 
-    pub fn client_info_list(&self, exclude_ip: Ipv4Addr) -> Vec<crate::protocol::rpc_message::ClientInfo> {
+    pub fn client_info_list(
+        &self,
+        exclude_ip: Ipv4Addr,
+    ) -> Vec<crate::protocol::rpc_message::ClientInfo> {
         use crate::protocol::rpc_message::ClientInfo;
         use time::OffsetDateTime;
 
@@ -522,7 +546,8 @@ impl NetworkStateInner {
 
     fn add_device(&mut self, device_entry: DeviceEntry) {
         if let Some(ip) = device_entry.ip {
-            self.device_ip_map.insert(ip, device_entry.device_id.clone());
+            self.device_ip_map
+                .insert(ip, device_entry.device_id.clone());
         }
         self.device_map
             .insert(device_entry.device_id.clone(), device_entry);
@@ -545,9 +570,10 @@ impl NetworkStateInner {
     ) -> anyhow::Result<(Ipv4Addr, Option<Ipv4Addr>)> {
         let expect_ip = reg_req.ip;
 
-        let existing_device_info = self.device_map.get(&reg_req.device_id).map(|e| {
-            (e.ip, expect_ip.is_none() || e.ip == expect_ip)
-        });
+        let existing_device_info = self
+            .device_map
+            .get(&reg_req.device_id)
+            .map(|e| (e.ip, expect_ip.is_none() || e.ip == expect_ip));
 
         if let Some((current_ip, ip_matches)) = existing_device_info {
             if ip_matches {
@@ -712,9 +738,14 @@ impl NetworkState {
         }
     }
 
-    pub async fn new_from_db(network_code: String, net: Ipv4Net, lease_duration: Duration) -> NetworkState {
+    pub async fn new_from_db(
+        network_code: String,
+        net: Ipv4Net,
+        lease_duration: Duration,
+    ) -> NetworkState {
         let gateway = Ipv4Addr::from(u32::from(net.network()) + 1);
-        let initial_inner_state = Self::build_initial_inner_state(&network_code, net, gateway).await;
+        let initial_inner_state =
+            Self::build_initial_inner_state(&network_code, net, gateway).await;
         Self {
             time: Mutex::new(Instant::now()),
             network_code,
@@ -759,7 +790,10 @@ impl NetworkStateProvider {
     }
 
     pub fn get_network_codes(&self) -> Vec<String> {
-        self.network_states.iter().map(|entry| entry.key().clone()).collect()
+        self.network_states
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect()
     }
 
     pub fn get_network_state(&self, network_code: &str) -> Option<Arc<NetworkState>> {

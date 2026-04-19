@@ -108,7 +108,6 @@ pub struct RegResponseMsg {
     pub server_version: String,
 }
 impl RegResponseMsg {
-
     pub fn to(self) -> proto::RegResponseMsg {
         proto::RegResponseMsg {
             ip: self.ip.into(),
@@ -201,7 +200,6 @@ pub enum ResponseMessage {
     ConfirmReg(ConfirmRegResponseMsg),
 }
 impl ResponseMessage {
-
     pub fn encode(self) -> BytesMut {
         let response_payload = match self {
             ResponseMessage::Reg(reg) => ResponsePayload::Reg(reg.to()),
