@@ -9,7 +9,7 @@ use ipnet::Ipv4Net;
 use parking_lot::RwLock;
 use rand::RngCore;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -35,6 +35,7 @@ pub struct NetworkConfig {
 pub struct ControlService {
     default_net: Ipv4Net,
     default_lease_duration: Duration,
+    white_list: Arc<HashSet<String>>,
     db_nets: Arc<RwLock<HashMap<String, NetworkConfig>>>,
     network_state_provider: NetworkStateProvider,
     network_init_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -45,6 +46,7 @@ impl ControlService {
     pub async fn new(
         default_net: Ipv4Net,
         custom_nets: HashMap<String, Ipv4Net>,
+        white_list: HashSet<String>,
         lease_duration: Duration,
     ) -> Self {
         let network_states = Arc::new(DashMap::new());
@@ -55,6 +57,7 @@ impl ControlService {
         let service = Self {
             default_net,
             default_lease_duration: lease_duration,
+            white_list: Arc::new(white_list),
             db_nets: Arc::new(RwLock::new(db_nets)),
             network_state_provider: NetworkStateProvider::new(network_states),
             network_init_locks: Arc::new(DashMap::new()),
@@ -131,6 +134,9 @@ impl ControlService {
         reg_req.check()?;
         let network_code = reg_req.network_code.clone();
         let registration_mode = reg_req.registration_mode;
+        if !self.white_list.is_empty() && !self.white_list.contains(&network_code) {
+            bail!("network_code '{}' is not in white_list", network_code);
+        }
 
         let is_new_network = !self.db_nets.read().contains_key(&reg_req.network_code);
         let config = self.network_config(&reg_req.network_code, reg_req.ip);

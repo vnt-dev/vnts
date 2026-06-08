@@ -71,6 +71,7 @@ async fn main() {
     let control_service = ControlService::new(
         conf.network,
         conf.custom_nets,
+        conf.white_list,
         Duration::from_secs(conf.lease_duration),
     )
     .await;
