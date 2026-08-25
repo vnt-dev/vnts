@@ -90,8 +90,9 @@ impl ControlService {
         let default_gateway = first_usable_ip(default_net)?;
         let network_states = Arc::new(DashMap::new());
 
-        Self::save_config_networks_to_db(&custom_nets, lease_duration).await;
-        let db_nets = Self::load_networks_from_db().await;
+        let config_nets = Self::build_config_networks(&custom_nets, lease_duration);
+        Self::save_config_networks_to_db(&config_nets).await;
+        let db_nets = Self::merge_network_configs(Self::load_networks_from_db().await, config_nets);
 
         let service = Self {
             default_net,
@@ -113,16 +114,11 @@ impl ControlService {
         Ok(service)
     }
 
-    async fn save_config_networks_to_db(
+    fn build_config_networks(
         custom_nets: &HashMap<String, Ipv4Net>,
         lease_duration: Duration,
-    ) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        let lease_secs = lease_duration.as_secs() as i64;
-
+    ) -> HashMap<String, NetworkConfig> {
+        let mut config_nets = HashMap::with_capacity(custom_nets.len());
         for (code, net) in custom_nets {
             let net = net.trunc();
             let gateway = match first_usable_ip(net) {
@@ -132,11 +128,31 @@ impl ControlService {
                     continue;
                 }
             };
+            config_nets.insert(
+                code.clone(),
+                NetworkConfig {
+                    net,
+                    gateway,
+                    lease_duration,
+                    source: NetworkSource::Config,
+                },
+            );
+        }
+        config_nets
+    }
+
+    async fn save_config_networks_to_db(config_nets: &HashMap<String, NetworkConfig>) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        for (code, config) in config_nets {
             let record = NetworkRecord {
                 network_code: code.clone(),
-                gateway: gateway.to_string(),
-                netmask: net.prefix_len(),
-                lease_duration: lease_secs,
+                gateway: config.gateway.to_string(),
+                netmask: config.net.prefix_len(),
+                lease_duration: config.lease_duration.as_secs() as i64,
                 source: NetworkSource::Config,
                 created_at: now,
             };
@@ -146,6 +162,20 @@ impl ControlService {
                 Err(e) => log::error!("Failed to save custom network {}: {}", code, e),
             }
         }
+    }
+
+    fn merge_network_configs(
+        db_nets: HashMap<String, NetworkConfig>,
+        mut config_nets: HashMap<String, NetworkConfig>,
+    ) -> HashMap<String, NetworkConfig> {
+        // 配置用于首次初始化；持久化开启且数据库已有记录时，以数据库中的修改为准。
+        // 持久化关闭时 db_nets 为空，因此 TOML 中的自定义网络仍会在内存中生效。
+        config_nets.extend(db_nets);
+        config_nets
+    }
+
+    fn network_code_allowed(&self, network_code: &str) -> bool {
+        self.white_list.is_empty() || self.white_list.contains(network_code)
     }
 
     async fn load_networks_from_db() -> HashMap<String, NetworkConfig> {
@@ -184,7 +214,7 @@ impl ControlService {
         reg_req.check()?;
         let network_code = reg_req.network_code.clone();
         let registration_mode = reg_req.registration_mode;
-        if !self.white_list.is_empty() && !self.white_list.contains(&network_code) {
+        if !self.network_code_allowed(&network_code) {
             bail!("network_code '{}' is not in white_list", network_code);
         }
 
@@ -753,9 +783,12 @@ pub struct NetworkInfoVO {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_usable_ip, network_from_gateway};
+    use super::{ControlService, NetworkConfig, first_usable_ip, network_from_gateway};
+    use crate::server::control_server::db::NetworkSource;
     use ipnet::Ipv4Net;
+    use std::collections::{HashMap, HashSet};
     use std::net::Ipv4Addr;
+    use std::time::Duration;
 
     #[test]
     fn network_from_gateway_preserves_non_default_gateway() {
@@ -778,5 +811,74 @@ mod tests {
         let net = "10.20.0.0/24".parse::<Ipv4Net>().unwrap();
         assert_eq!(first_usable_ip(net).unwrap(), Ipv4Addr::new(10, 20, 0, 1));
         assert!(first_usable_ip("255.255.255.255/32".parse().unwrap()).is_err());
+    }
+
+    #[tokio::test]
+    async fn custom_networks_work_without_database_persistence() {
+        let mut custom_nets = HashMap::new();
+        custom_nets.insert("net1".to_string(), "10.40.0.0/24".parse().unwrap());
+        let service = ControlService::new(
+            "10.26.0.0/24".parse().unwrap(),
+            custom_nets,
+            HashSet::from(["net1".to_string()]),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+
+        let config = service.network_config("net1", None).unwrap();
+        assert_eq!(config.net, "10.40.0.0/24".parse::<Ipv4Net>().unwrap());
+        assert_eq!(config.gateway, Ipv4Addr::new(10, 40, 0, 1));
+        assert_eq!(config.source, NetworkSource::Config);
+    }
+
+    #[test]
+    fn persisted_network_overrides_configured_initial_value() {
+        let persisted = NetworkConfig {
+            net: "10.1.0.0/24".parse().unwrap(),
+            gateway: Ipv4Addr::new(10, 1, 0, 1),
+            lease_duration: Duration::from_secs(60),
+            source: NetworkSource::Config,
+        };
+        let configured = NetworkConfig {
+            net: "10.2.0.0/24".parse().unwrap(),
+            gateway: Ipv4Addr::new(10, 2, 0, 1),
+            lease_duration: Duration::from_secs(120),
+            source: NetworkSource::Config,
+        };
+        let merged = ControlService::merge_network_configs(
+            HashMap::from([("net1".to_string(), persisted)]),
+            HashMap::from([("net1".to_string(), configured)]),
+        );
+
+        let actual = merged.get("net1").unwrap();
+        assert_eq!(actual.net, persisted.net);
+        assert_eq!(actual.gateway, persisted.gateway);
+        assert_eq!(actual.lease_duration, persisted.lease_duration);
+    }
+
+    #[tokio::test]
+    async fn white_list_is_exact_and_empty_list_allows_all() {
+        let unrestricted = ControlService::new(
+            "10.26.0.0/24".parse().unwrap(),
+            HashMap::new(),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        assert!(unrestricted.network_code_allowed("any-network"));
+
+        let restricted = ControlService::new(
+            "10.26.0.0/24".parse().unwrap(),
+            HashMap::new(),
+            HashSet::from(["net1".to_string()]),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        assert!(restricted.network_code_allowed("net1"));
+        assert!(!restricted.network_code_allowed("NET1"));
+        assert!(!restricted.network_code_allowed("net2"));
     }
 }

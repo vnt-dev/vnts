@@ -13,7 +13,9 @@ pub struct ConfigFile {
     pub cert: Option<PathBuf>,
     pub key: Option<PathBuf>,
     pub network: Ipv4Net,
+    #[serde(default)]
     pub custom_nets: HashMap<String, Ipv4Net>,
+    #[serde(default)]
     pub white_list: HashSet<String>,
     pub lease_duration: u64,
     pub web_bind: Option<SocketAddr>,
@@ -72,7 +74,26 @@ impl ConfigFile {
         };
         let content = std::fs::read_to_string(path)?;
         let cfg: ConfigFile = toml::from_str(&content)?;
+        cfg.validate()?;
         Ok(cfg)
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        for network_code in self.white_list.iter().chain(self.custom_nets.keys()) {
+            if network_code.is_empty() {
+                anyhow::bail!("network_code cannot be empty");
+            }
+            if network_code.trim() != network_code {
+                anyhow::bail!(
+                    "network_code '{}' cannot contain leading or trailing whitespace",
+                    network_code
+                );
+            }
+            if network_code.len() > 32 {
+                anyhow::bail!("network_code '{}' length exceeds 32 bytes", network_code);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -119,4 +140,37 @@ key = "key.pem"
 # net2 = "10.27.1.0/24"
 "#;
     println!("{}", str);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConfigFile;
+
+    #[test]
+    fn missing_white_list_and_custom_nets_use_empty_defaults() {
+        let config: ConfigFile = toml::from_str(
+            r#"
+network = "10.26.0.0/24"
+lease_duration = 86400
+"#,
+        )
+        .expect("config");
+
+        assert!(config.white_list.is_empty());
+        assert!(config.custom_nets.is_empty());
+    }
+
+    #[test]
+    fn network_codes_with_surrounding_whitespace_are_rejected() {
+        let config: ConfigFile = toml::from_str(
+            r#"
+network = "10.26.0.0/24"
+lease_duration = 86400
+white_list = [" net1"]
+"#,
+        )
+        .expect("config syntax");
+
+        assert!(config.validate().is_err());
+    }
 }
