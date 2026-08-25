@@ -12,79 +12,57 @@ defaults:
   run:
     # necessary for windows
     shell: bash
+permissions:
+  contents: write
+  packages: write
 
 jobs:
-  #  test:
-  #    runs-on: ubuntu-latest
-  #    steps:
-  #      - uses: actions/checkout@v2
-  #      - name: Cargo cache
-  #        uses: actions/cache@v4
-  #        with:
-  #          path: |
-  #            ~/.cargo/registry
-  #            ./target
-  #          key: test-cargo-registry
-  #      - name: List
-  #        run: find ./
-  #      - name: Run tests
-  #        run: cargo test --verbose
-
   build:
+    name: Build ${{ matrix.TARGET }}
     strategy:
       fail-fast: false
       matrix:
-        # a list of all the targets
         include:
-          - TARGET: x86_64-unknown-linux-musl # test in an alpine container on a mac
+          - TARGET: x86_64-unknown-linux-musl
             OS: ubuntu-latest
-            FEATURES: ring-cipher,web
-          - TARGET: aarch64-unknown-linux-musl # tested on aws t4g.nano in alpine container
+          - TARGET: aarch64-unknown-linux-musl
             OS: ubuntu-latest
-            FEATURES: normal,web
-          - TARGET: armv7-unknown-linux-musleabihf # raspberry pi 2-3-4, not tested
+          - TARGET: armv7-unknown-linux-musleabihf
             OS: ubuntu-latest
-            FEATURES: normal,web
-          - TARGET: armv7-unknown-linux-musleabi # raspberry pi 2-3-4, not tested
+          - TARGET: armv7-unknown-linux-musleabi
             OS: ubuntu-latest
-            FEATURES: normal,web
-          - TARGET: arm-unknown-linux-musleabihf # raspberry pi 0-1, not tested
+          - TARGET: arm-unknown-linux-musleabihf
             OS: ubuntu-latest
-            FEATURES: normal,web
-          - TARGET: arm-unknown-linux-musleabi # raspberry pi 0-1, not tested
+          - TARGET: arm-unknown-linux-musleabi
             OS: ubuntu-latest
-            FEATURES: normal,web
-          - TARGET: x86_64-apple-darwin # tested on a mac, is not properly signed so there are security warnings
+          - TARGET: x86_64-apple-darwin
             OS: macos-latest
-            FEATURES: ring-cipher,web
-          - TARGET: aarch64-apple-darwin # tested on a mac, is not properly signed so there are security warnings
+          - TARGET: aarch64-apple-darwin
             OS: macos-latest
-            FEATURES: ring-cipher,web
-          - TARGET: i686-pc-windows-msvc # tested on a windows machine
+          - TARGET: i686-pc-windows-msvc
             OS: windows-latest
-            FEATURES: ring-cipher,web
-          - TARGET: x86_64-pc-windows-msvc # tested on a windows machine
+          - TARGET: x86_64-pc-windows-msvc
             OS: windows-latest
-            FEATURES: ring-cipher,web
-          - TARGET: mipsel-unknown-linux-musl # openwrt
+          - TARGET: aarch64-pc-windows-msvc
+            OS: windows-latest
+          - TARGET: mipsel-unknown-linux-musl
             OS: ubuntu-latest
-            FEATURES: normal,web
-          - TARGET: mips-unknown-linux-musl # openwrt
+          - TARGET: mips-unknown-linux-musl
             OS: ubuntu-latest
-            FEATURES: normal
-    # needs: test
+          - TARGET: x86_64-unknown-freebsd
+            OS: ubuntu-latest
+            ARTIFACT_NAME: freebsd-13.2-x86_64
+            BSD_VERSION: 13.2
     runs-on: ${{ matrix.OS }}
     env:
-      NAME: vnts # change with the name of your project
+      NAME: Vnts
       TARGET: ${{ matrix.TARGET }}
       OS: ${{ matrix.OS }}
       FEATURES: ${{ matrix.FEATURES }}
     steps:
       - uses: actions/checkout@v4
-
       - name: Init submodules
         run: git submodule update --init --recursive --remote && git submodule status
-
       - name: Cargo cache
         uses: actions/cache@v4
         with:
@@ -92,14 +70,52 @@ jobs:
             ~/.cargo/registry
             ./target
           key: build-cargo-registry-${{matrix.TARGET}}
+      - name: Install Protobuf (MacOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+      - name: Install Protobuf (Windows)
+        if: runner.os == 'Windows'
+        run: choco install protoc
+      - name: Use strawberry perl
+        if: startsWith(matrix.os, 'windows')
+        run: echo OPENSSL_SRC_PERL=C:/Strawberry/perl/bin/perl >> $GITHUB_ENV
       - name: List
         run: find ./
+      - name: Build Vnts X86_64-FreeBSD
+        uses: cross-platform-actions/action@v0.23.0
+        if: ${{ endsWith(matrix.TARGET, 'freebsd') }}
+        env:
+          TARGET: ${{ matrix.TARGET }}
+        with:
+          operating_system: freebsd
+          environment_variables: TARGET
+          architecture: x86-64
+          version: ${{ matrix.BSD_VERSION }}
+          shell: bash
+          memory: 5G
+          cpu_count: 4
+          run: |
+            uname -a
+            echo $SHELL
+            pwd
+            ls -lah
+            whoami
+            env | sort
+            sudo pkg install -y git protobuf llvm15
+            curl --proto 'https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            source $HOME/.cargo/env
+            export CC=clang
+            export CXX=clang++
+            export CARGO_TERM_COLOR=always
+            cargo build --release --verbose --target $TARGET
       - name: Install and configure dependencies
+        if: ${{ ! endsWith(matrix.TARGET, 'freebsd') }}
         run: |
           # dependencies are only needed on ubuntu as that's the only place where
           # we make cross-compilation
+          
           if [[ $OS =~ ^ubuntu.*$ ]]; then
-            sudo apt-get update && sudo apt-get install clang llvm libc6-dev-i386 crossbuild-essential-arm64 crossbuild-essential-armhf musl-tools libboost-all-dev libc6-dev -y
+            sudo apt-get update && sudo apt-get install protobuf-compiler clang llvm libc6-dev-i386 crossbuild-essential-arm64 crossbuild-essential-armhf musl-tools libboost-all-dev libc6-dev -y
             #  curl -s musl.cc | grep mipsel
             case $TARGET in 
               mipsel-unknown-linux-musl)
@@ -146,19 +162,13 @@ jobs:
             fi
           fi
           rustup -V
-
+          
           # some additional configuration for cross-compilation on linux
-          cat >>~/.cargo/config <<EOF
+          cat >>~/.cargo/config.toml <<EOF
           [target.x86_64-unknown-linux-musl]
-          rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols"]
-          [target.aarch64-unknown-linux-gnu]
-          linker = "aarch64-linux-gnu-gcc"
           rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols"]
           [target.aarch64-unknown-linux-musl]
           linker = "aarch64-linux-musl-gcc"
-          rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols"]
-          [target.armv7-unknown-linux-gnueabihf]
-          linker = "arm-linux-gnueabihf-gcc"
           rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols"]
           [target.armv7-unknown-linux-musleabihf]
           linker = "armv7l-linux-musleabihf-gcc"
@@ -166,12 +176,9 @@ jobs:
           [target.armv7-unknown-linux-musleabi]
           linker = "armv7m-linux-musleabi-gcc"
           rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols"]
-          [target.arm-unknown-linux-gnueabihf]
-          linker = "arm-linux-gnueabihf-gcc"
-          rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols"]
           [target.arm-unknown-linux-musleabihf]
           linker = "arm-linux-musleabihf-gcc"
-          rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols"]
+          rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols"]   
           [target.arm-unknown-linux-musleabi]
           linker = "arm-linux-musleabi-gcc"
           rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols"]
@@ -197,48 +204,50 @@ jobs:
           rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols"]     
           [target.i686-unknown-linux-musl]
           rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols"]    
-          [target.x86_64-unknown-linux-gnu]
-          rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols"]
+          [target.i686-unknown-linux-gnu]
+          rustflags = ["-C", "target-feature=+crt-static","-C", "strip=symbols"]   
           EOF
       - name: Install rust target
         if: ${{ ! endsWith(matrix.TARGET, 'freebsd') &&  ! startsWith(matrix.TARGET, 'mips') }}
         run: rustup target add $TARGET
-      - name: Run build
+      - name: Run build Vnts
         if: ${{ ! endsWith(matrix.TARGET, 'freebsd') }}
         run: |
           if [[ $TARGET =~ ^mips.*$ ]]; then
-            cargo +nightly build --release --verbose --target $TARGET -Z build-std=std,panic_abort --features $FEATURES
+            cargo +nightly build --release --verbose --target $TARGET -Z build-std=std,panic_abort
           else
-            cargo build --release --verbose --target $TARGET --features $FEATURES
+            cargo build --release --verbose --target $TARGET
           fi
-          ldd ./target/$TARGET/release/net_link || true
-          file ./target/$TARGET/release/net_link || true
+          ldd ./target/$TARGET/release/vnts2 || true
+          file ./target/$TARGET/release/vnts2 || true
       - name: List target
         run: find ./target
-      - name: Compress
+      - name: Package
         run: |
           mkdir -p ./artifacts
           # windows is the only OS using a different convention for executable file name
-          if [[ $OS =~ ^windows.*$ ]]; then
-              EXEC=$NAME.exe
-          else
-              EXEC=$NAME
-          fi
           if [[ $GITHUB_REF_TYPE =~ ^tag$ ]]; then
             TAG=$GITHUB_REF_NAME
           else
             TAG=$GITHUB_SHA
           fi
-          mv ./target/$TARGET/release/$EXEC ./$EXEC
-          tar -czf ./artifacts/vnts-$TARGET-$TAG.tar.gz $EXEC static
+          if [[ $OS =~ ^windows.*$ ]]; then
+              EXEC_VNTS=vnts2.exe
+              VNTS="vnts2-${TARGET}-${TAG}.exe"
+          else
+              EXEC_VNTS=vnts2
+              VNTS="vnts2-${TARGET}-${TAG}"
+          fi
 
+          mv ./target/$TARGET/release/$EXEC_VNTS ./artifacts/$VNTS
+      - name: List target Vnts
+        run: find ./artifacts
       - name: Archive artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vnts-${{ matrix.TARGET }}-${{ github.ref_name }}
+          name: Vnts-${{ matrix.TARGET }}
           path: |
-            ./artifacts
-
+            ./artifacts/*
   # deploys to github releases on tag
   deploy:
     if: startsWith(github.ref, 'refs/tags/')
@@ -249,13 +258,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: ./artifacts
-      # - name: List
-      #   run: find ./artifacts
+      - name: List
+        run: find ./artifacts
       - name: Release
         uses: svenstaro/upload-release-action@v2
         with:
-          repo_token: ${{ secrets.MY_TOKEN }}
-          file: ./artifacts/**/*.tar.gz
+          repo_token: ${{ secrets.GITHUB_TOKEN  }}
+          file: ./artifacts/*/vnts*
           tag: ${{ github.ref }}
           overwrite: true
           file_glob: true
