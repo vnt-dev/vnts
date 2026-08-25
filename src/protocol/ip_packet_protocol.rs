@@ -107,9 +107,9 @@ pub enum MsgType {
     Quic = 17,
 }
 
-impl Into<u8> for MsgType {
-    fn into(self) -> u8 {
-        self as u8
+impl From<MsgType> for u8 {
+    fn from(value: MsgType) -> Self {
+        value as u8
     }
 }
 

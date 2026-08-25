@@ -76,7 +76,7 @@ impl ConfigFile {
     }
 }
 
-pub fn print_example(){
+pub fn print_example() {
     let str = r#"# 绑定tcp地址，不写则不启用tcp服务
 tcp_bind = "0.0.0.0:29872"
 # 绑定quic地址，不写则不启用quic服务

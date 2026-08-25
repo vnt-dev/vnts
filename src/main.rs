@@ -24,25 +24,17 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     if args.conf_example {
         utils::config::print_example();
-        return;
+        return Ok(());
     }
     utils::log::log_init("vnts2");
     log::info!("version: {:?}", env!("CARGO_PKG_VERSION"));
-    let conf = match ConfigFile::load_from(args.conf) {
-        Ok(conf) => conf,
-        Err(e) => {
-            log::error!("{e:?}");
-            panic!("{e:?}")
-        }
-    };
+    let conf = ConfigFile::load_from(args.conf)?;
     if conf.persistence {
-        if let Err(e) = server::control_server::db::init_db_pool().await {
-            log::error!("{:?}", e);
-        }
+        server::control_server::db::init_db_pool().await?;
     }
 
     // 提前提取需要在 move 之后使用的字段
@@ -74,22 +66,21 @@ async fn main() {
         conf.white_list,
         Duration::from_secs(conf.lease_duration),
     )
-    .await;
+    .await?;
 
-    if let Err(e) = server::turn_server_start(turn_config, control_service.clone()).await {
-        log::error!("{:?}", e);
-        panic!("{:?}", e)
-    }
+    server::turn_server_start(turn_config, control_service.clone()).await?;
 
     if need_peer_manager {
         init_peer_manager(&peer_conf, &control_service).await;
     }
 
     if let Some(web_bind) = web_bind {
-        http::web_server::start_http_server(control_service, username, password, web_bind).await
+        http::web_server::start_http_server(control_service, username, password, web_bind).await?;
+        return Ok(());
     }
 
-    tokio::signal::ctrl_c().await.unwrap();
+    tokio::signal::ctrl_c().await?;
+    Ok(())
 }
 
 struct PeerConf {
@@ -102,21 +93,29 @@ struct PeerConf {
 }
 
 async fn init_peer_manager(conf: &PeerConf, control_service: &ControlService) {
-    let server_token = conf.server_token.clone().unwrap_or_else(|| "default_token".to_string());
+    let server_token = conf
+        .server_token
+        .clone()
+        .unwrap_or_else(|| "default_token".to_string());
     let network_state_provider = control_service.get_network_state_provider().clone();
 
     let peer_manager = Arc::new(PeerServerManager::new(server_token, network_state_provider));
     control_service.set_peer_manager(peer_manager.clone());
 
     if let Some(server_quic_bind) = conf.server_quic_bind {
-        let (certs, key) = match crate::utils::cert::get_cert_and_key(conf.cert.clone(), conf.key.clone()) {
-            Ok((certs, key)) => (certs, key),
-            Err(e) => {
-                log::error!("Failed to load cert/key for peer server: {:?}", e);
-                panic!("{:?}", e)
-            }
-        };
-        if let Err(e) = peer_manager.clone().start_server(server_quic_bind, certs, key).await {
+        let (certs, key) =
+            match crate::utils::cert::get_cert_and_key(conf.cert.clone(), conf.key.clone()) {
+                Ok((certs, key)) => (certs, key),
+                Err(e) => {
+                    log::error!("Failed to load cert/key for peer server: {:?}", e);
+                    panic!("{:?}", e)
+                }
+            };
+        if let Err(e) = peer_manager
+            .clone()
+            .start_server(server_quic_bind, certs, key)
+            .await
+        {
             log::error!("Failed to start peer server: {:?}", e);
         } else {
             log::info!("Peer server started on {}", server_quic_bind);

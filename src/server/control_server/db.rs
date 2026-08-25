@@ -74,8 +74,9 @@ pub struct NetworkRecord {
 impl NetworkRecord {
     pub fn to_ipv4_net(&self) -> Option<Ipv4Net> {
         let gateway: Ipv4Addr = self.gateway.parse().ok()?;
-        let network_ip = Ipv4Addr::from(u32::from(gateway) - 1);
-        Ipv4Net::new(network_ip, self.netmask).ok()
+        Ipv4Net::new(gateway, self.netmask)
+            .ok()
+            .map(|net| net.trunc())
     }
 }
 
@@ -160,7 +161,7 @@ pub async fn init_db_pool() -> anyhow::Result<()> {
     .await
     .context("Failed to create peer_servers table")?;
 
-    DB_POOL.set(pool).unwrap_or_else(|_| ());
+    let _ = DB_POOL.set(pool);
     Ok(())
 }
 
@@ -368,7 +369,10 @@ pub async fn release_device_ip(network_code: &str, device_id: &str) -> anyhow::R
 }
 
 #[allow(dead_code)]
-pub async fn get_device(network_code: &str, device_id: &str) -> anyhow::Result<Option<DeviceRecord>> {
+pub async fn get_device(
+    network_code: &str,
+    device_id: &str,
+) -> anyhow::Result<Option<DeviceRecord>> {
     let Some(pool) = DB_POOL.get() else {
         return Ok(None);
     };

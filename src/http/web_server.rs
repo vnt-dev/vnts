@@ -1,13 +1,13 @@
 use crate::ControlService;
 use crate::server::control_server::service::{DeviceInfoVO, NetworkInfoVO};
 use axum::{
+    Json, Router,
     body::Body,
     extract::{Path, Query, State},
-    http::{header, HeaderMap, Request, StatusCode, Uri},
+    http::{HeaderMap, Request, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
-    Json, Router,
 };
 use jsonwebtoken::{DecodingKey, EncodingKey, Validation};
 use mime_guess::from_path;
@@ -16,7 +16,7 @@ use rand::distr::Alphanumeric;
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::Path as StdPath;
+use std::path::{Component, Path as StdPath, PathBuf};
 use tower_http::cors::{Any, CorsLayer};
 
 #[derive(RustEmbed)]
@@ -219,13 +219,11 @@ async fn create_network(
         }
     };
 
-    if body.netmask > 32 {
+    if body.netmask > 30 {
         return ApiResponse::<()>::err("无效的掩码").into_response();
     }
 
-    let lease_duration = body
-        .lease_duration
-        .map(std::time::Duration::from_secs);
+    let lease_duration = body.lease_duration.map(std::time::Duration::from_secs);
 
     match state
         .control_service
@@ -256,7 +254,7 @@ async fn update_network(
         }
     };
 
-    if body.netmask > 32 {
+    if body.netmask > 30 {
         return ApiResponse::<()>::err("无效的掩码").into_response();
     }
 
@@ -374,14 +372,17 @@ async fn static_handler(uri: Uri) -> impl IntoResponse {
         path = "index.html".to_string();
     }
 
-    // 优先从本地文件系统加载，fallback 到内嵌资源
-    let local_path = StdPath::new("static").join(&path);
-    if local_path.exists()
-        && local_path.is_file()
-        && let Ok(content) = tokio::fs::read(&local_path).await
+    // 优先从本地文件系统加载，fallback 到内嵌资源。
+    // 只接受普通相对路径组件，避免通过 `..`、绝对路径或 Windows 盘符逃逸 static 目录。
+    if let Some(local_path) = safe_static_path(&path)
+        && let Ok(static_root) = tokio::fs::canonicalize("static").await
+        && let Ok(canonical_path) = tokio::fs::canonicalize(&local_path).await
+        && canonical_path.starts_with(static_root)
+        && canonical_path.is_file()
+        && let Ok(content) = tokio::fs::read(&canonical_path).await
     {
-        log::debug!("Serving file from local filesystem: {:?}", local_path);
-        let mime = from_path(&local_path).first_or_octet_stream();
+        log::debug!("Serving file from local filesystem: {:?}", canonical_path);
+        let mime = from_path(&canonical_path).first_or_octet_stream();
         return ([(header::CONTENT_TYPE, mime.as_ref())], content).into_response();
     }
 
@@ -392,10 +393,25 @@ async fn static_handler(uri: Uri) -> impl IntoResponse {
             [(header::CONTENT_TYPE, mime.as_ref())],
             Body::from(content.data),
         )
-        .into_response();
+            .into_response();
     }
 
     (StatusCode::NOT_FOUND, "404 Not Found").into_response()
+}
+
+fn safe_static_path(path: &str) -> Option<PathBuf> {
+    if path.contains('\\') || path.contains(':') {
+        return None;
+    }
+    let relative = StdPath::new(path);
+    if relative
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return None;
+    }
+
+    Some(StdPath::new("static").join(relative))
 }
 
 pub async fn start_http_server(
@@ -403,7 +419,7 @@ pub async fn start_http_server(
     username: String,
     password: String,
     web_bind: SocketAddr,
-) {
+) -> anyhow::Result<()> {
     let jwt_secret: String = rand::rng()
         .sample_iter(&Alphanumeric)
         .take(32)
@@ -451,6 +467,33 @@ pub async fn start_http_server(
 
     log::info!("HTTP Server running at http://{}", web_bind);
 
-    let listener = tokio::net::TcpListener::bind(web_bind).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(web_bind).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_static_path;
+    use std::path::Path;
+
+    #[test]
+    fn safe_static_path_accepts_normal_relative_paths() {
+        assert_eq!(
+            safe_static_path("assets/app.js").as_deref(),
+            Some(Path::new("static").join("assets/app.js").as_path())
+        );
+        assert_eq!(
+            safe_static_path("index.html").as_deref(),
+            Some(Path::new("static").join("index.html").as_path())
+        );
+    }
+
+    #[test]
+    fn safe_static_path_rejects_paths_outside_static_root() {
+        assert!(safe_static_path("../key.pem").is_none());
+        assert!(safe_static_path("assets/../../config.toml").is_none());
+        assert!(safe_static_path("/etc/passwd").is_none());
+        assert!(safe_static_path(r"C:\Windows\win.ini").is_none());
+    }
 }

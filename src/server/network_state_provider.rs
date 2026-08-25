@@ -162,9 +162,6 @@ struct NetworkStateInner {
 }
 
 impl NetworkState {
-    pub fn network(&self) -> &Ipv4Net {
-        &self.net
-    }
     pub fn gateway(&self) -> Ipv4Addr {
         self.gateway
     }
@@ -189,7 +186,12 @@ impl NetworkState {
     }
 
     /// 设备离线，返回需要持久化的记录。random_id 用于判断是否为当前会话。
-    pub fn offline_ip(&self, device_id: &String, ip: Ipv4Addr, random_id: u64) -> Option<DeviceRecord> {
+    pub fn offline_ip(
+        &self,
+        device_id: &String,
+        ip: Ipv4Addr,
+        random_id: u64,
+    ) -> Option<DeviceRecord> {
         let mut guard = self.lease_state.lock();
         let (success, record) = guard.offline_ip(&self.network_code, device_id, ip, random_id);
         if success {
@@ -239,10 +241,6 @@ impl NetworkState {
         None
     }
 
-    pub fn lease_duration(&self) -> Duration {
-        self.lease_duration
-    }
-
     /// 释放预注册但未确认的 IP，通过 random_id 避免误删其他会话
     pub fn release_pre_registered_ip(&self, device_id: &String, ip: Ipv4Addr, random_id: u64) {
         let should_remove = {
@@ -264,7 +262,11 @@ impl NetworkState {
         if should_remove {
             self.sender_map.remove(&ip);
             self.traffic_stats_map.remove(&ip);
-            log::info!("Released pre-registered IP device_id={}, ip={}", device_id, ip);
+            log::info!(
+                "Released pre-registered IP device_id={}, ip={}",
+                device_id,
+                ip
+            );
         }
     }
 
@@ -275,12 +277,18 @@ impl NetworkState {
 
     pub fn get_device_entry_by_ip(&self, ip: Ipv4Addr) -> Option<DeviceEntry> {
         let guard = self.lease_state.lock();
-        guard.device_ip_map.get(&ip)
+        guard
+            .device_ip_map
+            .get(&ip)
             .and_then(|device_id| guard.device_map.get(device_id).cloned())
     }
 
     /// 同步保存到 DB 后再确认，防止 Drop 时状态不一致
-    pub async fn confirm_registration(&self, network_code: &str, device_id: &str) -> anyhow::Result<()> {
+    pub async fn confirm_registration(
+        &self,
+        network_code: &str,
+        device_id: &str,
+    ) -> anyhow::Result<()> {
         if let Some(entry) = self.get_device_entry(device_id) {
             let record = entry.to_record(network_code);
             db::save_or_update_device(&record).await?;
@@ -296,7 +304,8 @@ impl NetworkState {
         sender: Sender<Bytes>,
     ) -> anyhow::Result<(Ipv4Addr, Option<Ipv4Addr>, Option<DeviceEntry>)> {
         let mut guard = self.lease_state.lock();
-        let (ip, old_ip) = guard.allocate_ip(&self.net, self.gateway, reg_req.clone(), random_id)?;
+        let (ip, old_ip) =
+            guard.allocate_ip(&self.net, self.gateway, reg_req.clone(), random_id)?;
 
         if let Some(old_ip) = old_ip {
             self.sender_map.remove(&old_ip);
@@ -307,7 +316,8 @@ impl NetworkState {
         self.sender_map.insert(ip, sender);
 
         if let Some(entry) = &entry {
-            self.traffic_stats_map.insert(ip, entry.traffic_stats.clone());
+            self.traffic_stats_map
+                .insert(ip, entry.traffic_stats.clone());
         }
 
         Ok((ip, old_ip, entry))
@@ -321,23 +331,6 @@ impl NetworkState {
     pub fn remove_devices(&self, device_ids: &[String]) {
         let mut guard = self.lease_state.lock();
         guard.remove_devices(device_ids);
-    }
-
-    pub fn data_version(&self) -> u64 {
-        let guard = self.lease_state.lock();
-        guard.data_version
-    }
-
-    pub fn get_all_device_simple_info(&self) -> Vec<(String, Option<Ipv4Addr>, bool, u64)> {
-        let guard = self.lease_state.lock();
-        guard.device_map.values().map(|entry| {
-            (
-                entry.device_id.clone(),
-                entry.ip,
-                entry.is_connected,
-                entry.data_version,
-            )
-        }).collect()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -354,14 +347,14 @@ impl NetworkState {
     }
 
     pub fn get_device_infos(&self) -> Vec<crate::server::control_server::service::DeviceInfoVO> {
-        use time::macros::format_description;
         use time::OffsetDateTime;
+        use time::macros::format_description;
 
         let guard = self.lease_state.lock();
         let mut list = Vec::new();
         let format = format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
 
-        for (_device_id, entry) in &guard.device_map {
+        for entry in guard.device_map.values() {
             let last_connect_time: OffsetDateTime = entry.last_connect_time.into();
             let disconnect_time: Option<OffsetDateTime> = entry.disconnect_time.map(|d| d.into());
 
@@ -431,14 +424,17 @@ impl NetworkState {
         })
     }
 
-    pub fn client_info_list(&self, exclude_ip: Ipv4Addr) -> Vec<crate::protocol::rpc_message::ClientInfo> {
+    pub fn client_info_list(
+        &self,
+        exclude_ip: Ipv4Addr,
+    ) -> Vec<crate::protocol::rpc_message::ClientInfo> {
         use crate::protocol::rpc_message::ClientInfo;
         use time::OffsetDateTime;
 
         let guard = self.lease_state.lock();
         let mut list = Vec::new();
 
-        for (_device_id, entry) in &guard.device_map {
+        for entry in guard.device_map.values() {
             let Some(ip) = entry.ip else {
                 continue;
             };
@@ -512,17 +508,18 @@ impl NetworkStateInner {
         }
         self.data_version += 1;
         for device_id in device_ids {
-            if let Some(entry) = self.device_map.remove(device_id) {
-                if let Some(ip) = entry.ip {
-                    self.device_ip_map.remove(&ip);
-                }
+            if let Some(entry) = self.device_map.remove(device_id)
+                && let Some(ip) = entry.ip
+            {
+                self.device_ip_map.remove(&ip);
             }
         }
     }
 
     fn add_device(&mut self, device_entry: DeviceEntry) {
         if let Some(ip) = device_entry.ip {
-            self.device_ip_map.insert(ip, device_entry.device_id.clone());
+            self.device_ip_map
+                .insert(ip, device_entry.device_id.clone());
         }
         self.device_map
             .insert(device_entry.device_id.clone(), device_entry);
@@ -545,62 +542,69 @@ impl NetworkStateInner {
     ) -> anyhow::Result<(Ipv4Addr, Option<Ipv4Addr>)> {
         let expect_ip = reg_req.ip;
 
-        let existing_device_info = self.device_map.get(&reg_req.device_id).map(|e| {
-            (e.ip, expect_ip.is_none() || e.ip == expect_ip)
-        });
+        let existing_device_info = self
+            .device_map
+            .get(&reg_req.device_id)
+            .map(|e| (e.ip, expect_ip.is_none() || e.ip == expect_ip));
 
-        if let Some((current_ip, ip_matches)) = existing_device_info {
-            if ip_matches {
-                let new_ip = if current_ip.is_none() {
-                    Some(self.find_available_ip(net, gateway)?)
-                } else {
-                    None
-                };
+        if let Some((current_ip, ip_matches)) = existing_device_info
+            && ip_matches
+        {
+            let new_ip = if current_ip.is_none() {
+                Some(self.find_available_ip(net, gateway)?)
+            } else {
+                None
+            };
 
-                let device_entry = self.device_map.get_mut(&reg_req.device_id).unwrap();
-                device_entry.is_connected = true;
-                device_entry.disconnect_time = None;
-                device_entry.random_id = random_id;
-                device_entry.last_connect_time = SystemTime::now();
-                self.data_version += 1;
-                device_entry.data_version = self.data_version;
-                device_entry.key_sign = reg_req.key_sign.clone();
+            let device_entry = self.device_map.get_mut(&reg_req.device_id).unwrap();
+            device_entry.is_connected = true;
+            device_entry.disconnect_time = None;
+            device_entry.random_id = random_id;
+            device_entry.last_connect_time = SystemTime::now();
+            self.data_version += 1;
+            device_entry.data_version = self.data_version;
+            device_entry.key_sign = reg_req.key_sign.clone();
 
-                if let Some(ip) = new_ip {
-                    device_entry.ip = Some(ip);
-                    let device_id = device_entry.device_id.clone();
-                    self.device_ip_map.insert(ip, device_id);
-                    return Ok((ip, None));
-                }
-                return Ok((current_ip.unwrap(), None));
+            if let Some(ip) = new_ip {
+                device_entry.ip = Some(ip);
+                let device_id = device_entry.device_id.clone();
+                self.device_ip_map.insert(ip, device_id);
+                return Ok((ip, None));
             }
+            return Ok((current_ip.unwrap(), None));
         }
 
         let old = existing_device_info.and_then(|(ip, _)| ip);
 
         if let Some(ip) = expect_ip {
-            loop {
-                if ip == gateway {
-                    if reg_req.ip_variable {
-                        break;
-                    }
+            let can_use_expected_ip = if ip == gateway {
+                if !reg_req.ip_variable {
                     bail!("此IP为网关IP，不允许使用")
                 }
-                if !net.contains(&ip) {
-                    if reg_req.ip_variable {
-                        break;
-                    }
+                false
+            } else if !net.contains(&ip) {
+                if !reg_req.ip_variable {
                     bail!("IP网段错误，应使用{}网段中的IP", net)
                 }
-                if let Some(id) = self.device_ip_map.get(&ip) {
-                    if reg_req.ip_variable {
-                        break;
-                    }
+                false
+            } else if ip == net.network() || ip == net.broadcast() {
+                if !reg_req.ip_variable {
+                    bail!("此IP为网段的网络地址或广播地址，不允许使用")
+                }
+                false
+            } else if let Some(id) = self.device_ip_map.get(&ip) {
+                if !reg_req.ip_variable {
                     if let Some(v) = self.device_map.get(id) {
                         bail!("IP重复，设备{}[{}]已使用此IP", v.device_name, v.device_id)
                     }
                     bail!("IP重复，服务端数据错误")
                 }
+                false
+            } else {
+                true
+            };
+
+            if can_use_expected_ip {
                 if let Some(old_ip) = old {
                     self.device_ip_map.remove(&old_ip);
                 }
@@ -644,7 +648,9 @@ impl NetworkStateInner {
     }
 
     fn find_available_ip(&self, net: &Ipv4Net, gateway: Ipv4Addr) -> anyhow::Result<Ipv4Addr> {
-        let start = u32::from(net.network()) + 1;
+        let start = u32::from(net.network())
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("Invalid network address"))?;
         let end = u32::from(net.broadcast());
         for i in start..end {
             let ip = Ipv4Addr::from(i);
@@ -674,10 +680,13 @@ impl NetworkState {
 
                 for record in records {
                     let entry = DeviceEntry::from_record(record);
-                    if let Some(ip) = entry.ip {
-                        if net.contains(&ip) && gateway != ip {
-                            device_ip_map.insert(ip, entry.device_id.clone());
-                        }
+                    if let Some(ip) = entry.ip
+                        && net.contains(&ip)
+                        && gateway != ip
+                        && ip != net.network()
+                        && ip != net.broadcast()
+                    {
+                        device_ip_map.insert(ip, entry.device_id.clone());
                     }
                     max_version = max_version.max(entry.data_version);
                     device_map.insert(entry.device_id.clone(), entry);
@@ -712,9 +721,14 @@ impl NetworkState {
         }
     }
 
-    pub async fn new_from_db(network_code: String, net: Ipv4Net, lease_duration: Duration) -> NetworkState {
-        let gateway = Ipv4Addr::from(u32::from(net.network()) + 1);
-        let initial_inner_state = Self::build_initial_inner_state(&network_code, net, gateway).await;
+    pub async fn new_from_db(
+        network_code: String,
+        net: Ipv4Net,
+        gateway: Ipv4Addr,
+        lease_duration: Duration,
+    ) -> NetworkState {
+        let initial_inner_state =
+            Self::build_initial_inner_state(&network_code, net, gateway).await;
         Self {
             time: Mutex::new(Instant::now()),
             network_code,
@@ -733,16 +747,16 @@ impl NetworkState {
 
     pub fn update_client_latency(&self, ip: Ipv4Addr, latency_ms: u32) {
         let mut guard = self.lease_state.lock();
-        if let Some(device_id) = guard.device_ip_map.get(&ip).cloned() {
-            if let Some(entry) = guard.device_map.get_mut(&device_id) {
-                entry.latency_ms = Some(latency_ms);
-                log::debug!(
-                    "Updated client latency: network_code={}, ip={}, latency={} ms",
-                    self.network_code,
-                    ip,
-                    latency_ms
-                );
-            }
+        if let Some(device_id) = guard.device_ip_map.get(&ip).cloned()
+            && let Some(entry) = guard.device_map.get_mut(&device_id)
+        {
+            entry.latency_ms = Some(latency_ms);
+            log::debug!(
+                "Updated client latency: network_code={}, ip={}, latency={} ms",
+                self.network_code,
+                ip,
+                latency_ms
+            );
         }
     }
 }
@@ -759,7 +773,10 @@ impl NetworkStateProvider {
     }
 
     pub fn get_network_codes(&self) -> Vec<String> {
-        self.network_states.iter().map(|entry| entry.key().clone()).collect()
+        self.network_states
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect()
     }
 
     pub fn get_network_state(&self, network_code: &str) -> Option<Arc<NetworkState>> {
@@ -778,5 +795,81 @@ impl Deref for NetworkStateProvider {
 
     fn deref(&self) -> &Self::Target {
         &self.network_states
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NetworkStateInner;
+    use crate::protocol::control_message::{RegRequestMsg, RegistrationMode};
+    use ipnet::Ipv4Net;
+    use std::collections::HashMap;
+    use std::net::Ipv4Addr;
+
+    fn request(ip: Ipv4Addr, ip_variable: bool) -> RegRequestMsg {
+        RegRequestMsg {
+            network_code: "test-net".to_string(),
+            device_id: format!("device-{ip}"),
+            ip: Some(ip),
+            name: "test".to_string(),
+            version: "1".to_string(),
+            key_sign: None,
+            ip_variable,
+            server_id: 0,
+            registration_mode: RegistrationMode::Normal,
+        }
+    }
+
+    fn empty_state() -> NetworkStateInner {
+        NetworkStateInner {
+            data_version: 0,
+            device_map: HashMap::new(),
+            device_ip_map: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn requested_network_and_broadcast_addresses_are_rejected() {
+        let net = "10.26.0.0/24".parse::<Ipv4Net>().unwrap();
+        let gateway = Ipv4Addr::new(10, 26, 0, 1);
+        let mut state = empty_state();
+
+        assert!(
+            state
+                .allocate_ip(
+                    &net,
+                    gateway,
+                    request(Ipv4Addr::new(10, 26, 0, 0), false),
+                    1,
+                )
+                .is_err()
+        );
+        assert!(
+            state
+                .allocate_ip(
+                    &net,
+                    gateway,
+                    request(Ipv4Addr::new(10, 26, 0, 255), false),
+                    2,
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn variable_invalid_ip_falls_back_to_available_host() {
+        let net = "10.26.0.0/24".parse::<Ipv4Net>().unwrap();
+        let gateway = Ipv4Addr::new(10, 26, 0, 1);
+        let mut state = empty_state();
+
+        let (ip, _) = state
+            .allocate_ip(
+                &net,
+                gateway,
+                request(Ipv4Addr::new(10, 26, 0, 255), true),
+                1,
+            )
+            .expect("fallback allocation");
+        assert_eq!(ip, Ipv4Addr::new(10, 26, 0, 2));
     }
 }

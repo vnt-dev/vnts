@@ -154,13 +154,11 @@ impl<S: AsyncRead + Unpin> AsyncRead for PeekableStreamWrapper<S> {
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        if self.peeked.is_some() {
-            if let Some(peeked) = self.peeked.take() {
-                if buf.remaining() < 4 {
-                    return std::task::Poll::Ready(Err(std::io::Error::other("too small")));
-                }
-                buf.put_u32(peeked);
+        if let Some(peeked) = self.peeked.take() {
+            if buf.remaining() < 4 {
+                return std::task::Poll::Ready(Err(std::io::Error::other("too small")));
             }
+            buf.put_u32(peeked);
         }
 
         std::pin::Pin::new(&mut self.stream).poll_read(cx, buf)

@@ -3,10 +3,10 @@ pub mod network_state_provider;
 pub mod peer_server;
 
 // 传输层
-pub mod tcp;
 pub mod quic;
-pub mod websocket;
+pub mod tcp;
 pub mod tcp_websocket;
+pub mod websocket;
 
 use crate::server::control_server::service::ControlService;
 use crate::server::quic::QuicConfig;
@@ -38,7 +38,7 @@ pub async fn turn_server_start(
         let mut hasher = Sha256::new();
         hasher.update(cert.as_ref());
         let calculated_hash: [u8; 32] = hasher.finalize().into();
-        log::info!("Fingerprint: {}", hex::encode(&calculated_hash));
+        log::info!("Fingerprint: {}", hex::encode(calculated_hash));
     }
     // TCP 和 WS 绑定同一地址时，使用混合监听自动检测协议
     if config.tcp_bind == config.ws_bind {

@@ -1,6 +1,6 @@
 use crate::protocol::control_message::{
-    ClientSimpleInfoList, ConfirmRegResponseMsg, ErrorResponseMsg, RegResponseMsg, RequestMessage, ResponseMessage,
-    SelectiveBroadcast,
+    ClientSimpleInfoList, ConfirmRegResponseMsg, ErrorResponseMsg, RegResponseMsg, RequestMessage,
+    ResponseMessage, SelectiveBroadcast,
 };
 use crate::protocol::ip_packet_protocol::{HEAD_LENGTH, MsgType, NetPacket};
 use crate::protocol::rpc_message::rpc_message_request::RpcReqPayload;
@@ -9,7 +9,6 @@ use crate::protocol::rpc_message::{ClientListResponse, RpcMessageRequest, RpcMes
 use crate::server::control_server::service::{ControlService, RegistrationStatus, Session};
 use anyhow::bail;
 use bytes::{Bytes, BytesMut};
-use pnet_packet::Packet;
 use pnet_packet::icmp::echo_request::EchoRequestPacket;
 use pnet_packet::icmp::{IcmpCode, IcmpTypes, MutableIcmpPacket};
 use pnet_packet::ip::IpNextHeaderProtocols;
@@ -100,7 +99,11 @@ impl ControlHandler {
             bail!("Session is not in pending confirmation state");
         }
 
-        if let Err(e) = session.network_state.confirm_registration(&session.network_code, &session.device_id).await {
+        if let Err(e) = session
+            .network_state
+            .confirm_registration(&session.network_code, &session.device_id)
+            .await
+        {
             log::error!("Failed to save confirmed device: {:?}", e);
             let msg_response = ErrorResponseMsg {
                 code: 500,
@@ -201,10 +204,10 @@ impl ControlHandler {
     pub async fn handle_data(&mut self, buf: BytesMut) -> anyhow::Result<()> {
         if let Some(session) = self.session.as_ref() {
             if session.registration_status == RegistrationStatus::PendingConfirmation {
-                if let Ok(request) = RequestMessage::from_slice(&buf) {
-                    if matches!(request, RequestMessage::ConfirmReg(_)) {
-                        return self.handle_confirm_reg().await;
-                    }
+                if let Ok(request) = RequestMessage::from_slice(&buf)
+                    && matches!(request, RequestMessage::ConfirmReg(_))
+                {
+                    return self.handle_confirm_reg().await;
                 }
                 log::debug!("Ignoring data in pre-registration state");
                 return Ok(());
@@ -242,13 +245,15 @@ impl ControlHandler {
                     let network_code = session.network_code.clone();
                     let data = buf.freeze();
 
-                    let forwarded = peer_manager.forward_with_best_route(&network_code, dest, data.clone()).await;
+                    let forwarded = peer_manager
+                        .forward_with_best_route(&network_code, dest, data.clone())
+                        .await;
 
-                    if !forwarded {
-                        if let Some(sender) = session.network_state.sender_map().get(&dest) {
-                            session.network_state.record_rx_traffic(dest, data.len());
-                            _ = sender.try_send(data);
-                        }
+                    if !forwarded
+                        && let Some(sender) = session.network_state.sender_map().get(&dest)
+                    {
+                        session.network_state.record_rx_traffic(dest, data.len());
+                        _ = sender.try_send(data);
                     }
                 } else {
                     let option = session
@@ -369,18 +374,24 @@ impl ControlHandler {
         let payload = packet.payload();
         let ipv4_packet = Ipv4Packet::new(payload)?;
 
+        let ip_header_len = ipv4_packet.get_header_length() as usize * 4;
+        let total_len = ipv4_packet.get_total_length() as usize;
+        if ip_header_len < Ipv4Packet::minimum_packet_size()
+            || ip_header_len > total_len
+            || total_len > payload.len()
+        {
+            return None;
+        }
+
         if ipv4_packet.get_next_level_protocol() != IpNextHeaderProtocols::Icmp {
             return None;
         }
 
-        let icmp_payload = ipv4_packet.payload();
+        let icmp_payload = &payload[ip_header_len..total_len];
         let echo_request = EchoRequestPacket::new(icmp_payload)?;
         if echo_request.get_icmp_type() != IcmpTypes::EchoRequest {
             return None;
         }
-
-        let ip_header_len = ipv4_packet.get_header_length() as usize * 4;
-        let total_len = ipv4_packet.get_total_length() as usize;
 
         let mut reply_ip_buf = vec![0u8; total_len];
         reply_ip_buf.copy_from_slice(&payload[..total_len]);
@@ -417,5 +428,55 @@ impl ControlHandler {
         reply_net_packet.set_seq(packet.seq());
         reply_net_packet.set_payload(&reply_ip_buf).ok()?;
         Some(reply_buf.freeze())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ControlHandler;
+    use crate::protocol::ip_packet_protocol::{HEAD_LENGTH, MsgType, NetPacket};
+    use bytes::BytesMut;
+    use pnet_packet::icmp::IcmpTypes;
+    use pnet_packet::icmp::echo_request::MutableEchoRequestPacket;
+    use pnet_packet::ipv4::MutableIpv4Packet;
+
+    fn gateway_ping_packet(total_length: u16, header_length: u8) -> BytesMut {
+        let mut buf = BytesMut::zeroed(HEAD_LENGTH + 28);
+        let mut net_packet = NetPacket::new(&mut buf).expect("net packet");
+        net_packet.set_msg_type(MsgType::Turn);
+        net_packet.set_gateway_flag(true);
+        net_packet.set_ttl(1);
+
+        let payload = net_packet.payload_mut();
+        let mut ipv4 = MutableIpv4Packet::new(payload).expect("ipv4 packet");
+        ipv4.set_version(4);
+        ipv4.set_header_length(header_length);
+        ipv4.set_total_length(total_length);
+        ipv4.set_next_level_protocol(pnet_packet::ip::IpNextHeaderProtocols::Icmp);
+
+        let mut echo = MutableEchoRequestPacket::new(&mut payload[20..]).expect("icmp packet");
+        echo.set_icmp_type(IcmpTypes::EchoRequest);
+        buf
+    }
+
+    #[test]
+    fn malformed_icmp_total_length_is_rejected_without_panicking() {
+        let buf = gateway_ping_packet(60, 5);
+        let packet = NetPacket::new(buf).expect("net packet");
+        assert!(ControlHandler::handle_icmp_ping(&packet).is_none());
+    }
+
+    #[test]
+    fn malformed_icmp_header_length_is_rejected_without_panicking() {
+        let buf = gateway_ping_packet(28, 15);
+        let packet = NetPacket::new(buf).expect("net packet");
+        assert!(ControlHandler::handle_icmp_ping(&packet).is_none());
+    }
+
+    #[test]
+    fn valid_icmp_echo_request_gets_a_reply() {
+        let buf = gateway_ping_packet(28, 5);
+        let packet = NetPacket::new(buf).expect("net packet");
+        assert!(ControlHandler::handle_icmp_ping(&packet).is_some());
     }
 }

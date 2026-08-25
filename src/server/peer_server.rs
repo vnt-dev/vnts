@@ -24,6 +24,9 @@ const PING_INTERVAL_SECS: u64 = 30;
 const NETWORK_SYNC_INTERVAL_SECS: u64 = 30;
 const MAX_ROUTES_PER_IP: usize = 5;
 
+type NetworkRouteMap = DashMap<String, Arc<DashMap<Ipv4Addr, Vec<IpRouteInfo>>>>;
+type OutboundTask = (JoinHandle<()>, tokio::sync::oneshot::Sender<()>);
+
 #[derive(Clone)]
 pub struct PeerServerInfo {
     inner: Arc<parking_lot::RwLock<PeerServerInfoInner>>,
@@ -137,8 +140,8 @@ pub struct PeerServerManager {
     network_state_provider: NetworkStateProvider,
     peer_servers: Arc<parking_lot::RwLock<Vec<Arc<PeerServerInfo>>>>,
     // network_code -> (ip -> 路由列表)，按延迟排序取 top N
-    ip_to_routes: Arc<DashMap<String, Arc<DashMap<Ipv4Addr, Vec<IpRouteInfo>>>>>,
-    outbound_tasks: Arc<DashMap<String, (JoinHandle<()>, tokio::sync::oneshot::Sender<()>)>>,
+    ip_to_routes: Arc<NetworkRouteMap>,
+    outbound_tasks: Arc<DashMap<String, OutboundTask>>,
 }
 
 impl PeerServerManager {
@@ -233,6 +236,7 @@ impl PeerServerManager {
     async fn run_peer_communication_loop(
         &self,
         peer_info: Arc<PeerServerInfo>,
+        connection: quinn::Connection,
         mut framed_write: FramedWrite<SendStream, LengthDelimitedCodec>,
         mut framed_read: FramedRead<RecvStream, LengthDelimitedCodec>,
         mut rx: tokio::sync::mpsc::Receiver<Bytes>,
@@ -264,6 +268,19 @@ impl PeerServerManager {
                         }
                         Err(e) => {
                             log::warn!("peer recv error: {}", e);
+                            break;
+                        }
+                    }
+                }
+                datagram = connection.read_datagram() => {
+                    match datagram {
+                        Ok(bytes) => {
+                            if let Err(e) = manager.handle_peer_message(&peer_info, &mut network_codes, bytes).await {
+                                log::error!("handle peer datagram error: {:?}", e);
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("peer datagram recv error: {}", e);
                             break;
                         }
                     }
@@ -352,7 +369,7 @@ impl PeerServerManager {
         let manager = self.clone();
         tokio::spawn(async move {
             manager
-                .run_peer_communication_loop(peer_info, framed_write, framed_read, rx)
+                .run_peer_communication_loop(peer_info, connection, framed_write, framed_read, rx)
                 .await;
         });
 
@@ -462,7 +479,7 @@ impl PeerServerManager {
         peer_info.set_connected(tx, connection.clone());
         self.peer_servers.write().push(peer_info.clone());
 
-        self.run_peer_communication_loop(peer_info, framed_write, framed_read, rx)
+        self.run_peer_communication_loop(peer_info, connection, framed_write, framed_read, rx)
             .await;
 
         Ok(())
@@ -580,7 +597,7 @@ impl PeerServerManager {
             let ip_map = self
                 .ip_to_routes
                 .entry(network_code.clone())
-                .or_insert_with(Default::default)
+                .or_default()
                 .value()
                 .clone();
 
@@ -642,6 +659,17 @@ impl PeerServerManager {
             }
         }
         log::debug!("Cleaned up routes for peer: {}", peer_info.get_addr());
+    }
+
+    fn cleanup_all_routes(&self, peer_info: &Arc<PeerServerInfo>) {
+        self.ip_to_routes.retain(|_, ip_map| {
+            ip_map.retain(|_, routes| {
+                routes.retain(|route| !Arc::ptr_eq(&route.peer_info, peer_info));
+                !routes.is_empty()
+            });
+            !ip_map.is_empty()
+        });
+        log::debug!("Cleaned up all routes for peer: {}", peer_info.get_addr());
     }
 
     async fn pull_client_info_from_peer(&self, peer_info: &Arc<PeerServerInfo>) -> Result<()> {
@@ -727,32 +755,32 @@ impl PeerServerManager {
             .and_then(|state| state.get_device_entry_by_ip(target_ip))
             .and_then(|device| device.latency_ms);
 
-        if let Some(ip_map) = self.ip_to_routes.get(network_code) {
-            if let Some(routes) = ip_map.get(&target_ip) {
-                let mut best_route: Option<(Arc<PeerServerInfo>, u32)> = None;
+        if let Some(ip_map) = self.ip_to_routes.get(network_code)
+            && let Some(routes) = ip_map.get(&target_ip)
+        {
+            let mut best_route: Option<(Arc<PeerServerInfo>, u32)> = None;
 
-                for route in routes.value() {
-                    if !route.peer_info.is_connected() {
-                        continue;
+            for route in routes.value() {
+                if !route.peer_info.is_connected() {
+                    continue;
+                }
+
+                let total_latency = route.total_latency();
+
+                match &best_route {
+                    None => {
+                        best_route = Some((route.peer_info.clone(), total_latency));
                     }
-
-                    let total_latency = route.total_latency();
-
-                    match &best_route {
-                        None => {
+                    Some((_, current_best)) => {
+                        if total_latency < *current_best {
                             best_route = Some((route.peer_info.clone(), total_latency));
                         }
-                        Some((_, current_best)) => {
-                            if total_latency < *current_best {
-                                best_route = Some((route.peer_info.clone(), total_latency));
-                            }
-                        }
                     }
                 }
+            }
 
-                if let Some((peer_info, total_latency)) = best_route {
-                    return Some((peer_info, total_latency, local_latency));
-                }
+            if let Some((peer_info, total_latency)) = best_route {
+                return Some((peer_info, total_latency, local_latency));
             }
         }
 
@@ -826,6 +854,9 @@ impl PeerServerManager {
         }
 
         if !to_remove.is_empty() {
+            for peer in &to_remove {
+                self.cleanup_all_routes(peer);
+            }
             let mut peers = self.peer_servers.write();
             for peer in &to_remove {
                 peers.retain(|p| !Arc::ptr_eq(p, peer));
@@ -854,6 +885,9 @@ impl PeerServerManager {
                 let ip = *entry.key();
                 let routes = entry.value();
                 for route in routes {
+                    if !route.peer_info.is_connected() {
+                        continue;
+                    }
                     let server_addr = route.peer_info.get_addr();
                     let total_latency = route.total_latency();
                     result.push((ip, server_addr, total_latency));
@@ -1008,5 +1042,188 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
             rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
             rustls::SignatureScheme::ED25519,
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{IpRouteInfo, PeerServerInfo, PeerServerManager, SkipServerVerification};
+    use crate::protocol::ProtoToBytesMut;
+    use crate::protocol::control_message::{RegRequestMsg, RegistrationMode};
+    use crate::protocol::ip_packet_protocol::{HEAD_LENGTH, MsgType, NetPacket};
+    use crate::protocol::server_message::{
+        Payload, ServerAuthRequest, ServerForwardData, ServerMessage,
+    };
+    use crate::server::network_state_provider::NetworkState;
+    use crate::server::network_state_provider::NetworkStateProvider;
+    use bytes::BytesMut;
+    use dashmap::DashMap;
+    use futures::{SinkExt, StreamExt};
+    use ipnet::Ipv4Net;
+    use quinn::crypto::rustls::QuicClientConfig;
+    use quinn::{ClientConfig, Endpoint};
+    use rustls::pki_types::PrivateKeyDer;
+    use std::net::Ipv4Addr;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
+
+    fn manager() -> PeerServerManager {
+        PeerServerManager::new(
+            "test-token".to_string(),
+            NetworkStateProvider::new(Arc::new(DashMap::new())),
+        )
+    }
+
+    #[test]
+    fn cleanup_all_routes_removes_only_target_peer() {
+        let manager = manager();
+        let removed_peer = Arc::new(PeerServerInfo::new("peer-a".to_string(), true));
+        let retained_peer = Arc::new(PeerServerInfo::new("peer-b".to_string(), true));
+        let ip = Ipv4Addr::new(10, 0, 0, 2);
+        let routes = Arc::new(DashMap::new());
+        routes.insert(
+            ip,
+            vec![
+                IpRouteInfo {
+                    peer_info: removed_peer.clone(),
+                    client_latency_ms: 10,
+                },
+                IpRouteInfo {
+                    peer_info: retained_peer.clone(),
+                    client_latency_ms: 20,
+                },
+            ],
+        );
+        manager.ip_to_routes.insert("net-a".to_string(), routes);
+
+        manager.cleanup_all_routes(&removed_peer);
+
+        let network_routes = manager.ip_to_routes.get("net-a").expect("network routes");
+        let ip_routes = network_routes.get(&ip).expect("ip routes");
+        assert_eq!(ip_routes.len(), 1);
+        assert!(Arc::ptr_eq(&ip_routes[0].peer_info, &retained_peer));
+    }
+
+    #[test]
+    fn cleanup_all_routes_removes_empty_network_maps() {
+        let manager = manager();
+        let removed_peer = Arc::new(PeerServerInfo::new("peer-a".to_string(), true));
+        let routes = Arc::new(DashMap::new());
+        routes.insert(
+            Ipv4Addr::new(10, 0, 0, 2),
+            vec![IpRouteInfo {
+                peer_info: removed_peer.clone(),
+                client_latency_ms: 10,
+            }],
+        );
+        manager.ip_to_routes.insert("net-a".to_string(), routes);
+
+        manager.cleanup_all_routes(&removed_peer);
+
+        assert!(!manager.ip_to_routes.contains_key("net-a"));
+    }
+
+    #[tokio::test]
+    async fn quic_datagram_is_delivered_to_local_client() {
+        let manager = Arc::new(manager());
+        let net = "10.30.0.0/24".parse::<Ipv4Net>().unwrap();
+        let gateway = Ipv4Addr::new(10, 30, 0, 1);
+        let target_ip = Ipv4Addr::new(10, 30, 0, 2);
+        let state = Arc::new(
+            NetworkState::new_from_db("net-a".to_string(), net, gateway, Duration::from_secs(60))
+                .await,
+        );
+        let (client_tx, mut client_rx) = tokio::sync::mpsc::channel(4);
+        state
+            .allocate_ip_and_get_entry(
+                RegRequestMsg {
+                    network_code: "net-a".to_string(),
+                    device_id: "device-a".to_string(),
+                    ip: Some(target_ip),
+                    name: "device-a".to_string(),
+                    version: "1".to_string(),
+                    key_sign: None,
+                    ip_variable: false,
+                    server_id: 0,
+                    registration_mode: RegistrationMode::Normal,
+                },
+                1,
+                client_tx,
+            )
+            .unwrap();
+        manager
+            .network_state_provider
+            .insert("net-a".to_string(), state);
+
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let cert = certified.cert.der().clone();
+        let key = PrivateKeyDer::try_from(certified.signing_key.serialize_der()).unwrap();
+        let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let server_addr = probe.local_addr().unwrap();
+        drop(probe);
+        manager
+            .clone()
+            .start_server(server_addr, vec![cert], key)
+            .await
+            .unwrap();
+
+        let client_crypto = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
+            .with_no_client_auth();
+        let client_config =
+            ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto).unwrap()));
+        let mut endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        endpoint.set_default_client_config(client_config);
+        let connection = endpoint
+            .connect(server_addr, "localhost")
+            .unwrap()
+            .await
+            .unwrap();
+        let (send_stream, recv_stream) = connection.open_bi().await.unwrap();
+        let mut framed_write = FramedWrite::new(send_stream, LengthDelimitedCodec::new());
+        let mut framed_read = FramedRead::new(recv_stream, LengthDelimitedCodec::new());
+
+        let auth = ServerMessage {
+            payload: Some(Payload::AuthReq(ServerAuthRequest {
+                token_hash: manager.token_hash.clone(),
+            })),
+        };
+        framed_write
+            .send(auth.encode_bytes_mut().freeze())
+            .await
+            .unwrap();
+        let _auth_response = tokio::time::timeout(Duration::from_secs(2), framed_read.next())
+            .await
+            .unwrap()
+            .expect("auth response")
+            .unwrap();
+
+        let mut packet_bytes = BytesMut::zeroed(HEAD_LENGTH);
+        let mut packet = NetPacket::new(&mut packet_bytes).unwrap();
+        packet.set_msg_type(MsgType::Turn);
+        packet.set_ttl(2);
+        packet.set_src_id(u32::from(Ipv4Addr::new(10, 30, 0, 3)));
+        packet.set_dest_id(u32::from(target_ip));
+        let forwarded_packet = packet_bytes.freeze();
+        let forward = ServerMessage {
+            payload: Some(Payload::ForwardData(ServerForwardData {
+                network_code: "net-a".to_string(),
+                data: forwarded_packet.to_vec(),
+            })),
+        };
+        connection
+            .send_datagram(forward.encode_bytes_mut().freeze())
+            .unwrap();
+
+        let received = tokio::time::timeout(Duration::from_secs(2), client_rx.recv())
+            .await
+            .unwrap()
+            .expect("forwarded packet");
+        assert_eq!(received, forwarded_packet);
+
+        connection.close(0u32.into(), b"test complete");
+        endpoint.close(0u32.into(), b"test complete");
     }
 }

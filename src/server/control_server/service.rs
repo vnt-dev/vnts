@@ -1,7 +1,9 @@
 use crate::protocol::control_message::{RegRequestMsg, RegistrationMode};
 use crate::server::control_server::db;
 use crate::server::control_server::db::{NetworkRecord, NetworkSource};
-use crate::server::network_state_provider::{i64_to_system_time, NetworkState, NetworkStateProvider};
+use crate::server::network_state_provider::{
+    NetworkState, NetworkStateProvider, i64_to_system_time,
+};
 use anyhow::{Context, bail};
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -27,13 +29,48 @@ pub enum RegistrationStatus {
 #[derive(Clone, Copy)]
 pub struct NetworkConfig {
     pub net: Ipv4Net,
+    pub gateway: Ipv4Addr,
     pub lease_duration: Duration,
     pub source: NetworkSource,
+}
+
+fn validate_gateway(net: Ipv4Net, gateway: Ipv4Addr) -> anyhow::Result<()> {
+    if net.prefix_len() > 30 {
+        bail!("掩码 /{} 没有足够的可用主机地址", net.prefix_len());
+    }
+    if !net.contains(&gateway) || gateway == net.network() || gateway == net.broadcast() {
+        bail!("网关 {} 必须是网段 {} 中的可用主机地址", gateway, net);
+    }
+    Ok(())
+}
+
+fn first_usable_ip(net: Ipv4Net) -> anyhow::Result<Ipv4Addr> {
+    if net.prefix_len() > 30 {
+        bail!("网段 {} 没有足够的可用主机地址", net);
+    }
+    let value = u32::from(net.network())
+        .checked_add(1)
+        .context("Network address overflow")?;
+    let gateway = Ipv4Addr::from(value);
+    validate_gateway(net, gateway)?;
+    Ok(gateway)
+}
+
+fn network_from_gateway(gateway: Ipv4Addr, netmask: u8) -> anyhow::Result<Ipv4Net> {
+    if netmask > 30 {
+        bail!("无效的掩码 /{}，必须小于等于 30", netmask);
+    }
+    let net = Ipv4Net::new(gateway, netmask)
+        .context("Invalid network")?
+        .trunc();
+    validate_gateway(net, gateway)?;
+    Ok(net)
 }
 
 #[derive(Clone)]
 pub struct ControlService {
     default_net: Ipv4Net,
+    default_gateway: Ipv4Addr,
     default_lease_duration: Duration,
     white_list: Arc<HashSet<String>>,
     db_nets: Arc<RwLock<HashMap<String, NetworkConfig>>>,
@@ -48,14 +85,17 @@ impl ControlService {
         custom_nets: HashMap<String, Ipv4Net>,
         white_list: HashSet<String>,
         lease_duration: Duration,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
+        let default_net = default_net.trunc();
+        let default_gateway = first_usable_ip(default_net)?;
         let network_states = Arc::new(DashMap::new());
 
-        Self::save_config_networks_to_db(&default_net, &custom_nets, lease_duration).await;
+        Self::save_config_networks_to_db(&custom_nets, lease_duration).await;
         let db_nets = Self::load_networks_from_db().await;
 
         let service = Self {
             default_net,
+            default_gateway,
             default_lease_duration: lease_duration,
             white_list: Arc::new(white_list),
             db_nets: Arc::new(RwLock::new(db_nets)),
@@ -70,11 +110,10 @@ impl ControlService {
             .max(Duration::from_secs(10));
         service.start_cleanup_task(cleanup_interval);
 
-        service
+        Ok(service)
     }
 
     async fn save_config_networks_to_db(
-        _default_net: &Ipv4Net,
         custom_nets: &HashMap<String, Ipv4Net>,
         lease_duration: Duration,
     ) {
@@ -85,7 +124,14 @@ impl ControlService {
         let lease_secs = lease_duration.as_secs() as i64;
 
         for (code, net) in custom_nets {
-            let gateway = Ipv4Addr::from(u32::from(net.network()) + 1);
+            let net = net.trunc();
+            let gateway = match first_usable_ip(net) {
+                Ok(gateway) => gateway,
+                Err(e) => {
+                    log::error!("Invalid custom network {} ({}): {}", code, net, e);
+                    continue;
+                }
+            };
             let record = NetworkRecord {
                 network_code: code.clone(),
                 gateway: gateway.to_string(),
@@ -107,11 +153,15 @@ impl ControlService {
         match db::load_all_networks().await {
             Ok(records) => {
                 for record in records {
-                    if let Some(net) = record.to_ipv4_net() {
+                    let gateway = record.gateway.parse::<Ipv4Addr>();
+                    if let (Some(net), Ok(gateway)) = (record.to_ipv4_net(), gateway)
+                        && validate_gateway(net, gateway).is_ok()
+                    {
                         nets.insert(
                             record.network_code,
                             NetworkConfig {
                                 net,
+                                gateway,
                                 lease_duration: Duration::from_secs(record.lease_duration as u64),
                                 source: record.source,
                             },
@@ -139,10 +189,12 @@ impl ControlService {
         }
 
         let is_new_network = !self.db_nets.read().contains_key(&reg_req.network_code);
-        let config = self.network_config(&reg_req.network_code, reg_req.ip);
+        let config = self.network_config(&reg_req.network_code, reg_req.ip)?;
 
         if is_new_network {
-            self.db_nets.write().insert(reg_req.network_code.clone(), config);
+            self.db_nets
+                .write()
+                .insert(reg_req.network_code.clone(), config);
         }
 
         let state = self
@@ -153,13 +205,14 @@ impl ControlService {
             let random_id = rand::rng().next_u64();
             let device_id = reg_req.device_id.clone();
 
-            let (ip, _old_ip, entry) = match state.allocate_ip_and_get_entry(reg_req, random_id, sender) {
-                Ok(rs) => rs,
-                Err(e) => {
-                    log::warn!("network_code={network_code},device_id={device_id},e={e:?}");
-                    return Err(e);
-                }
-            };
+            let (ip, _old_ip, entry) =
+                match state.allocate_ip_and_get_entry(reg_req, random_id, sender) {
+                    Ok(rs) => rs,
+                    Err(e) => {
+                        log::warn!("network_code={network_code},device_id={device_id},e={e:?}");
+                        return Err(e);
+                    }
+                };
 
             (
                 Session {
@@ -172,21 +225,19 @@ impl ControlService {
                         RegistrationMode::Normal => RegistrationStatus::Confirmed,
                         RegistrationMode::PreRegister => RegistrationStatus::PendingConfirmation,
                     },
-                    control_service: self.clone(),
                 },
                 entry,
             )
         };
 
         if is_new_network {
-            let gateway = Ipv4Addr::from(u32::from(config.net.network()) + 1);
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as i64;
             let record = NetworkRecord {
                 network_code: network_code.clone(),
-                gateway: gateway.to_string(),
+                gateway: config.gateway.to_string(),
                 netmask: config.net.prefix_len(),
                 lease_duration: config.lease_duration.as_secs() as i64,
                 source: NetworkSource::DeviceRegister,
@@ -199,35 +250,43 @@ impl ControlService {
             });
         }
 
-        if matches!(registration_mode, RegistrationMode::Normal) {
-            if let Some(entry) = entry {
-                let nc = network_code.clone();
-                tokio::spawn(async move {
-                    let record = entry.to_record(&nc);
-                    if let Err(e) = db::save_or_update_device(&record).await {
-                        log::error!("Failed to save or update device record: {:?}", e);
-                    }
-                });
-            }
+        if matches!(registration_mode, RegistrationMode::Normal)
+            && let Some(entry) = entry
+        {
+            let nc = network_code.clone();
+            tokio::spawn(async move {
+                let record = entry.to_record(&nc);
+                if let Err(e) = db::save_or_update_device(&record).await {
+                    log::error!("Failed to save or update device record: {:?}", e);
+                }
+            });
         }
 
         Ok(session)
     }
 
-    fn network_config(&self, network_code: &str, ip: Option<Ipv4Addr>) -> NetworkConfig {
+    fn network_config(
+        &self,
+        network_code: &str,
+        ip: Option<Ipv4Addr>,
+    ) -> anyhow::Result<NetworkConfig> {
         if let Some(config) = self.db_nets.read().get(network_code) {
-            return *config;
+            return Ok(*config);
         }
-        let net = if let Some(ip) = ip {
-            Ipv4Net::new_assert(Ipv4Net::new_assert(ip, 24).network(), 24)
+        let (net, gateway) = if let Some(ip) = ip {
+            let net = Ipv4Net::new(ip, 24)
+                .context("Invalid requested IP network")?
+                .trunc();
+            (net, first_usable_ip(net)?)
         } else {
-            self.default_net
+            (self.default_net, self.default_gateway)
         };
-        NetworkConfig {
+        Ok(NetworkConfig {
             net,
+            gateway,
             lease_duration: self.default_lease_duration,
             source: NetworkSource::DeviceRegister,
-        }
+        })
     }
 
     /// DCL: 获取或创建 NetworkState
@@ -255,8 +314,13 @@ impl ControlService {
         }
 
         let new_state = Arc::new(
-            NetworkState::new_from_db(network_code.clone(), config.net, config.lease_duration)
-                .await,
+            NetworkState::new_from_db(
+                network_code.clone(),
+                config.net,
+                config.gateway,
+                config.lease_duration,
+            )
+            .await,
         );
 
         self.network_state_provider
@@ -274,7 +338,10 @@ impl ControlService {
             .map(|v| v.key().clone())
             .collect();
         for network_code in keys {
-            let option = self.network_state_provider.get(&network_code).map(|v| v.clone());
+            let option = self
+                .network_state_provider
+                .get(&network_code)
+                .map(|v| v.clone());
             if let Some(state) = option {
                 if !state.is_empty() {
                     continue;
@@ -388,6 +455,7 @@ impl ControlService {
             bail!("网络编号 '{}' 已存在", network_code);
         }
 
+        let net = network_from_gateway(gateway, netmask)?;
         let lease_duration = lease_duration.unwrap_or(self.default_lease_duration);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -405,12 +473,11 @@ impl ControlService {
 
         db::save_network(&record).await?;
 
-        let network_ip = Ipv4Addr::from(u32::from(gateway) - 1);
-        let net = Ipv4Net::new(network_ip, netmask).context("Invalid network")?;
         self.db_nets.write().insert(
             network_code,
             NetworkConfig {
                 net,
+                gateway,
                 lease_duration,
                 source: NetworkSource::Manual,
             },
@@ -426,6 +493,7 @@ impl ControlService {
         netmask: u8,
         lease_duration: Duration,
     ) -> anyhow::Result<()> {
+        let net = network_from_gateway(gateway, netmask)?;
         let original_source = self
             .db_nets
             .read()
@@ -452,12 +520,11 @@ impl ControlService {
         )
         .await?;
 
-        let network_ip = Ipv4Addr::from(u32::from(gateway) - 1);
-        let net = Ipv4Net::new(network_ip, netmask).context("Invalid network")?;
         self.db_nets.write().insert(
             network_code.to_string(),
             NetworkConfig {
                 net,
+                gateway,
                 lease_duration,
                 source: original_source,
             },
@@ -492,11 +559,7 @@ impl ControlService {
         Ok(())
     }
 
-    pub async fn delete_device(
-        &self,
-        network_code: &str,
-        device_id: &str,
-    ) -> anyhow::Result<()> {
+    pub async fn delete_device(&self, network_code: &str, device_id: &str) -> anyhow::Result<()> {
         if let Some(state) = self.network_state_provider.get(network_code) {
             if state.is_device_online(device_id) {
                 bail!("设备在线，无法删除");
@@ -516,7 +579,9 @@ impl ControlService {
     }
 
     pub fn get_network_state(&self, network_code: &str) -> Option<Arc<NetworkState>> {
-        self.network_state_provider.get(network_code).map(|s| s.clone())
+        self.network_state_provider
+            .get(network_code)
+            .map(|s| s.clone())
     }
 
     pub fn set_peer_manager(&self, manager: Arc<crate::server::peer_server::PeerServerManager>) {
@@ -527,7 +592,6 @@ impl ControlService {
         self.peer_manager.read().clone()
     }
 
-
     pub fn get_network_state_provider(&self) -> &NetworkStateProvider {
         &self.network_state_provider
     }
@@ -537,7 +601,6 @@ impl ControlService {
         db_nets
             .iter()
             .map(|(code, config)| {
-                let gateway = Ipv4Addr::from(u32::from(config.net.network()) + 1);
                 let (all_count, online_count) = self
                     .network_state_provider
                     .get(code)
@@ -546,7 +609,7 @@ impl ControlService {
 
                 NetworkInfoVO {
                     network_code: code.clone(),
-                    gateway,
+                    gateway: config.gateway,
                     netmask: config.net.prefix_len(),
                     net: config.net,
                     lease_duration: config.lease_duration.as_secs(),
@@ -564,7 +627,8 @@ impl ControlService {
         } else {
             match db::load_all_devices(network_code).await {
                 Ok(records) => {
-                    let format = format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
+                    let format =
+                        format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
                     records
                         .into_iter()
                         .map(|r| {
@@ -576,7 +640,9 @@ impl ControlService {
                                 device_version: r.device_version,
                                 ip: r.ip.as_ref().and_then(|s| s.parse().ok()),
                                 status: "Offline".to_string(),
-                                last_connect_time: last_connect_time.format(&format).unwrap_or_default(),
+                                last_connect_time: last_connect_time
+                                    .format(&format)
+                                    .unwrap_or_default(),
                                 disconnect_time: None,
                                 latency_ms: None,
                                 server_addr: None,
@@ -624,14 +690,15 @@ pub struct Session {
     pub random_id: u64,
     pub network_state: Arc<NetworkState>,
     pub registration_status: RegistrationStatus,
-    pub control_service: ControlService,
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
         match self.registration_status {
             RegistrationStatus::Confirmed => {
-                let record = self.network_state.offline_ip(&self.device_id, self.ip, self.random_id);
+                let record =
+                    self.network_state
+                        .offline_ip(&self.device_id, self.ip, self.random_id);
                 if let Some(record) = record {
                     tokio::spawn(async move {
                         if let Err(e) = db::save_or_update_device(&record).await {
@@ -647,7 +714,11 @@ impl Drop for Session {
                     self.device_id,
                     self.ip
                 );
-                self.network_state.release_pre_registered_ip(&self.device_id, self.ip, self.random_id);
+                self.network_state.release_pre_registered_ip(
+                    &self.device_id,
+                    self.ip,
+                    self.random_id,
+                );
             }
         }
     }
@@ -678,4 +749,34 @@ pub struct NetworkInfoVO {
     pub source: NetworkSource,
     pub all_count: u32,
     pub online_count: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{first_usable_ip, network_from_gateway};
+    use ipnet::Ipv4Net;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn network_from_gateway_preserves_non_default_gateway() {
+        let gateway = Ipv4Addr::new(192, 168, 1, 100);
+        let net = network_from_gateway(gateway, 24).expect("valid network");
+        assert_eq!(net, "192.168.1.0/24".parse::<Ipv4Net>().unwrap());
+        assert!(net.contains(&gateway));
+    }
+
+    #[test]
+    fn network_from_gateway_rejects_reserved_and_too_small_networks() {
+        assert!(network_from_gateway(Ipv4Addr::new(192, 168, 1, 0), 24).is_err());
+        assert!(network_from_gateway(Ipv4Addr::new(192, 168, 1, 255), 24).is_err());
+        assert!(network_from_gateway(Ipv4Addr::new(192, 168, 1, 1), 31).is_err());
+        assert!(network_from_gateway(Ipv4Addr::UNSPECIFIED, 0).is_err());
+    }
+
+    #[test]
+    fn first_usable_ip_uses_checked_host_address() {
+        let net = "10.20.0.0/24".parse::<Ipv4Net>().unwrap();
+        assert_eq!(first_usable_ip(net).unwrap(), Ipv4Addr::new(10, 20, 0, 1));
+        assert!(first_usable_ip("255.255.255.255/32".parse().unwrap()).is_err());
+    }
 }
