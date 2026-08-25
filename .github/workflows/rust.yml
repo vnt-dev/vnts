@@ -51,8 +51,8 @@ jobs:
             OS: ubuntu-latest
           - TARGET: x86_64-unknown-freebsd
             OS: ubuntu-latest
-            ARTIFACT_NAME: freebsd-13.2-x86_64
-            BSD_VERSION: 13.2
+            ARTIFACT_NAME: freebsd-14.4-x86_64
+            BSD_VERSION: '14.4'
     runs-on: ${{ matrix.OS }}
     env:
       NAME: Vnts
@@ -60,11 +60,11 @@ jobs:
       OS: ${{ matrix.OS }}
       FEATURES: ${{ matrix.FEATURES }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Init submodules
         run: git submodule update --init --recursive --remote && git submodule status
       - name: Cargo cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -82,7 +82,7 @@ jobs:
       - name: List
         run: find ./
       - name: Build Vnts X86_64-FreeBSD
-        uses: cross-platform-actions/action@v0.23.0
+        uses: cross-platform-actions/action@v1.4.0
         if: ${{ endsWith(matrix.TARGET, 'freebsd') }}
         env:
           TARGET: ${{ matrix.TARGET }}
@@ -243,7 +243,7 @@ jobs:
       - name: List target Vnts
         run: find ./artifacts
       - name: Archive artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Vnts-${{ matrix.TARGET }}
           path: |
@@ -255,7 +255,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: ./artifacts
       - name: List
