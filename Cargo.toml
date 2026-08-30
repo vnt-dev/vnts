@@ -57,7 +57,7 @@ zerocopy = { version = "0.8.31", features = ["derive"] }
 
 [build-dependencies]
 prost-build = "0.14"
-
+protoc-bin-vendored = "3"
 
 [profile.release]
 opt-level = 'z'

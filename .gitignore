@@ -1,2 +1,21 @@
 /target
 .idea
+
+# 前端（frontend/ 内已有自己的 .gitignore，这里兜底）
+frontend/node_modules
+frontend/dist
+
+# 前端构建产物（由 frontend 的 pnpm build 生成；CI 先构建前端再编译 Rust）
+static/
+
+# 首次无参数启动会自动生成的文件
+config.toml
+cert.pem
+key.pem
+
+# 本地构建工具缓存（protoc 等）
+.tools/
+
+# 服务运行时的产物
+logs/
+network_control.db

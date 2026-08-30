@@ -17,7 +17,31 @@ permissions:
   packages: write
 
 jobs:
+  frontend:
+    name: Build frontend (static assets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+      - name: Upload static assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-static
+          path: static/
+          if-no-files-found: error
+
   build:
+    needs: frontend
     name: Build ${{ matrix.TARGET }}
     strategy:
       fail-fast: false
@@ -63,6 +87,11 @@ jobs:
       - uses: actions/checkout@v7
       - name: Init submodules
         run: git submodule update --init --recursive --remote && git submodule status
+      - name: Download frontend assets
+        uses: actions/download-artifact@v8
+        with:
+          name: frontend-static
+          path: .
       - name: Cargo cache
         uses: actions/cache@v6
         with:
