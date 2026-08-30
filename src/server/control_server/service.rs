@@ -1198,6 +1198,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fast_registration_makes_stale_clients_replace_their_device_list() {
+        let service = ControlService::new(
+            "10.26.0.0/24".parse().unwrap(),
+            HashMap::new(),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        service
+            .add_network(
+                "fast-reg-full-sync".to_string(),
+                "10.61.0.1".parse().unwrap(),
+                24,
+                None,
+                NetworkType::Public,
+            )
+            .await
+            .unwrap();
+
+        let (sender_a, _receiver_a) = mpsc::channel(8);
+        let (sender_b, _receiver_b) = mpsc::channel(8);
+        let mut session_a = service
+            .register(registration("fast-reg-full-sync", "device-a"), sender_a)
+            .await
+            .unwrap();
+        let session_b = service
+            .register(registration("fast-reg-full-sync", "device-b"), sender_b)
+            .await
+            .unwrap();
+        let old_ip = session_a.ip;
+
+        // 模拟 B 已经同步到修改前的设备列表版本。
+        let before = session_b
+            .network_state
+            .changed_client_simple_list(session_b.ip, u64::MAX)
+            .unwrap();
+        assert!(before.is_all, "客户端版本高于服务端时必须全量恢复");
+        let b_version = before.data_version;
+
+        let new_ip = "10.61.0.9".parse::<Ipv4Addr>().unwrap();
+        service
+            .update_device(
+                "fast-reg-full-sync",
+                "device-a",
+                new_ip,
+                DeviceIpType::Static,
+            )
+            .await
+            .unwrap();
+        service.fast_register(&mut session_a, new_ip).await.unwrap();
+
+        let update = session_b
+            .network_state
+            .changed_client_simple_list(session_b.ip, b_version)
+            .expect("B 的版本落后时应收到完整设备列表");
+        assert!(update.data_version > b_version);
+        assert!(update.is_all);
+        assert!(update.list.iter().any(|device| device.ip == new_ip));
+        assert!(!update.list.iter().any(|device| device.ip == old_ip));
+
+        let migration_version = update.data_version;
+        assert!(
+            session_b
+                .network_state
+                .changed_client_simple_list(session_b.ip, migration_version)
+                .is_none(),
+            "已经同步到迁移版本时不应重复下发"
+        );
+
+        // 越过迁移屏障后，普通新增仍然只下发增量。
+        let (sender_c, _receiver_c) = mpsc::channel(8);
+        let session_c = service
+            .register(registration("fast-reg-full-sync", "device-c"), sender_c)
+            .await
+            .unwrap();
+        let incremental = session_b
+            .network_state
+            .changed_client_simple_list(session_b.ip, migration_version)
+            .expect("新增设备后应有增量列表");
+        assert!(!incremental.is_all);
+        assert_eq!(incremental.list.len(), 1);
+        assert_eq!(incremental.list[0].ip, session_c.ip);
+
+        // 一直停留在迁移前版本的客户端，即使服务端后来还有普通变化，仍必须全量。
+        let stale_update = session_b
+            .network_state
+            .changed_client_simple_list(session_b.ip, b_version)
+            .expect("未越过迁移屏障的客户端仍应收到全量列表");
+        assert!(stale_update.is_all);
+        assert!(stale_update.list.iter().any(|device| device.ip == new_ip));
+        assert!(
+            stale_update
+                .list
+                .iter()
+                .any(|device| device.ip == session_c.ip)
+        );
+    }
+
+    #[tokio::test]
     async fn normal_reconnect_uses_latest_configured_ip_without_fast_registration() {
         let service = ControlService::new(
             "10.26.0.0/24".parse().unwrap(),

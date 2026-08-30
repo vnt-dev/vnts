@@ -161,6 +161,9 @@ pub struct NetworkState {
 
 struct NetworkStateInner {
     data_version: u64,
+    /// 最近一次无法用增量列表表达的设备列表变更版本。
+    /// 客户端版本低于该值时必须下发全量列表以删除本地旧条目。
+    full_sync_version: u64,
     device_map: HashMap<String, DeviceEntry>,
     device_ip_map: HashMap<Ipv4Addr, String>,
     active_ip_map: HashMap<Ipv4Addr, String>,
@@ -249,6 +252,7 @@ impl NetworkState {
                 self.traffic_stats_map.remove(&ip);
             }
             guard.data_version += 1;
+            guard.full_sync_version = guard.data_version;
             return entry.ip;
         }
         None
@@ -264,6 +268,7 @@ impl NetworkState {
                     guard.device_ip_map.remove(&ip);
                     guard.active_ip_map.remove(&ip);
                     guard.data_version += 1;
+                    guard.full_sync_version = guard.data_version;
                     true
                 } else {
                     false
@@ -318,6 +323,9 @@ impl NetworkState {
         let mut guard = self.lease_state.lock();
         guard.validate_ip_available(ip, Some(device_id))?;
         let previous = guard.device_map.get(device_id).cloned();
+        let replaces_published_ip = previous
+            .as_ref()
+            .is_some_and(|entry| !entry.is_connected && entry.ip.is_some_and(|old| old != ip));
 
         if let Some(old_ip) = previous.as_ref().and_then(|entry| entry.ip)
             && old_ip != ip
@@ -331,6 +339,9 @@ impl NetworkState {
             .unwrap_or(true);
         if publish_now {
             guard.data_version += 1;
+            if replaces_published_ip {
+                guard.full_sync_version = guard.data_version;
+            }
         }
         let data_version = previous
             .as_ref()
@@ -384,6 +395,7 @@ impl NetworkState {
             }
         }
         guard.data_version += 1;
+        guard.full_sync_version = guard.data_version;
     }
 
     pub fn fast_register(
@@ -423,6 +435,9 @@ impl NetworkState {
         guard.active_ip_map.insert(new_ip, device_id.to_string());
         guard.data_version += 1;
         let data_version = guard.data_version;
+        if old_ip != new_ip {
+            guard.full_sync_version = data_version;
+        }
         if let Some(entry) = guard.device_map.get_mut(device_id) {
             entry.data_version = data_version;
         }
@@ -472,6 +487,9 @@ impl NetworkState {
                 (id == &reg_req.device_id && *active_ip != ip).then_some(*active_ip)
             })
             .collect();
+        if !stale_active_ips.is_empty() {
+            guard.full_sync_version = guard.data_version;
+        }
         for stale_ip in stale_active_ips {
             guard.active_ip_map.remove(&stale_ip);
             self.sender_map.remove(&stale_ip);
@@ -564,7 +582,7 @@ impl NetworkState {
         if data_version == guard.data_version {
             return None;
         }
-        if data_version > guard.data_version {
+        if data_version > guard.data_version || data_version < guard.full_sync_version {
             let list = guard
                 .device_map
                 .values()
@@ -645,6 +663,7 @@ impl NetworkStateInner {
         if device_entry.random_id != random_id {
             return (false, None);
         }
+        let removes_different_ip = device_entry.ip != Some(ip);
         self.data_version += 1;
         device_entry.data_version = self.data_version;
         device_entry.is_connected = false;
@@ -652,6 +671,9 @@ impl NetworkStateInner {
 
         let record = device_entry.to_record(network_code);
         self.active_ip_map.remove(&ip);
+        if removes_different_ip {
+            self.full_sync_version = self.data_version;
+        }
         (true, Some(record))
     }
 
@@ -691,6 +713,9 @@ impl NetworkStateInner {
                 }
                 entry.data_version = self.data_version;
             }
+        }
+        if !released.is_empty() {
+            self.full_sync_version = self.data_version;
         }
         released
     }
@@ -828,6 +853,9 @@ impl NetworkStateInner {
                     self.device_ip_map.remove(&old_ip);
                 }
                 self.data_version += 1;
+                if old.is_some_and(|old_ip| old_ip != ip) {
+                    self.full_sync_version = self.data_version;
+                }
                 let entry = if let Some(mut entry) = existing_entry.clone() {
                     entry.ip = Some(ip);
                     entry.random_id = random_id;
@@ -865,6 +893,9 @@ impl NetworkStateInner {
 
         let ip = self.find_available_ip(net, gateway)?;
         self.data_version += 1;
+        if old.is_some_and(|old_ip| old_ip != ip) {
+            self.full_sync_version = self.data_version;
+        }
         let entry = if let Some(mut entry) = existing_entry {
             if let Some(old_ip) = entry.ip {
                 self.device_ip_map.remove(&old_ip);
@@ -959,6 +990,7 @@ impl NetworkState {
 
                 NetworkStateInner {
                     data_version: max_version,
+                    full_sync_version: 0,
                     device_map,
                     device_ip_map,
                     active_ip_map: HashMap::new(),
@@ -972,6 +1004,7 @@ impl NetworkState {
                 );
                 NetworkStateInner {
                     data_version: 0,
+                    full_sync_version: 0,
                     device_map: Default::default(),
                     device_ip_map: Default::default(),
                     active_ip_map: Default::default(),
@@ -1084,6 +1117,7 @@ mod tests {
     fn empty_state() -> NetworkStateInner {
         NetworkStateInner {
             data_version: 0,
+            full_sync_version: 0,
             device_map: HashMap::new(),
             device_ip_map: HashMap::new(),
             active_ip_map: HashMap::new(),
@@ -1165,10 +1199,12 @@ mod tests {
             entry.disconnect_time = Some(SystemTime::UNIX_EPOCH);
         }
         state.device_map.get_mut(&static_id).unwrap().ip_type = DeviceIpType::Static;
+        assert_eq!(state.full_sync_version, 0);
 
         let expired = state.collect_expired_devices(Duration::from_secs(1));
         assert_eq!(expired, vec![dynamic_id.clone()]);
         assert_eq!(state.remove_devices(&expired), vec![dynamic_id.clone()]);
+        assert_eq!(state.full_sync_version, state.data_version);
         assert!(state.device_map.contains_key(&dynamic_id));
         assert_eq!(state.device_map.get(&dynamic_id).unwrap().ip, None);
         assert_eq!(
