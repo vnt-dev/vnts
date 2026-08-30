@@ -8,7 +8,7 @@ import BaseModal from '@/components/BaseModal.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import NetworkCard from '@/components/NetworkCard.vue'
 import { useToast } from '@/composables/useToast'
-import type { CreateNetworkPayload, NetworkInfo } from '@/types'
+import type { CreateNetworkPayload, NetworkInfo, NetworkType } from '@/types'
 
 const router = useRouter()
 const toast = useToast()
@@ -49,6 +49,7 @@ const form = reactive({
   gateway: '',
   netmask: 24,
   lease_duration: null as number | null,
+  network_type: 'Public' as NetworkType,
 })
 
 const inputClass =
@@ -63,6 +64,7 @@ function openCreateModal() {
   form.gateway = ''
   form.netmask = 24
   form.lease_duration = null
+  form.network_type = 'Public'
   showFormModal.value = true
 }
 
@@ -72,6 +74,7 @@ function openEditModal(net: NetworkInfo) {
   form.gateway = net.gateway
   form.netmask = net.netmask
   form.lease_duration = net.lease_duration
+  form.network_type = net.network_type ?? 'Public'
   showFormModal.value = true
 }
 
@@ -88,12 +91,14 @@ async function submitForm() {
         gateway: form.gateway,
         netmask: form.netmask,
         lease_duration: form.lease_duration as number,
+        network_type: form.network_type,
       })
     } else {
       const payload: CreateNetworkPayload = {
         network_code: form.network_code,
         gateway: form.gateway,
         netmask: form.netmask,
+        network_type: form.network_type,
       }
       if (form.lease_duration) payload.lease_duration = form.lease_duration
       await networkApi.create(payload)
@@ -197,6 +202,24 @@ async function executeDelete() {
             placeholder="如: office, home"
             required
           />
+        </div>
+        <div>
+          <label class="mb-1.5 block text-sm font-medium text-slate-700">网络类型</label>
+          <select v-model="form.network_type" :class="inputClass">
+            <option value="Public">公开网络</option>
+            <option value="Private">私有网络</option>
+          </select>
+          <p
+            class="mt-1.5 rounded-md px-2.5 py-2 text-xs leading-5"
+            :class="form.network_type === 'Private' ? 'bg-amber-50 text-amber-700' : 'bg-blue-50 text-blue-700'"
+          >
+            <template v-if="form.network_type === 'Private'">
+              私有网络：仅允许设备列表中已有的设备 ID 连接，新设备需先手动添加。
+            </template>
+            <template v-else>
+              公开网络：允许新设备直接注册，服务端会自动分配并记录设备。
+            </template>
+          </p>
         </div>
         <div>
           <label class="mb-1.5 block text-sm font-medium text-slate-700">网关地址</label>

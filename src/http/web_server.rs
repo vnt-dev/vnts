@@ -1,4 +1,5 @@
 use crate::ControlService;
+use crate::server::control_server::db::{DeviceIpType, NetworkType};
 use crate::server::control_server::service::{DeviceInfoVO, NetworkInfoVO};
 use axum::{
     Json, Router,
@@ -206,6 +207,7 @@ struct CreateNetworkRequest {
     gateway: String,
     netmask: u8,
     lease_duration: Option<u64>,
+    network_type: Option<NetworkType>,
 }
 
 async fn create_network(
@@ -227,7 +229,13 @@ async fn create_network(
 
     match state
         .control_service
-        .add_network(body.network_code, gateway, body.netmask, lease_duration)
+        .add_network(
+            body.network_code,
+            gateway,
+            body.netmask,
+            lease_duration,
+            body.network_type.unwrap_or(NetworkType::Public),
+        )
         .await
     {
         Ok(()) => ApiResponse::<()>::ok_msg("创建成功").into_response(),
@@ -240,6 +248,7 @@ struct UpdateNetworkRequest {
     gateway: String,
     netmask: u8,
     lease_duration: u64,
+    network_type: Option<NetworkType>,
 }
 
 async fn update_network(
@@ -259,10 +268,22 @@ async fn update_network(
     }
 
     let lease_duration = std::time::Duration::from_secs(body.lease_duration);
+    let network_type = body.network_type.unwrap_or_else(|| {
+        state
+            .control_service
+            .get_network_type(&network_code)
+            .unwrap_or(NetworkType::Public)
+    });
 
     match state
         .control_service
-        .update_network(&network_code, gateway, body.netmask, lease_duration)
+        .update_network(
+            &network_code,
+            gateway,
+            body.netmask,
+            lease_duration,
+            network_type,
+        )
         .await
     {
         Ok(()) => ApiResponse::<()>::ok_msg("更新成功").into_response(),
@@ -297,6 +318,63 @@ async fn delete_device(
     {
         Ok(()) => ApiResponse::<()>::ok_msg("删除成功").into_response(),
         Err(e) => ApiResponse::<()>::err(e.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateDeviceRequest {
+    network_code: String,
+    device_id: String,
+    ip: String,
+    ip_type: Option<DeviceIpType>,
+}
+
+async fn create_device(
+    State(state): State<AppState>,
+    Json(body): Json<CreateDeviceRequest>,
+) -> Response {
+    let ip: Ipv4Addr = match body.ip.parse() {
+        Ok(ip) => ip,
+        Err(_) => return ApiResponse::<()>::err("无效的 IP 地址").into_response(),
+    };
+    match state
+        .control_service
+        .add_device(
+            &body.network_code,
+            &body.device_id,
+            ip,
+            body.ip_type.unwrap_or(DeviceIpType::Dynamic),
+        )
+        .await
+    {
+        Ok(()) => ApiResponse::<()>::ok_msg("添加成功").into_response(),
+        Err(error) => ApiResponse::<()>::err(error.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct UpdateDeviceRequest {
+    network_code: String,
+    ip: String,
+    ip_type: DeviceIpType,
+}
+
+async fn update_device(
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+    Json(body): Json<UpdateDeviceRequest>,
+) -> Response {
+    let ip: Ipv4Addr = match body.ip.parse() {
+        Ok(ip) => ip,
+        Err(_) => return ApiResponse::<()>::err("无效的 IP 地址").into_response(),
+    };
+    match state
+        .control_service
+        .update_device(&body.network_code, &device_id, ip, body.ip_type)
+        .await
+    {
+        Ok(()) => ApiResponse::<()>::ok_msg("更新成功").into_response(),
+        Err(error) => ApiResponse::<()>::err(error.to_string()).into_response(),
     }
 }
 
@@ -449,7 +527,9 @@ pub async fn start_http_server(
         .route("/networks/{network_code}", put(update_network))
         .route("/networks/{network_code}", delete(delete_network))
         .route("/devices", get(list_devices))
+        .route("/devices", post(create_device))
         .route("/devices", delete(delete_device))
+        .route("/devices/{device_id}", put(update_device))
         .route("/peer_servers", get(list_peer_servers))
         .route("/peer_servers", post(add_peer_server))
         .route("/peer_servers/{server_addr}", delete(delete_peer_server))

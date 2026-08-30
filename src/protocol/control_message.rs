@@ -132,6 +132,34 @@ impl ConfirmRegMsg {
 pub struct ConfirmRegResponseMsg {
     pub success: bool,
 }
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct FastRegRequestMsg {
+    pub ip: Ipv4Addr,
+}
+
+impl FastRegRequestMsg {
+    pub fn from(msg: proto::FastRegRequestMsg) -> anyhow::Result<Self> {
+        Ok(Self { ip: msg.ip.into() })
+    }
+
+    pub fn to(self) -> proto::FastRegRequestMsg {
+        proto::FastRegRequestMsg { ip: self.ip.into() }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct FastRegResponseMsg {
+    pub success: bool,
+}
+
+impl FastRegResponseMsg {
+    pub fn to(self) -> proto::FastRegResponseMsg {
+        proto::FastRegResponseMsg {
+            success: self.success,
+        }
+    }
+}
 impl ConfirmRegResponseMsg {
     pub fn from(msg: proto::ConfirmRegResponseMsg) -> anyhow::Result<Self> {
         Ok(Self {
@@ -168,6 +196,7 @@ impl ErrorResponseMsg {
 pub enum RequestMessage {
     Reg(RegRequestMsg),
     ConfirmReg(ConfirmRegMsg),
+    FastReg(FastRegRequestMsg),
 }
 impl RequestMessage {
     pub fn from_slice(buf: &[u8]) -> anyhow::Result<Self> {
@@ -180,12 +209,16 @@ impl RequestMessage {
             RequestPayload::ConfirmReg(confirm) => {
                 Ok(RequestMessage::ConfirmReg(ConfirmRegMsg::from(confirm)?))
             }
+            RequestPayload::FastReg(fast_reg) => {
+                Ok(RequestMessage::FastReg(FastRegRequestMsg::from(fast_reg)?))
+            }
         }
     }
     pub fn encode(self) -> BytesMut {
         let request_payload = match self {
             RequestMessage::Reg(reg) => RequestPayload::Reg(reg.to()),
             RequestMessage::ConfirmReg(confirm) => RequestPayload::ConfirmReg(confirm.to()),
+            RequestMessage::FastReg(fast_reg) => RequestPayload::FastReg(fast_reg.to()),
         };
         proto::RequestMessage {
             request_payload: Some(request_payload),
@@ -198,6 +231,7 @@ pub enum ResponseMessage {
     Reg(RegResponseMsg),
     Error(ErrorResponseMsg),
     ConfirmReg(ConfirmRegResponseMsg),
+    FastReg(FastRegResponseMsg),
 }
 impl ResponseMessage {
     pub fn encode(self) -> BytesMut {
@@ -205,6 +239,7 @@ impl ResponseMessage {
             ResponseMessage::Reg(reg) => ResponsePayload::Reg(reg.to()),
             ResponseMessage::Error(e) => ResponsePayload::Error(e.to()),
             ResponseMessage::ConfirmReg(confirm) => ResponsePayload::ConfirmReg(confirm.to()),
+            ResponseMessage::FastReg(fast_reg) => ResponsePayload::FastReg(fast_reg.to()),
         };
         proto::ResponseMessage {
             response_payload: Some(response_payload),

@@ -1,6 +1,6 @@
 use crate::protocol::control_message::{
-    ClientSimpleInfoList, ConfirmRegResponseMsg, ErrorResponseMsg, RegResponseMsg, RequestMessage,
-    ResponseMessage, SelectiveBroadcast,
+    ClientSimpleInfoList, ConfirmRegResponseMsg, ErrorResponseMsg, FastRegRequestMsg,
+    FastRegResponseMsg, RegResponseMsg, RequestMessage, ResponseMessage, SelectiveBroadcast,
 };
 use crate::protocol::ip_packet_protocol::{HEAD_LENGTH, MsgType, NetPacket};
 use crate::protocol::rpc_message::rpc_message_request::RpcReqPayload;
@@ -129,10 +129,53 @@ impl ControlHandler {
 
         Ok(())
     }
-    pub async fn handle_gateway(&self, mut buf: BytesMut) -> anyhow::Result<()> {
-        let Some(session) = self.session.as_ref() else {
+
+    async fn handle_fast_reg(
+        &mut self,
+        request: FastRegRequestMsg,
+        sender: &Sender<Bytes>,
+    ) -> anyhow::Result<()> {
+        let Some(session) = self.session.as_mut() else {
             bail!("Session is not active");
         };
+        if session.registration_status != RegistrationStatus::Confirmed {
+            bail!("Session is not confirmed");
+        }
+
+        let service = self.control_service.clone();
+        let response = match service.fast_register(session, request.ip).await {
+            Ok(()) => ResponseMessage::FastReg(FastRegResponseMsg { success: true }),
+            Err(error) => ResponseMessage::Error(ErrorResponseMsg {
+                code: 400,
+                message: error.to_string(),
+            }),
+        };
+        let response = Self::gateway_response_packet(MsgType::FastReg, &response.encode())?;
+        sender.send(response).await?;
+        Ok(())
+    }
+
+    fn gateway_response_packet(msg_type: MsgType, payload: &[u8]) -> anyhow::Result<Bytes> {
+        let mut buf = BytesMut::zeroed(HEAD_LENGTH + payload.len());
+        let mut packet = NetPacket::new(&mut buf)?;
+        packet.set_msg_type(msg_type);
+        packet.set_gateway_flag(true);
+        packet.set_ttl(1);
+        packet.set_payload(payload)?;
+        Ok(buf.freeze())
+    }
+
+    fn update_ip_packet(ip: Ipv4Addr) -> Option<Bytes> {
+        let mut buf = BytesMut::zeroed(HEAD_LENGTH + 4);
+        let mut packet = NetPacket::new(&mut buf).ok()?;
+        packet.set_msg_type(MsgType::UpdateIp);
+        packet.set_gateway_flag(true);
+        packet.set_ttl(1);
+        packet.set_payload(&ip.octets()).ok()?;
+        Some(buf.freeze())
+    }
+
+    pub async fn handle_gateway(&mut self, mut buf: BytesMut) -> anyhow::Result<()> {
         let mut packet = NetPacket::new(&mut buf)?;
         let msg_type = packet.msg_type()?;
         let Some(sender) = self.sender.upgrade() else {
@@ -141,6 +184,16 @@ impl ControlHandler {
         if packet.ttl() == 0 {
             return Ok(());
         }
+        if msg_type == MsgType::FastReg {
+            let request = match RequestMessage::from_slice(packet.payload())? {
+                RequestMessage::FastReg(request) => request,
+                _ => bail!("Expected fast registration request"),
+            };
+            return self.handle_fast_reg(request, &sender).await;
+        }
+        let Some(session) = self.session.as_ref() else {
+            bail!("Session is not active");
+        };
         match msg_type {
             MsgType::Turn => {
                 if let Some(reply) = Self::handle_icmp_ping(&packet) {
@@ -149,6 +202,12 @@ impl ControlHandler {
             }
 
             MsgType::PingTurn => {
+                if let Some(latest_ip) = session.network_state.configured_ip(&session.device_id)
+                    && latest_ip != session.ip
+                    && let Some(update) = Self::update_ip_packet(latest_ip)
+                {
+                    _ = sender.try_send(update);
+                }
                 if packet.payload().len() == 8 {
                     packet.set_msg_type(MsgType::PongTurn);
                     _ = sender.try_send(buf.freeze());
@@ -434,6 +493,7 @@ impl ControlHandler {
 #[cfg(test)]
 mod tests {
     use super::ControlHandler;
+    use crate::protocol::control_message::{FastRegRequestMsg, RequestMessage};
     use crate::protocol::ip_packet_protocol::{HEAD_LENGTH, MsgType, NetPacket};
     use bytes::BytesMut;
     use pnet_packet::icmp::IcmpTypes;
@@ -478,5 +538,32 @@ mod tests {
         let buf = gateway_ping_packet(28, 5);
         let packet = NetPacket::new(buf).expect("net packet");
         assert!(ControlHandler::handle_icmp_ping(&packet).is_some());
+    }
+
+    #[test]
+    fn update_ip_packet_uses_type_16_and_network_order_ipv4_payload() {
+        let ip = "10.26.0.9".parse().unwrap();
+        let bytes = ControlHandler::update_ip_packet(ip).expect("update packet");
+        let packet = NetPacket::new(bytes).expect("net packet");
+        assert_eq!(packet.msg_type().unwrap(), MsgType::UpdateIp);
+        assert!(packet.is_gateway());
+        assert_eq!(packet.ttl(), 1);
+        assert_eq!(packet.payload(), &[10, 26, 0, 9]);
+    }
+
+    #[test]
+    fn fast_registration_is_wrapped_in_a_gateway_net_packet() {
+        let ip = "10.26.0.9".parse().unwrap();
+        let request = RequestMessage::FastReg(FastRegRequestMsg { ip }).encode();
+        let bytes = ControlHandler::gateway_response_packet(MsgType::FastReg, &request)
+            .expect("fast registration packet");
+        let packet = NetPacket::new(bytes).expect("net packet");
+        assert_eq!(packet.msg_type().unwrap(), MsgType::FastReg);
+        assert!(packet.is_gateway());
+        assert_eq!(packet.ttl(), 1);
+        match RequestMessage::from_slice(packet.payload()).unwrap() {
+            RequestMessage::FastReg(message) => assert_eq!(message.ip, ip),
+            _ => panic!("unexpected request type"),
+        }
     }
 }

@@ -9,6 +9,8 @@ export interface LoginResult {
 }
 
 export type NetworkSource = 'Config' | 'Manual' | 'DeviceRegister' | string
+export type NetworkType = 'Public' | 'Private'
+export type DeviceIpType = 'Dynamic' | 'Static' | 'Fixed'
 
 export interface NetworkInfo {
   network_code: string
@@ -17,6 +19,7 @@ export interface NetworkInfo {
   net: string
   lease_duration: number
   source: NetworkSource
+  network_type: NetworkType
   all_count: number
   online_count: number
 }
@@ -28,6 +31,8 @@ export interface DeviceInfo {
   device_name: string
   device_version: string
   ip: string | null
+  current_ip: string | null
+  ip_type: DeviceIpType | null
   status: DeviceStatus
   last_connect_time: string
   disconnect_time: string | null
@@ -45,12 +50,27 @@ export interface CreateNetworkPayload {
   gateway: string
   netmask: number
   lease_duration?: number
+  network_type?: NetworkType
 }
 
 export interface UpdateNetworkPayload {
   gateway: string
   netmask: number
   lease_duration: number
+  network_type?: NetworkType
+}
+
+export interface CreateDevicePayload {
+  network_code: string
+  device_id: string
+  ip: string
+  ip_type?: DeviceIpType
+}
+
+export interface UpdateDevicePayload {
+  network_code: string
+  ip: string
+  ip_type: DeviceIpType
 }
 
 export interface PeerServerInfo {

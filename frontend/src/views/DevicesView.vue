@@ -5,6 +5,8 @@ import {
   ChevronDown,
   ChevronRight,
   LoaderCircle,
+  Pencil,
+  Plus,
   Search,
   Trash2,
 } from '@lucide/vue'
@@ -13,12 +15,13 @@ import { useRoute, useRouter } from 'vue-router'
 import { ApiError } from '@/api/client'
 import { deviceApi } from '@/api/modules'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import BaseModal from '@/components/BaseModal.vue'
 import LatencyBadge from '@/components/LatencyBadge.vue'
 import SpeedChart from '@/components/SpeedChart.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import { useDeviceMonitor, type DeviceGroup } from '@/composables/useDeviceMonitor'
 import { useToast } from '@/composables/useToast'
-import type { DeviceInfo } from '@/types'
+import type { DeviceInfo, DeviceIpType } from '@/types'
 import { formatBytes, formatSpeed } from '@/utils/format'
 
 const route = useRoute()
@@ -39,9 +42,79 @@ watch(
 
 const searchInputClass =
   'w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-3.5 text-sm text-slate-800 placeholder:text-slate-400 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100'
+const inputClass =
+  'w-full rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm text-slate-800 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:text-slate-500'
 
 function goBack() {
   router.push({ name: 'networks' })
+}
+
+// ---------- 新增 / 编辑设备 ----------
+const showDeviceModal = ref(false)
+const editingDevice = ref<DeviceInfo | null>(null)
+const formSubmitting = ref(false)
+const deviceForm = ref({
+  device_id: '',
+  ip: '',
+  ip_type: 'Dynamic' as DeviceIpType,
+})
+
+function openCreateDevice() {
+  editingDevice.value = null
+  deviceForm.value = { device_id: '', ip: '', ip_type: 'Dynamic' }
+  showDeviceModal.value = true
+}
+
+function localDevice(group: DeviceGroup) {
+  return group.devices.find((device) => device.server_addr === null)
+}
+
+function differingSessionIp(group: DeviceGroup) {
+  const device = localDevice(group)
+  if (device?.status !== 'Online' || !device.current_ip || device.current_ip === device.ip) {
+    return null
+  }
+  return device.current_ip
+}
+
+function openEditDevice(group: DeviceGroup) {
+  const device = localDevice(group)
+  if (!device) return
+  editingDevice.value = device
+  deviceForm.value = {
+    device_id: device.device_id,
+    ip: device.ip ?? '',
+    ip_type: device.ip_type ?? 'Dynamic',
+  }
+  showDeviceModal.value = true
+}
+
+async function submitDevice() {
+  if (formSubmitting.value) return
+  formSubmitting.value = true
+  try {
+    if (editingDevice.value) {
+      await deviceApi.update(editingDevice.value.device_id, {
+        network_code: networkCode.value,
+        ip: deviceForm.value.ip,
+        ip_type: deviceForm.value.ip_type,
+      })
+    } else {
+      await deviceApi.add({
+        network_code: networkCode.value,
+        device_id: deviceForm.value.device_id,
+        ip: deviceForm.value.ip,
+        ip_type: deviceForm.value.ip_type,
+      })
+    }
+    showDeviceModal.value = false
+    toast.success(editingDevice.value ? '设备已更新' : '设备已添加')
+    void monitor.load(networkCode.value)
+  } catch (e) {
+    toast.error(e instanceof ApiError ? e.message : '提交失败')
+  } finally {
+    formSubmitting.value = false
+  }
 }
 
 // ---------- 删除设备 ----------
@@ -51,7 +124,7 @@ const deleteTarget = ref<DeviceInfo | null>(null)
 const deleting = ref(false)
 
 function confirmRemove(group: DeviceGroup) {
-  const dev = group.devices[0]
+  const dev = localDevice(group)
   if (!dev) return
   deleteTarget.value = dev
   confirmMessage.value = `确定要删除设备 "${dev.device_name}" (${dev.device_id}) 吗？此操作不可撤销。`
@@ -91,9 +164,18 @@ async function executeDelete() {
           <p class="mt-0.5 font-mono text-sm text-slate-400">网络: {{ networkCode }}</p>
         </div>
       </div>
-      <div class="relative w-full lg:w-72">
-        <Search :size="15" class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-        <input v-model="search" type="text" :class="searchInputClass" placeholder="搜索 IP 或设备 ID..." />
+      <div class="flex w-full items-center gap-3 lg:w-auto">
+        <div class="relative min-w-0 flex-1 lg:w-72">
+          <Search :size="15" class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <input v-model="search" type="text" :class="searchInputClass" placeholder="搜索 IP 或设备 ID..." />
+        </div>
+        <button
+          class="flex shrink-0 items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-2 text-sm font-semibold text-white transition hover:bg-blue-700"
+          @click="openCreateDevice"
+        >
+          <Plus :size="16" />
+          新增设备
+        </button>
       </div>
     </div>
 
@@ -103,13 +185,14 @@ async function executeDelete() {
     </div>
 
     <div v-else class="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
-      <table class="w-full min-w-[1080px] text-left text-sm">
+      <table class="w-full min-w-[1160px] text-left text-sm">
         <thead>
           <tr class="border-b border-slate-100 bg-slate-50/80 text-xs text-slate-500">
             <th class="w-16 px-4 py-3"></th>
             <th class="px-4 py-3 font-semibold">状态</th>
             <th class="px-4 py-3 font-semibold">设备名称 / ID</th>
             <th class="px-4 py-3 font-semibold">IP 地址</th>
+            <th class="px-4 py-3 font-semibold">IP 类型</th>
             <th class="px-4 py-3 font-semibold">版本</th>
             <th class="px-4 py-3 font-semibold">延迟</th>
             <th class="px-3 py-3 font-semibold">流量 <span class="font-normal">(上/下)</span></th>
@@ -152,7 +235,21 @@ async function executeDelete() {
                   {{ group.devices.length }} 个来源
                 </div>
               </td>
-              <td class="px-4 py-3 font-mono text-slate-600">{{ group.ip || '-' }}</td>
+              <td class="px-4 py-3 font-mono text-slate-600">
+                <span>{{ group.ip || '-' }}</span>
+                <span v-if="differingSessionIp(group)" class="ml-1 text-xs text-amber-600">
+                  （当前使用：{{ differingSessionIp(group) }}）
+                </span>
+              </td>
+              <td class="px-4 py-3 text-xs font-medium">
+                <span
+                  v-if="localDevice(group)?.ip_type"
+                  :class="localDevice(group)?.ip_type === 'Fixed' ? 'text-red-600' : localDevice(group)?.ip_type === 'Static' ? 'text-amber-600' : 'text-blue-600'"
+                >
+                  {{ localDevice(group)?.ip_type === 'Fixed' ? '固定 IP' : localDevice(group)?.ip_type === 'Static' ? '静态IP' : '动态IP' }}
+                </span>
+                <span v-else class="text-slate-300">-</span>
+              </td>
               <td class="px-4 py-3 text-slate-500">{{ group.devices[0]?.device_version }}</td>
               <td class="px-4 py-3">
                 <LatencyBadge :ms="group.bestLatency" />
@@ -180,27 +277,37 @@ async function executeDelete() {
                 </div>
               </td>
               <td class="px-4 py-3">
-                <button
-                  v-if="group.canDelete"
-                  class="rounded-lg p-1.5 text-slate-400 transition hover:bg-red-50 hover:text-red-600"
-                  title="删除设备"
-                  @click="confirmRemove(group)"
-                >
-                  <Trash2 :size="15" />
-                </button>
-                <span
-                  v-else
-                  class="inline-block cursor-not-allowed p-1.5 text-slate-200"
-                  :title="group.hasOnline ? '在线设备无法删除' : '远程设备无法删除'"
-                >
-                  <Trash2 :size="15" />
-                </span>
+                <div class="flex items-center gap-1">
+                  <button
+                    v-if="localDevice(group)"
+                    class="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition hover:bg-blue-50 hover:text-blue-600"
+                    title="编辑设备"
+                    @click="openEditDevice(group)"
+                  >
+                    <Pencil :size="15" />
+                  </button>
+                  <button
+                    v-if="group.canDelete"
+                    class="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition hover:bg-red-50 hover:text-red-600"
+                    title="删除设备"
+                    @click="confirmRemove(group)"
+                  >
+                    <Trash2 :size="15" />
+                  </button>
+                  <span
+                    v-else
+                    class="flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-lg text-slate-200"
+                    :title="group.hasOnline ? '在线设备无法删除' : '远程设备无法删除'"
+                  >
+                    <Trash2 :size="15" />
+                  </span>
+                </div>
               </td>
             </tr>
 
             <!-- 网速历史图表行 -->
             <tr v-if="monitor.chartExpanded[group.key]" class="border-b border-slate-50 bg-white">
-              <td colspan="10" class="px-4 py-3">
+              <td colspan="11" class="px-4 py-3">
                 <div class="rounded-lg border border-slate-100 bg-white px-4 py-3">
                   <SpeedChart :history="monitor.historyOf(group.key)" />
                 </div>
@@ -225,6 +332,7 @@ async function executeDelete() {
                 <span v-else class="text-xs font-medium text-emerald-600">本地</span>
               </td>
               <td class="px-4 py-3 text-xs text-slate-400">-</td>
+              <td class="px-4 py-3 text-xs text-slate-400">-</td>
               <td class="px-4 py-3 text-xs text-slate-500">{{ dev.device_version }}</td>
               <td class="px-4 py-3 text-xs">
                 <LatencyBadge :ms="dev.latency_ms" />
@@ -244,13 +352,63 @@ async function executeDelete() {
           </template>
 
           <tr v-if="mergedDevices.length === 0">
-            <td colspan="10" class="px-4 py-16 text-center text-sm text-slate-400">
+            <td colspan="11" class="px-4 py-16 text-center text-sm text-slate-400">
               暂无设备数据
             </td>
           </tr>
         </tbody>
       </table>
     </div>
+
+    <BaseModal
+      :open="showDeviceModal"
+      :title="editingDevice ? '编辑设备' : '新增设备'"
+      @close="showDeviceModal = false"
+    >
+      <form class="space-y-4" @submit.prevent="submitDevice">
+        <div>
+          <label class="mb-1.5 block text-sm font-medium text-slate-700">设备 ID</label>
+          <input
+            v-model.trim="deviceForm.device_id"
+            type="text"
+            :class="inputClass"
+            :disabled="Boolean(editingDevice)"
+            maxlength="64"
+            required
+          />
+        </div>
+        <div>
+          <label class="mb-1.5 block text-sm font-medium text-slate-700">IP 地址</label>
+          <input v-model.trim="deviceForm.ip" type="text" :class="inputClass" placeholder="如: 10.26.0.2" required />
+        </div>
+        <div>
+          <label class="mb-1.5 block text-sm font-medium text-slate-700">IP 类型</label>
+          <select v-model="deviceForm.ip_type" :class="inputClass">
+            <option value="Static">静态IP</option>
+            <option value="Dynamic">动态IP</option>
+            <option value="Fixed">固定 IP</option>
+          </select>
+          <p v-if="deviceForm.ip_type === 'Static'" class="mt-1.5 text-xs leading-5 text-slate-400">
+            注册时优先使用客户端提交的 IP，且不会按租期回收。
+          </p>
+          <p v-else-if="deviceForm.ip_type === 'Dynamic'" class="mt-1.5 text-xs leading-5 text-slate-400">
+            注册时优先使用客户端提交的 IP，租期到期后会释放 IP。
+          </p>
+          <p v-else class="mt-1.5 text-xs leading-5 text-slate-400">
+            强制使用服务端设置的 IP，客户端不能修改，且不会按租期回收。
+          </p>
+        </div>
+        <div class="flex justify-end gap-3 pt-2">
+          <button type="button" class="rounded-lg px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100" @click="showDeviceModal = false">
+            取消
+          </button>
+          <button type="submit" :disabled="formSubmitting" class="flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60">
+            <LoaderCircle v-if="formSubmitting" :size="14" class="animate-spin" />
+            {{ formSubmitting ? '提交中...' : '确定' }}
+          </button>
+        </div>
+      </form>
+    </BaseModal>
 
     <!-- 删除确认 -->
     <ConfirmDialog

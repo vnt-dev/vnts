@@ -1,6 +1,6 @@
 use crate::protocol::control_message::{RegRequestMsg, RegistrationMode};
 use crate::server::control_server::db;
-use crate::server::control_server::db::{NetworkRecord, NetworkSource};
+use crate::server::control_server::db::{DeviceIpType, NetworkRecord, NetworkSource, NetworkType};
 use crate::server::network_state_provider::{
     NetworkState, NetworkStateProvider, i64_to_system_time,
 };
@@ -32,6 +32,7 @@ pub struct NetworkConfig {
     pub gateway: Ipv4Addr,
     pub lease_duration: Duration,
     pub source: NetworkSource,
+    pub network_type: NetworkType,
 }
 
 fn validate_gateway(net: Ipv4Net, gateway: Ipv4Addr) -> anyhow::Result<()> {
@@ -76,6 +77,7 @@ pub struct ControlService {
     db_nets: Arc<RwLock<HashMap<String, NetworkConfig>>>,
     network_state_provider: NetworkStateProvider,
     network_init_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    device_mutation_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     peer_manager: Arc<RwLock<Option<Arc<crate::server::peer_server::PeerServerManager>>>>,
 }
 
@@ -102,6 +104,7 @@ impl ControlService {
             db_nets: Arc::new(RwLock::new(db_nets)),
             network_state_provider: NetworkStateProvider::new(network_states),
             network_init_locks: Arc::new(DashMap::new()),
+            device_mutation_locks: Arc::new(DashMap::new()),
             peer_manager: Arc::new(RwLock::new(None)),
         };
 
@@ -135,6 +138,7 @@ impl ControlService {
                     gateway,
                     lease_duration,
                     source: NetworkSource::Config,
+                    network_type: NetworkType::Public,
                 },
             );
         }
@@ -154,6 +158,7 @@ impl ControlService {
                 netmask: config.net.prefix_len(),
                 lease_duration: config.lease_duration.as_secs() as i64,
                 source: NetworkSource::Config,
+                network_type: config.network_type,
                 created_at: now,
             };
             match db::save_network_if_not_exists(&record).await {
@@ -194,6 +199,7 @@ impl ControlService {
                                 gateway,
                                 lease_duration: Duration::from_secs(record.lease_duration as u64),
                                 source: record.source,
+                                network_type: record.network_type,
                             },
                         );
                     }
@@ -218,6 +224,13 @@ impl ControlService {
             bail!("network_code '{}' is not in white_list", network_code);
         }
 
+        let mutation_lock = self
+            .device_mutation_locks
+            .entry(network_code.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _mutation_guard = mutation_lock.lock().await;
+
         let is_new_network = !self.db_nets.read().contains_key(&reg_req.network_code);
         let config = self.network_config(&reg_req.network_code, reg_req.ip)?;
 
@@ -230,6 +243,10 @@ impl ControlService {
         let state = self
             .get_or_create_network_state(reg_req.network_code.clone(), config)
             .await;
+
+        if config.network_type == NetworkType::Private && !state.has_device(&reg_req.device_id) {
+            bail!("私有网络仅允许已添加的设备连接");
+        }
 
         let (session, entry) = {
             let random_id = rand::rng().next_u64();
@@ -271,6 +288,7 @@ impl ControlService {
                 netmask: config.net.prefix_len(),
                 lease_duration: config.lease_duration.as_secs() as i64,
                 source: NetworkSource::DeviceRegister,
+                network_type: NetworkType::Public,
                 created_at: now,
             };
             tokio::spawn(async move {
@@ -284,12 +302,8 @@ impl ControlService {
             && let Some(entry) = entry
         {
             let nc = network_code.clone();
-            tokio::spawn(async move {
-                let record = entry.to_record(&nc);
-                if let Err(e) = db::save_or_update_device(&record).await {
-                    log::error!("Failed to save or update device record: {:?}", e);
-                }
-            });
+            let record = entry.to_record(&nc);
+            db::save_or_update_device(&record).await?;
         }
 
         Ok(session)
@@ -316,6 +330,7 @@ impl ControlService {
             gateway,
             lease_duration: self.default_lease_duration,
             source: NetworkSource::DeviceRegister,
+            network_type: NetworkType::Public,
         })
     }
 
@@ -386,15 +401,21 @@ impl ControlService {
         }
     }
 
-    async fn release_expired_ips(state: &Arc<NetworkState>) {
+    async fn release_expired_ips(&self, state: &Arc<NetworkState>) {
         let network_code = state.network_code();
+        let mutation_lock = self
+            .device_mutation_locks
+            .entry(network_code.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = mutation_lock.lock().await;
         let expired_devices = state.collect_expired_devices();
 
         if expired_devices.is_empty() {
             return;
         }
 
-        state.remove_devices(&expired_devices);
+        let expired_devices = state.remove_devices(&expired_devices);
 
         for device_id in expired_devices {
             log::info!(
@@ -422,7 +443,7 @@ impl ControlService {
                     .collect();
 
                 for state in state_list {
-                    ControlService::release_expired_ips(&state).await;
+                    service.release_expired_ips(&state).await;
                 }
 
                 tokio::time::sleep(Duration::from_secs(3)).await;
@@ -480,7 +501,14 @@ impl ControlService {
         gateway: Ipv4Addr,
         netmask: u8,
         lease_duration: Option<Duration>,
+        network_type: NetworkType,
     ) -> anyhow::Result<()> {
+        let mutation_lock = self
+            .device_mutation_locks
+            .entry(network_code.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = mutation_lock.lock().await;
         if self.db_nets.read().contains_key(&network_code) {
             bail!("网络编号 '{}' 已存在", network_code);
         }
@@ -498,6 +526,7 @@ impl ControlService {
             netmask,
             lease_duration: lease_duration.as_secs() as i64,
             source: NetworkSource::Manual,
+            network_type,
             created_at: now,
         };
 
@@ -510,6 +539,7 @@ impl ControlService {
                 gateway,
                 lease_duration,
                 source: NetworkSource::Manual,
+                network_type,
             },
         );
 
@@ -522,23 +552,33 @@ impl ControlService {
         gateway: Ipv4Addr,
         netmask: u8,
         lease_duration: Duration,
+        network_type: NetworkType,
     ) -> anyhow::Result<()> {
         let net = network_from_gateway(gateway, netmask)?;
-        let original_source = self
+        let mutation_lock = self
+            .device_mutation_locks
+            .entry(network_code.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = mutation_lock.lock().await;
+        let original_config = self
             .db_nets
             .read()
             .get(network_code)
-            .map(|c| c.source)
+            .copied()
             .ok_or_else(|| anyhow::anyhow!("网络编号 '{}' 不存在", network_code))?;
 
-        if db::network_has_devices(network_code).await? {
-            bail!("网络下存在设备，无法编辑");
+        let topology_changed = original_config.net != net
+            || original_config.gateway != gateway
+            || original_config.lease_duration != lease_duration;
+        if topology_changed && db::network_has_devices(network_code).await? {
+            bail!("网络下存在设备，只能修改网络类型");
         }
 
-        if let Some(state) = self.network_state_provider.get(network_code) {
+        if topology_changed && let Some(state) = self.network_state_provider.get(network_code) {
             let (all, _) = state.count();
             if all > 0 {
-                bail!("网络下存在设备，无法编辑");
+                bail!("网络下存在设备，只能修改网络类型");
             }
         }
 
@@ -547,6 +587,7 @@ impl ControlService {
             &gateway.to_string(),
             netmask,
             lease_duration.as_secs() as i64,
+            network_type,
         )
         .await?;
 
@@ -556,16 +597,25 @@ impl ControlService {
                 net,
                 gateway,
                 lease_duration,
-                source: original_source,
+                source: original_config.source,
+                network_type,
             },
         );
 
-        self.network_state_provider.remove(network_code);
+        if topology_changed {
+            self.network_state_provider.remove(network_code);
+        }
 
         Ok(())
     }
 
     pub async fn delete_network(&self, network_code: &str) -> anyhow::Result<()> {
+        let mutation_lock = self
+            .device_mutation_locks
+            .entry(network_code.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = mutation_lock.lock().await;
         if !self.db_nets.read().contains_key(network_code) {
             bail!("网络编号 '{}' 不存在", network_code);
         }
@@ -589,7 +639,120 @@ impl ControlService {
         Ok(())
     }
 
+    fn validate_device_ip(config: NetworkConfig, ip: Ipv4Addr) -> anyhow::Result<()> {
+        if !config.net.contains(&ip) {
+            bail!("IP {} 不属于网段 {}", ip, config.net);
+        }
+        if ip == config.gateway {
+            bail!("此IP为网关IP，不允许使用");
+        }
+        if ip == config.net.network() || ip == config.net.broadcast() {
+            bail!("此IP为网段的网络地址或广播地址，不允许使用");
+        }
+        Ok(())
+    }
+
+    async fn upsert_device(
+        &self,
+        network_code: &str,
+        device_id: &str,
+        ip: Ipv4Addr,
+        ip_type: DeviceIpType,
+        create: bool,
+    ) -> anyhow::Result<()> {
+        if device_id.is_empty()
+            || device_id.trim() != device_id
+            || device_id.len() > RegRequestMsg::MAX_DEVICE_ID_LEN
+        {
+            bail!("无效的设备 ID");
+        }
+        let mutation_lock = self
+            .device_mutation_locks
+            .entry(network_code.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = mutation_lock.lock().await;
+        let config = self
+            .db_nets
+            .read()
+            .get(network_code)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("网络编号 '{}' 不存在", network_code))?;
+        Self::validate_device_ip(config, ip)?;
+
+        let state = self
+            .get_or_create_network_state(network_code.to_string(), config)
+            .await;
+
+        if create && state.has_device(device_id) {
+            bail!("设备 ID '{}' 已存在", device_id);
+        }
+        if !create && !state.has_device(device_id) {
+            bail!("设备 ID '{}' 不存在", device_id);
+        }
+
+        let previous = state.upsert_device_config(device_id, ip, ip_type)?;
+        let record = state
+            .get_device_entry(device_id)
+            .ok_or_else(|| anyhow::anyhow!("设备状态更新失败"))?
+            .to_record(network_code);
+        if let Err(error) = db::save_or_update_device(&record).await {
+            state.restore_device_config(device_id, previous);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub async fn add_device(
+        &self,
+        network_code: &str,
+        device_id: &str,
+        ip: Ipv4Addr,
+        ip_type: DeviceIpType,
+    ) -> anyhow::Result<()> {
+        self.upsert_device(network_code, device_id, ip, ip_type, true)
+            .await
+    }
+
+    pub async fn update_device(
+        &self,
+        network_code: &str,
+        device_id: &str,
+        ip: Ipv4Addr,
+        ip_type: DeviceIpType,
+    ) -> anyhow::Result<()> {
+        self.upsert_device(network_code, device_id, ip, ip_type, false)
+            .await
+    }
+
+    pub async fn fast_register(
+        &self,
+        session: &mut Session,
+        new_ip: Ipv4Addr,
+    ) -> anyhow::Result<()> {
+        let mutation_lock = self
+            .device_mutation_locks
+            .entry(session.network_code.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = mutation_lock.lock().await;
+        session.network_state.fast_register(
+            &session.device_id,
+            session.ip,
+            new_ip,
+            session.random_id,
+        )?;
+        session.ip = new_ip;
+        Ok(())
+    }
+
     pub async fn delete_device(&self, network_code: &str, device_id: &str) -> anyhow::Result<()> {
+        let mutation_lock = self
+            .device_mutation_locks
+            .entry(network_code.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = mutation_lock.lock().await;
         if let Some(state) = self.network_state_provider.get(network_code) {
             if state.is_device_online(device_id) {
                 bail!("设备在线，无法删除");
@@ -612,6 +775,13 @@ impl ControlService {
         self.network_state_provider
             .get(network_code)
             .map(|s| s.clone())
+    }
+
+    pub fn get_network_type(&self, network_code: &str) -> Option<NetworkType> {
+        self.db_nets
+            .read()
+            .get(network_code)
+            .map(|config| config.network_type)
     }
 
     pub fn set_peer_manager(&self, manager: Arc<crate::server::peer_server::PeerServerManager>) {
@@ -644,6 +814,7 @@ impl ControlService {
                     net: config.net,
                     lease_duration: config.lease_duration.as_secs(),
                     source: config.source,
+                    network_type: config.network_type,
                     all_count,
                     online_count,
                 }
@@ -669,6 +840,8 @@ impl ControlService {
                                 device_name: r.device_name,
                                 device_version: r.device_version,
                                 ip: r.ip.as_ref().and_then(|s| s.parse().ok()),
+                                current_ip: None,
+                                ip_type: Some(r.ip_type),
                                 status: "Offline".to_string(),
                                 last_connect_time: last_connect_time
                                     .format(&format)
@@ -698,6 +871,8 @@ impl ControlService {
                     device_name: format!("Remote Device ({})", ip),
                     device_version: "Unknown".to_string(),
                     ip: Some(ip),
+                    current_ip: None,
+                    ip_type: None,
                     status: "Remote".to_string(),
                     last_connect_time: "-".to_string(),
                     disconnect_time: None,
@@ -760,6 +935,8 @@ pub struct DeviceInfoVO {
     pub device_name: String,
     pub device_version: String,
     pub ip: Option<Ipv4Addr>,
+    pub current_ip: Option<Ipv4Addr>,
+    pub ip_type: Option<DeviceIpType>,
     pub status: String,
     pub last_connect_time: String,
     pub disconnect_time: Option<String>,
@@ -777,6 +954,7 @@ pub struct NetworkInfoVO {
     pub net: Ipv4Net,
     pub lease_duration: u64,
     pub source: NetworkSource,
+    pub network_type: NetworkType,
     pub all_count: u32,
     pub online_count: u32,
 }
@@ -784,11 +962,27 @@ pub struct NetworkInfoVO {
 #[cfg(test)]
 mod tests {
     use super::{ControlService, NetworkConfig, first_usable_ip, network_from_gateway};
-    use crate::server::control_server::db::NetworkSource;
+    use crate::protocol::control_message::{RegRequestMsg, RegistrationMode};
+    use crate::server::control_server::db::{DeviceIpType, NetworkSource, NetworkType};
     use ipnet::Ipv4Net;
     use std::collections::{HashMap, HashSet};
     use std::net::Ipv4Addr;
     use std::time::Duration;
+    use tokio::sync::mpsc;
+
+    fn registration(network_code: &str, device_id: &str) -> RegRequestMsg {
+        RegRequestMsg {
+            network_code: network_code.to_string(),
+            device_id: device_id.to_string(),
+            ip: None,
+            name: device_id.to_string(),
+            version: "test".to_string(),
+            key_sign: None,
+            ip_variable: true,
+            server_id: 0,
+            registration_mode: RegistrationMode::Normal,
+        }
+    }
 
     #[test]
     fn network_from_gateway_preserves_non_default_gateway() {
@@ -839,12 +1033,14 @@ mod tests {
             gateway: Ipv4Addr::new(10, 1, 0, 1),
             lease_duration: Duration::from_secs(60),
             source: NetworkSource::Config,
+            network_type: NetworkType::Public,
         };
         let configured = NetworkConfig {
             net: "10.2.0.0/24".parse().unwrap(),
             gateway: Ipv4Addr::new(10, 2, 0, 1),
             lease_duration: Duration::from_secs(120),
             source: NetworkSource::Config,
+            network_type: NetworkType::Public,
         };
         let merged = ControlService::merge_network_configs(
             HashMap::from([("net1".to_string(), persisted)]),
@@ -880,5 +1076,317 @@ mod tests {
         assert!(restricted.network_code_allowed("net1"));
         assert!(!restricted.network_code_allowed("NET1"));
         assert!(!restricted.network_code_allowed("net2"));
+    }
+
+    #[tokio::test]
+    async fn private_network_only_accepts_existing_device_ids() {
+        let service = ControlService::new(
+            "10.26.0.0/24".parse().unwrap(),
+            HashMap::new(),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        service
+            .add_network(
+                "private".to_string(),
+                "10.50.0.1".parse().unwrap(),
+                24,
+                None,
+                NetworkType::Private,
+            )
+            .await
+            .unwrap();
+        service
+            .add_device(
+                "private",
+                "known",
+                "10.50.0.3".parse().unwrap(),
+                DeviceIpType::Static,
+            )
+            .await
+            .unwrap();
+
+        let (sender, _receiver) = mpsc::channel(8);
+        assert!(
+            service
+                .register(registration("private", "unknown"), sender.clone())
+                .await
+                .is_err()
+        );
+        let session = service
+            .register(registration("private", "known"), sender)
+            .await
+            .unwrap();
+        assert_eq!(session.ip, "10.50.0.3".parse::<Ipv4Addr>().unwrap());
+    }
+
+    #[tokio::test]
+    async fn configured_ip_waits_for_valid_fast_registration_before_switching_session() {
+        let service = ControlService::new(
+            "10.26.0.0/24".parse().unwrap(),
+            HashMap::new(),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        service
+            .add_network(
+                "public".to_string(),
+                "10.60.0.1".parse().unwrap(),
+                24,
+                None,
+                NetworkType::Public,
+            )
+            .await
+            .unwrap();
+        let (sender, _receiver) = mpsc::channel(8);
+        let mut session = service
+            .register(registration("public", "device-a"), sender)
+            .await
+            .unwrap();
+        let old_ip = session.ip;
+        let new_ip = "10.60.0.9".parse::<Ipv4Addr>().unwrap();
+
+        service
+            .update_device("public", "device-a", new_ip, DeviceIpType::Static)
+            .await
+            .unwrap();
+        assert_eq!(session.ip, old_ip);
+        assert_eq!(
+            session.network_state.configured_ip("device-a"),
+            Some(new_ip)
+        );
+        let device_info = session
+            .network_state
+            .get_device_infos()
+            .into_iter()
+            .find(|device| device.device_id == "device-a")
+            .unwrap();
+        assert_eq!(device_info.ip, Some(new_ip));
+        assert_eq!(device_info.current_ip, Some(old_ip));
+        assert!(session.network_state.sender_map().contains_key(&old_ip));
+        assert!(!session.network_state.sender_map().contains_key(&new_ip));
+        assert!(
+            service
+                .add_device("public", "device-b", old_ip, DeviceIpType::Static)
+                .await
+                .is_err(),
+            "the active old IP must remain reserved"
+        );
+
+        assert!(
+            service
+                .fast_register(&mut session, "10.60.0.8".parse().unwrap())
+                .await
+                .is_err()
+        );
+        assert_eq!(session.ip, old_ip);
+        service.fast_register(&mut session, new_ip).await.unwrap();
+        assert_eq!(session.ip, new_ip);
+        let device_info = session
+            .network_state
+            .get_device_infos()
+            .into_iter()
+            .find(|device| device.device_id == "device-a")
+            .unwrap();
+        assert_eq!(device_info.current_ip, Some(new_ip));
+        assert!(!session.network_state.sender_map().contains_key(&old_ip));
+        assert!(session.network_state.sender_map().contains_key(&new_ip));
+    }
+
+    #[tokio::test]
+    async fn normal_reconnect_uses_latest_configured_ip_without_fast_registration() {
+        let service = ControlService::new(
+            "10.26.0.0/24".parse().unwrap(),
+            HashMap::new(),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        service
+            .add_network(
+                "reconnect".to_string(),
+                "10.70.0.1".parse().unwrap(),
+                24,
+                None,
+                NetworkType::Public,
+            )
+            .await
+            .unwrap();
+        let (sender, _receiver) = mpsc::channel(8);
+        let session = service
+            .register(registration("reconnect", "device-a"), sender.clone())
+            .await
+            .unwrap();
+        let old_ip = session.ip;
+        let new_ip = "10.70.0.20".parse::<Ipv4Addr>().unwrap();
+        service
+            .update_device("reconnect", "device-a", new_ip, DeviceIpType::Static)
+            .await
+            .unwrap();
+        drop(session);
+
+        let state = service.get_network_state("reconnect").unwrap();
+        assert!(!state.sender_map().contains_key(&old_ip));
+        let reconnected = service
+            .register(registration("reconnect", "device-a"), sender)
+            .await
+            .unwrap();
+        assert_eq!(reconnected.ip, new_ip);
+        assert!(state.sender_map().contains_key(&new_ip));
+    }
+
+    #[tokio::test]
+    async fn fixed_ip_uses_server_value_while_other_types_prefer_client_request() {
+        let service = ControlService::new(
+            "10.26.0.0/24".parse().unwrap(),
+            HashMap::new(),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        service
+            .add_network(
+                "ip-types".to_string(),
+                "10.80.0.1".parse().unwrap(),
+                24,
+                None,
+                NetworkType::Public,
+            )
+            .await
+            .unwrap();
+        service
+            .add_device(
+                "ip-types",
+                "static-device",
+                "10.80.0.3".parse().unwrap(),
+                DeviceIpType::Static,
+            )
+            .await
+            .unwrap();
+        service
+            .add_device(
+                "ip-types",
+                "fixed-device",
+                "10.80.0.4".parse().unwrap(),
+                DeviceIpType::Fixed,
+            )
+            .await
+            .unwrap();
+        let (sender, _receiver) = mpsc::channel(8);
+
+        let mut static_request = registration("ip-types", "static-device");
+        static_request.ip = Some("10.80.0.9".parse().unwrap());
+        static_request.ip_variable = false;
+        let static_session = service
+            .register(static_request, sender.clone())
+            .await
+            .unwrap();
+        assert_eq!(static_session.ip, "10.80.0.9".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(
+            static_session
+                .network_state
+                .get_device_entry("static-device")
+                .unwrap()
+                .ip_type,
+            DeviceIpType::Static
+        );
+
+        let mut fixed_request = registration("ip-types", "fixed-device");
+        fixed_request.ip = Some("10.80.0.10".parse().unwrap());
+        fixed_request.ip_variable = false;
+        let fixed_session = service.register(fixed_request, sender).await.unwrap();
+        assert_eq!(fixed_session.ip, "10.80.0.4".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(
+            fixed_session
+                .network_state
+                .get_device_entry("fixed-device")
+                .unwrap()
+                .ip_type,
+            DeviceIpType::Fixed
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_and_active_ips_are_both_reserved_for_add_and_registration() {
+        let service = ControlService::new(
+            "10.26.0.0/24".parse().unwrap(),
+            HashMap::new(),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        service
+            .add_network(
+                "unique-ips".to_string(),
+                "10.90.0.1".parse().unwrap(),
+                24,
+                None,
+                NetworkType::Public,
+            )
+            .await
+            .unwrap();
+
+        let (sender, _receiver) = mpsc::channel(8);
+        let first_session = service
+            .register(registration("unique-ips", "device-a"), sender.clone())
+            .await
+            .unwrap();
+        let active_ip = first_session.ip;
+        let configured_ip = "10.90.0.9".parse::<Ipv4Addr>().unwrap();
+        service
+            .update_device(
+                "unique-ips",
+                "device-a",
+                configured_ip,
+                DeviceIpType::Static,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(first_session.ip, active_ip);
+        assert_eq!(
+            first_session.network_state.configured_ip("device-a"),
+            Some(configured_ip)
+        );
+
+        for occupied_ip in [active_ip, configured_ip] {
+            assert!(
+                service
+                    .add_device(
+                        "unique-ips",
+                        &format!("manual-{occupied_ip}"),
+                        occupied_ip,
+                        DeviceIpType::Dynamic,
+                    )
+                    .await
+                    .is_err(),
+                "manual add must reject occupied IP {occupied_ip}"
+            );
+
+            let mut strict_request = registration("unique-ips", &format!("strict-{occupied_ip}"));
+            strict_request.ip = Some(occupied_ip);
+            strict_request.ip_variable = false;
+            assert!(
+                service
+                    .register(strict_request, sender.clone())
+                    .await
+                    .is_err(),
+                "registration must reject occupied fixed request {occupied_ip}"
+            );
+        }
+
+        let mut variable_request = registration("unique-ips", "variable-device");
+        variable_request.ip = Some(active_ip);
+        variable_request.ip_variable = true;
+        let variable_session = service.register(variable_request, sender).await.unwrap();
+        assert_ne!(variable_session.ip, active_ip);
+        assert_ne!(variable_session.ip, configured_ip);
     }
 }

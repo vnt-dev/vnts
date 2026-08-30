@@ -167,6 +167,7 @@ export function useDeviceMonitor() {
     const filtered = devices.value.filter(
       (d) =>
         (d.ip && d.ip.includes(q)) ||
+        (d.current_ip && d.current_ip.includes(q)) ||
         d.device_id.toLowerCase().includes(q) ||
         d.device_name.toLowerCase().includes(q),
     )

@@ -59,6 +59,13 @@ const onlineRatio = computed(() =>
       </div>
       <div class="flex items-center gap-1.5">
         <Globe :size="13" class="shrink-0 text-slate-400" />
+        类型
+        <span class="font-medium" :class="network.network_type === 'Private' ? 'text-amber-600' : 'text-emerald-600'">
+          {{ network.network_type === 'Private' ? '私有' : '公开' }}
+        </span>
+      </div>
+      <div class="flex items-center gap-1.5">
+        <Globe :size="13" class="shrink-0 text-slate-400" />
         来源
         <SourceBadge :source="network.source" />
       </div>

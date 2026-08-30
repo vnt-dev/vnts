@@ -1,11 +1,13 @@
 import { fetchSilent, request } from './client'
 import type {
   CreateNetworkPayload,
+  CreateDevicePayload,
   DeviceInfo,
   LoginResult,
   NetworkInfo,
   PeerServersResponse,
   UpdateNetworkPayload,
+  UpdateDevicePayload,
 } from '@/types'
 
 export const authApi = {
@@ -14,7 +16,13 @@ export const authApi = {
 }
 
 export const networkApi = {
-  list: () => request<NetworkInfo[]>('/networks'),
+  list: async () => {
+    const networks = await request<NetworkInfo[]>('/networks')
+    return networks.map((network) => ({
+      ...network,
+      network_type: network.network_type ?? 'Public',
+    }))
+  },
   create: (payload: CreateNetworkPayload) =>
     request<boolean>('/networks', { method: 'POST', body: payload }),
   update: (code: string, payload: UpdateNetworkPayload) =>
@@ -24,6 +32,13 @@ export const networkApi = {
 }
 
 export const deviceApi = {
+  add: (payload: CreateDevicePayload) =>
+    request<boolean>('/devices', { method: 'POST', body: payload }),
+  update: (deviceId: string, payload: UpdateDevicePayload) =>
+    request<boolean>(`/devices/${encodeURIComponent(deviceId)}`, {
+      method: 'PUT',
+      body: payload,
+    }),
   /** 首次加载（带 loading 与错误提示） */
   load: (code: string) =>
     request<DeviceInfo[]>(`/devices?code=${encodeURIComponent(code)}`),
