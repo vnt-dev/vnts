@@ -93,7 +93,9 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: frontend-static
-          path: .
+          # upload-artifact stores the contents of static/, not the directory
+          # itself. Restore those contents under static/ for rust-embed.
+          path: static
       - name: Cargo cache
         uses: actions/cache@v6
         with:
