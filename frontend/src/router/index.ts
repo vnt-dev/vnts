@@ -27,6 +27,12 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/ServersView.vue'),
     meta: { title: '服务器列表' },
   },
+  {
+    path: '/settings',
+    name: 'settings',
+    component: () => import('@/views/SettingsView.vue'),
+    meta: { title: '系统设置' },
+  },
   { path: '/', redirect: '/networks' },
   { path: '/:pathMatch(.*)*', redirect: '/networks' },
 ]

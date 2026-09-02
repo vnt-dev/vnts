@@ -84,3 +84,7 @@ export interface PeerServersResponse {
   outbound: PeerServerInfo[]
   inbound: PeerServerInfo[]
 }
+
+export interface NetworkWhitelistSettings {
+  network_codes: string[]
+}

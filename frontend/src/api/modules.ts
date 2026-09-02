@@ -5,6 +5,7 @@ import type {
   DeviceInfo,
   LoginResult,
   NetworkInfo,
+  NetworkWhitelistSettings,
   PeerServersResponse,
   UpdateNetworkPayload,
   UpdateDevicePayload,
@@ -16,6 +17,7 @@ export const authApi = {
 }
 
 export const networkApi = {
+  codes: () => request<string[]>('/network_codes'),
   list: async () => {
     const networks = await request<NetworkInfo[]>('/networks')
     return networks.map((network) => ({
@@ -58,4 +60,14 @@ export const peerServerApi = {
     request<boolean>('/peer_servers', { method: 'POST', body: { server_addr: serverAddr } }),
   remove: (serverAddr: string) =>
     request<boolean>(`/peer_servers/${encodeURIComponent(serverAddr)}`, { method: 'DELETE' }),
+}
+
+export const settingsApi = {
+  getNetworkWhitelist: () =>
+    request<NetworkWhitelistSettings>('/settings/network-whitelist'),
+  updateNetworkWhitelist: (payload: NetworkWhitelistSettings) =>
+    request<NetworkWhitelistSettings>('/settings/network-whitelist', {
+      method: 'PUT',
+      body: payload,
+    }),
 }

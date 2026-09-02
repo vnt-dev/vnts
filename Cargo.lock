@@ -2999,6 +2999,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 
@@ -3274,12 +3275,14 @@ dependencies = [
  "serde",
  "sha2",
  "sqlx",
+ "tempfile",
  "time",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
  "tokio-util",
  "toml",
+ "toml_edit",
  "tower",
  "tower-http",
  "tungstenite",

@@ -32,6 +32,10 @@ async fn main() -> anyhow::Result<()> {
     }
     utils::log::log_init("vnts2");
     log::info!("version: {:?}", env!("CARGO_PKG_VERSION"));
+    let config_path = args
+        .conf
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("config.toml"));
     let conf = ConfigFile::load_from(args.conf)?;
     if conf.persistence {
         server::control_server::db::init_db_pool().await?;
@@ -75,7 +79,14 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let Some(web_bind) = web_bind {
-        http::web_server::start_http_server(control_service, username, password, web_bind).await?;
+        http::web_server::start_http_server(
+            control_service,
+            username,
+            password,
+            web_bind,
+            config_path,
+        )
+        .await?;
         return Ok(());
     }
 

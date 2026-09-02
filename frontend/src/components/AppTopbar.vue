@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { LogOut, Moon, Network, Server, Sun } from '@lucide/vue'
+import { LogOut, Moon, Network, Server, Settings, Sun } from '@lucide/vue'
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppLogo from './AppLogo.vue'
@@ -47,6 +47,14 @@ function handleLogout() {
             title="服务器列表"
           >
             <Server :size="18" />
+          </RouterLink>
+          <RouterLink
+            to="/settings"
+            class="rounded-lg p-2 text-slate-500 transition hover:bg-slate-100 hover:text-blue-600 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-blue-400"
+            active-class="!bg-blue-50 !text-blue-700 dark:!bg-blue-500/15 dark:!text-blue-400"
+            title="系统设置"
+          >
+            <Settings :size="18" />
           </RouterLink>
         </nav>
 

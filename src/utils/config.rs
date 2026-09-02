@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use toml_edit::{Array, DocumentMut, Item, Value};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ConfigFile {
@@ -80,21 +81,61 @@ impl ConfigFile {
 
     fn validate(&self) -> anyhow::Result<()> {
         for network_code in self.white_list.iter().chain(self.custom_nets.keys()) {
-            if network_code.is_empty() {
-                anyhow::bail!("network_code cannot be empty");
-            }
-            if network_code.trim() != network_code {
-                anyhow::bail!(
-                    "network_code '{}' cannot contain leading or trailing whitespace",
-                    network_code
-                );
-            }
-            if network_code.len() > 32 {
-                anyhow::bail!("network_code '{}' length exceeds 32 bytes", network_code);
-            }
+            validate_network_code(network_code)?;
         }
         Ok(())
     }
+}
+
+pub fn validate_network_code(network_code: &str) -> anyhow::Result<()> {
+    if network_code.is_empty() {
+        anyhow::bail!("network_code cannot be empty");
+    }
+    if network_code.trim() != network_code {
+        anyhow::bail!(
+            "network_code '{}' cannot contain leading or trailing whitespace",
+            network_code
+        );
+    }
+    if network_code.len() > 32 {
+        anyhow::bail!("network_code '{}' length exceeds 32 bytes", network_code);
+    }
+    Ok(())
+}
+
+pub fn update_white_list(path: &Path, network_codes: &[String]) -> anyhow::Result<()> {
+    for network_code in network_codes {
+        validate_network_code(network_code)?;
+    }
+
+    let content = std::fs::read_to_string(path)?;
+    let mut document = content.parse::<DocumentMut>()?;
+    if let Some(white_list) = document.get_mut("white_list").and_then(Item::as_array_mut) {
+        white_list.clear();
+        for network_code in network_codes {
+            white_list.push(network_code.as_str());
+        }
+    } else {
+        let mut white_list = Array::new();
+        for network_code in network_codes {
+            white_list.push(network_code.as_str());
+        }
+        document["white_list"] = Item::Value(Value::Array(white_list));
+    }
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary
+        .as_file()
+        .set_permissions(std::fs::metadata(path)?.permissions())?;
+    temporary.write_all(document.to_string().as_bytes())?;
+    temporary.flush()?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(path)?;
+    Ok(())
 }
 
 pub fn print_example() {
@@ -144,7 +185,8 @@ key = "key.pem"
 
 #[cfg(test)]
 mod tests {
-    use super::ConfigFile;
+    use super::{ConfigFile, update_white_list, validate_network_code};
+    use std::collections::HashSet;
 
     #[test]
     fn missing_white_list_and_custom_nets_use_empty_defaults() {
@@ -172,5 +214,40 @@ white_list = [" net1"]
         .expect("config syntax");
 
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn network_code_validation_matches_whitelist_rules() {
+        assert!(validate_network_code("net1").is_ok());
+        assert!(validate_network_code("").is_err());
+        assert!(validate_network_code(" net1").is_err());
+        assert!(validate_network_code(&"网".repeat(11)).is_err());
+    }
+
+    #[test]
+    fn updating_white_list_preserves_other_config_and_comments() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("custom.toml");
+        std::fs::write(
+            &path,
+            r#"# keep this comment
+network = "10.26.0.0/24"
+white_list = ["old"] # whitelist comment
+lease_duration = 86400
+"#,
+        )
+        .unwrap();
+
+        update_white_list(&path, &["alpha".to_string(), "beta".to_string()]).unwrap();
+
+        let updated = std::fs::read_to_string(path).unwrap();
+        assert!(updated.contains("# keep this comment"));
+        assert!(updated.contains("# whitelist comment"));
+        assert!(updated.contains("network = \"10.26.0.0/24\""));
+        let config: ConfigFile = toml::from_str(&updated).unwrap();
+        assert_eq!(
+            config.white_list,
+            HashSet::from(["alpha".to_string(), "beta".to_string()])
+        );
     }
 }

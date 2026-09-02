@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { LogOut, Network, Server } from '@lucide/vue'
+import { LogOut, Network, Server, Settings } from '@lucide/vue'
 import { useRouter } from 'vue-router'
 import AppLogo from './AppLogo.vue'
 import { useAuthStore } from '@/composables/useAuth'
@@ -35,6 +35,14 @@ function handleLogout() {
       >
         <Server :size="18" />
         服务器列表
+      </RouterLink>
+      <RouterLink
+        to="/settings"
+        class="flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100"
+        active-class="!bg-blue-50 !font-semibold !text-blue-700 dark:!bg-blue-500/15 dark:!text-blue-400"
+      >
+        <Settings :size="18" />
+        系统设置
       </RouterLink>
     </nav>
 

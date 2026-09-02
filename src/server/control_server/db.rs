@@ -4,6 +4,7 @@ use ipnet::Ipv4Net;
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Row, SqlitePool, sqlite::SqlitePoolOptions};
+use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::Path;
 
@@ -378,6 +379,27 @@ pub async fn network_has_devices(network_code: &str) -> anyhow::Result<bool> {
 
     let count: i32 = row.get("cnt");
     Ok(count > 0)
+}
+
+pub async fn load_device_counts() -> anyhow::Result<HashMap<String, u32>> {
+    let Some(pool) = DB_POOL.get() else {
+        return Ok(HashMap::new());
+    };
+
+    let rows =
+        sqlx::query(r#"SELECT network_code, COUNT(*) AS cnt FROM devices GROUP BY network_code"#)
+            .fetch_all(pool)
+            .await
+            .context("Failed to load device counts")?;
+
+    rows.into_iter()
+        .map(|row| {
+            let network_code = row.try_get("network_code")?;
+            let count = row.try_get::<i64, _>("cnt")?;
+            Ok((network_code, u32::try_from(count).unwrap_or(u32::MAX)))
+        })
+        .collect::<Result<HashMap<_, _>, sqlx::Error>>()
+        .context("Failed to decode device counts")
 }
 
 pub async fn save_or_update_device(device: &DeviceRecord) -> anyhow::Result<()> {

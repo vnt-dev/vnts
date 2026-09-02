@@ -73,7 +73,7 @@ pub struct ControlService {
     default_net: Ipv4Net,
     default_gateway: Ipv4Addr,
     default_lease_duration: Duration,
-    white_list: Arc<HashSet<String>>,
+    white_list: Arc<RwLock<HashSet<String>>>,
     db_nets: Arc<RwLock<HashMap<String, NetworkConfig>>>,
     network_state_provider: NetworkStateProvider,
     network_init_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -100,7 +100,7 @@ impl ControlService {
             default_net,
             default_gateway,
             default_lease_duration: lease_duration,
-            white_list: Arc::new(white_list),
+            white_list: Arc::new(RwLock::new(white_list)),
             db_nets: Arc::new(RwLock::new(db_nets)),
             network_state_provider: NetworkStateProvider::new(network_states),
             network_init_locks: Arc::new(DashMap::new()),
@@ -180,7 +180,18 @@ impl ControlService {
     }
 
     fn network_code_allowed(&self, network_code: &str) -> bool {
-        self.white_list.is_empty() || self.white_list.contains(network_code)
+        let white_list = self.white_list.read();
+        white_list.is_empty() || white_list.contains(network_code)
+    }
+
+    pub fn get_white_list(&self) -> Vec<String> {
+        let mut white_list = self.white_list.read().iter().cloned().collect::<Vec<_>>();
+        white_list.sort();
+        white_list
+    }
+
+    pub fn replace_white_list(&self, white_list: HashSet<String>) {
+        *self.white_list.write() = white_list;
     }
 
     async fn load_networks_from_db() -> HashMap<String, NetworkConfig> {
@@ -796,19 +807,45 @@ impl ControlService {
         &self.network_state_provider
     }
 
-    pub fn get_network_info(&self) -> Vec<NetworkInfoVO> {
-        let db_nets = self.db_nets.read();
-        db_nets
+    pub async fn get_network_info(&self) -> Vec<NetworkInfoVO> {
+        let networks = self
+            .db_nets
+            .read()
             .iter()
             .map(|(code, config)| {
-                let (all_count, online_count) = self
+                let memory_counts = self
                     .network_state_provider
                     .get(code)
-                    .map(|s| s.count())
-                    .unwrap_or((0, 0));
+                    .map(|state| state.count());
+                (code.clone(), *config, memory_counts)
+            })
+            .collect::<Vec<_>>();
+
+        let persisted_counts = if networks.iter().any(|(_, _, counts)| counts.is_none()) {
+            match db::load_device_counts().await {
+                Ok(counts) => counts,
+                Err(error) => {
+                    log::error!("Failed to load device counts from DB: {}", error);
+                    HashMap::new()
+                }
+            }
+        } else {
+            HashMap::new()
+        };
+
+        networks
+            .into_iter()
+            .map(|(code, config, memory_counts)| {
+                let memory_counts = memory_counts.or_else(|| {
+                    self.network_state_provider
+                        .get(&code)
+                        .map(|state| state.count())
+                });
+                let (all_count, online_count) =
+                    network_counts(memory_counts, persisted_counts.get(&code).copied());
 
                 NetworkInfoVO {
-                    network_code: code.clone(),
+                    network_code: code,
                     gateway: config.gateway,
                     netmask: config.net.prefix_len(),
                     net: config.net,
@@ -959,9 +996,15 @@ pub struct NetworkInfoVO {
     pub online_count: u32,
 }
 
+fn network_counts(memory_counts: Option<(u32, u32)>, persisted_count: Option<u32>) -> (u32, u32) {
+    memory_counts.unwrap_or((persisted_count.unwrap_or(0), 0))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ControlService, NetworkConfig, first_usable_ip, network_from_gateway};
+    use super::{
+        ControlService, NetworkConfig, first_usable_ip, network_counts, network_from_gateway,
+    };
     use crate::protocol::control_message::{RegRequestMsg, RegistrationMode};
     use crate::server::control_server::db::{DeviceIpType, NetworkSource, NetworkType};
     use ipnet::Ipv4Net;
@@ -1005,6 +1048,13 @@ mod tests {
         let net = "10.20.0.0/24".parse::<Ipv4Net>().unwrap();
         assert_eq!(first_usable_ip(net).unwrap(), Ipv4Addr::new(10, 20, 0, 1));
         assert!(first_usable_ip("255.255.255.255/32".parse().unwrap()).is_err());
+    }
+
+    #[test]
+    fn network_counts_fall_back_to_persisted_devices_without_memory_state() {
+        assert_eq!(network_counts(None, Some(3)), (3, 0));
+        assert_eq!(network_counts(None, None), (0, 0));
+        assert_eq!(network_counts(Some((2, 1)), Some(3)), (2, 1));
     }
 
     #[tokio::test]
@@ -1076,6 +1126,35 @@ mod tests {
         assert!(restricted.network_code_allowed("net1"));
         assert!(!restricted.network_code_allowed("NET1"));
         assert!(!restricted.network_code_allowed("net2"));
+    }
+
+    #[tokio::test]
+    async fn replacing_white_list_affects_new_connections_without_disconnecting_existing_ones() {
+        let service = ControlService::new(
+            "10.26.0.0/24".parse().unwrap(),
+            HashMap::new(),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        let (sender, _receiver) = mpsc::channel(8);
+        let session = service
+            .register(registration("net1", "device-a"), sender.clone())
+            .await
+            .unwrap();
+
+        service.replace_white_list(HashSet::from(["net2".to_string()]));
+
+        assert_eq!(service.get_white_list(), vec!["net2".to_string()]);
+        assert!(session.network_state.is_device_online("device-a"));
+        assert!(
+            service
+                .register(registration("net1", "device-b"), sender)
+                .await
+                .is_err()
+        );
+        assert!(session.network_state.is_device_online("device-a"));
     }
 
     #[tokio::test]
@@ -1526,7 +1605,7 @@ mod tests {
         let mut reg_new = registration("ver-repro", "device-a");
         reg_new.version = "2.0.5".to_string();
         reg_new.ip = Some("10.71.0.2".parse().unwrap());
-        let session_b = service.register(reg_new, sender_b).await.unwrap();
+        let _session_b = service.register(reg_new, sender_b).await.unwrap();
 
         // 另一台设备，用于从旁观察 client_info_list（列表会排除请求者自己）
         let (sender_c, _recv_c) = mpsc::channel(8);

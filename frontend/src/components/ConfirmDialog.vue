@@ -6,6 +6,7 @@ defineProps<{
   open: boolean
   message: string
   loading?: boolean
+  confirmText?: string
 }>()
 
 const emit = defineEmits<{ confirm: []; close: [] }>()
@@ -33,7 +34,7 @@ const emit = defineEmits<{ confirm: []; close: [] }>()
         @click="emit('confirm')"
       >
         <LoaderCircle v-if="loading" :size="15" class="animate-spin" />
-        {{ loading ? '处理中...' : '确认删除' }}
+        {{ loading ? '处理中...' : (confirmText ?? '确认删除') }}
       </button>
     </div>
   </BaseModal>

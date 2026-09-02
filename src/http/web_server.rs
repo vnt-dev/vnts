@@ -1,6 +1,7 @@
 use crate::ControlService;
 use crate::server::control_server::db::{DeviceIpType, NetworkType};
 use crate::server::control_server::service::{DeviceInfoVO, NetworkInfoVO};
+use crate::utils::config::{update_white_list as persist_white_list, validate_network_code};
 use axum::{
     Json, Router,
     body::Body,
@@ -16,8 +17,10 @@ use rand::Rng;
 use rand::distr::Alphanumeric;
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeSet, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Component, Path as StdPath, PathBuf};
+use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
 #[derive(RustEmbed)]
@@ -89,6 +92,8 @@ where
 struct AppState {
     control_service: ControlService,
     auth_config: AuthConfig,
+    config_path: Arc<PathBuf>,
+    config_update_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Clone)]
@@ -110,8 +115,60 @@ async fn list_network_code(State(state): State<AppState>) -> ApiResponse<Vec<Str
 }
 
 async fn list_networks(State(state): State<AppState>) -> ApiResponse<Vec<NetworkInfoVO>> {
-    let info = state.control_service.get_network_info();
+    let info = state.control_service.get_network_info().await;
     ApiResponse::ok(info)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct NetworkWhitelistSettings {
+    network_codes: Vec<String>,
+}
+
+fn normalize_network_codes(network_codes: Vec<String>) -> anyhow::Result<Vec<String>> {
+    let mut normalized = BTreeSet::new();
+    for network_code in network_codes {
+        validate_network_code(&network_code)?;
+        normalized.insert(network_code);
+    }
+    Ok(normalized.into_iter().collect())
+}
+
+async fn get_network_whitelist(
+    State(state): State<AppState>,
+) -> ApiResponse<NetworkWhitelistSettings> {
+    ApiResponse::ok(NetworkWhitelistSettings {
+        network_codes: state.control_service.get_white_list(),
+    })
+}
+
+async fn update_network_whitelist(
+    State(state): State<AppState>,
+    Json(body): Json<NetworkWhitelistSettings>,
+) -> Response {
+    let network_codes = match normalize_network_codes(body.network_codes) {
+        Ok(network_codes) => network_codes,
+        Err(error) => return ApiResponse::<()>::err(error.to_string()).into_response(),
+    };
+
+    let _guard = state.config_update_lock.lock().await;
+    let config_path = state.config_path.as_ref().clone();
+    let persisted_codes = network_codes.clone();
+    match tokio::task::spawn_blocking(move || persist_white_list(&config_path, &persisted_codes))
+        .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            return ApiResponse::<()>::err(format!("保存配置失败: {error}")).into_response();
+        }
+        Err(error) => {
+            return ApiResponse::<()>::err(format!("保存配置任务失败: {error}")).into_response();
+        }
+    }
+
+    state
+        .control_service
+        .replace_white_list(network_codes.iter().cloned().collect::<HashSet<_>>());
+    ApiResponse::ok(NetworkWhitelistSettings { network_codes }).into_response()
 }
 
 #[derive(Deserialize)]
@@ -497,6 +554,7 @@ pub async fn start_http_server(
     username: String,
     password: String,
     web_bind: SocketAddr,
+    config_path: PathBuf,
 ) -> anyhow::Result<()> {
     let jwt_secret: String = rand::rng()
         .sample_iter(&Alphanumeric)
@@ -513,8 +571,20 @@ pub async fn start_http_server(
     let app_state = AppState {
         control_service,
         auth_config,
+        config_path: Arc::new(config_path),
+        config_update_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
+    let app = build_app(app_state);
+
+    log::info!("HTTP Server running at http://{}", web_bind);
+
+    let listener = tokio::net::TcpListener::bind(web_bind).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+fn build_app(app_state: AppState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -533,29 +603,37 @@ pub async fn start_http_server(
         .route("/peer_servers", get(list_peer_servers))
         .route("/peer_servers", post(add_peer_server))
         .route("/peer_servers/{server_addr}", delete(delete_peer_server))
+        .route(
+            "/settings/network-whitelist",
+            get(get_network_whitelist).put(update_network_whitelist),
+        )
         .route_layer(middleware::from_fn_with_state(
             app_state.clone(),
             auth_middleware,
         ));
 
-    let app = Router::new()
+    Router::new()
         .nest("/api", api_routes)
         .route("/api/login", post(login))
         .fallback(static_handler)
         .layer(cors)
-        .with_state(app_state);
-
-    log::info!("HTTP Server running at http://{}", web_bind);
-
-    let listener = tokio::net::TcpListener::bind(web_bind).await?;
-    axum::serve(listener, app).await?;
-    Ok(())
+        .with_state(app_state)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::safe_static_path;
+    use super::{
+        AppState, AuthConfig, Claims, build_app, normalize_network_codes, safe_static_path,
+    };
+    use crate::server::control_server::service::ControlService;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
+    use jsonwebtoken::{EncodingKey, Header};
+    use std::collections::{HashMap, HashSet};
     use std::path::Path;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tower::ServiceExt;
 
     #[test]
     fn safe_static_path_accepts_normal_relative_paths() {
@@ -575,5 +653,134 @@ mod tests {
         assert!(safe_static_path("assets/../../config.toml").is_none());
         assert!(safe_static_path("/etc/passwd").is_none());
         assert!(safe_static_path(r"C:\Windows\win.ini").is_none());
+    }
+
+    #[test]
+    fn whitelist_codes_are_validated_deduplicated_and_sorted() {
+        assert_eq!(
+            normalize_network_codes(vec![
+                "zeta".to_string(),
+                "alpha".to_string(),
+                "zeta".to_string(),
+            ])
+            .unwrap(),
+            vec!["alpha".to_string(), "zeta".to_string()]
+        );
+        assert!(normalize_network_codes(vec![" alpha".to_string()]).is_err());
+    }
+
+    #[tokio::test]
+    async fn whitelist_settings_routes_require_auth_and_update_config_and_runtime() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("custom.toml");
+        std::fs::write(
+            &config_path,
+            "network = \"10.26.0.0/24\"\nwhite_list = []\nlease_duration = 86400\n",
+        )
+        .unwrap();
+        let control_service = ControlService::new(
+            "10.26.0.0/24".parse().unwrap(),
+            HashMap::new(),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        let jwt_secret = "test-secret".to_string();
+        let app = build_app(AppState {
+            control_service: control_service.clone(),
+            auth_config: AuthConfig {
+                username: "admin".to_string(),
+                password: "admin".to_string(),
+                jwt_secret: jwt_secret.clone(),
+            },
+            config_path: Arc::new(config_path.clone()),
+            config_update_lock: Arc::new(tokio::sync::Mutex::new(())),
+        });
+
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings/network-whitelist")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let token = jsonwebtoken::encode(
+            &Header::default(),
+            &Claims {
+                sub: "admin".to_string(),
+                exp: (time::OffsetDateTime::now_utc() + time::Duration::minutes(5))
+                    .unix_timestamp(),
+            },
+            &EncodingKey::from_secret(jwt_secret.as_bytes()),
+        )
+        .unwrap();
+        let authorization = format!("Bearer {token}");
+
+        let get_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings/network-whitelist")
+                    .header(header::AUTHORIZATION, &authorization)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_response.status(), StatusCode::OK);
+
+        let put_response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/settings/network-whitelist")
+                    .header(header::AUTHORIZATION, &authorization)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"network_codes":["zeta","alpha","zeta"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put_response.status(), StatusCode::OK);
+        assert_eq!(
+            control_service.get_white_list(),
+            vec!["alpha".to_string(), "zeta".to_string()]
+        );
+        let persisted = std::fs::read_to_string(config_path).unwrap();
+        assert!(persisted.contains("white_list = [\"alpha\", \"zeta\"]"));
+
+        let app_with_unwritable_config = build_app(AppState {
+            control_service: control_service.clone(),
+            auth_config: AuthConfig {
+                username: "admin".to_string(),
+                password: "admin".to_string(),
+                jwt_secret,
+            },
+            config_path: Arc::new(directory.path().join("missing/config.toml")),
+            config_update_lock: Arc::new(tokio::sync::Mutex::new(())),
+        });
+        let failed_update = app_with_unwritable_config
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/settings/network-whitelist")
+                    .header(header::AUTHORIZATION, authorization)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"network_codes":["beta"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(failed_update.status(), StatusCode::OK);
+        assert_eq!(
+            control_service.get_white_list(),
+            vec!["alpha".to_string(), "zeta".to_string()]
+        );
     }
 }
