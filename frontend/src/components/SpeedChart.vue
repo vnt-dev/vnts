@@ -1,15 +1,24 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { SPEED_HISTORY_SIZE, type SpeedHistory } from '@/composables/useDeviceMonitor'
+import { useTheme } from '@/composables/useTheme'
 import { formatSpeed } from '@/utils/format'
 
 const props = withDefaults(defineProps<{ history: SpeedHistory; height?: number }>(), {
   height: 140,
 })
 
+const { theme } = useTheme()
+
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 const peakLabel = ref('峰值: -')
 let resizeObserver: ResizeObserver | null = null
+
+/** 读取 CSS 变量颜色（随主题切换），取不到时使用兜底值 */
+function cssColor(name: string, fallback: string): string {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+  return v || fallback
+}
 
 /** 将数值取整到合适的刻度上限 */
 function niceNumber(val: number): number {
@@ -48,7 +57,7 @@ function draw() {
   const chartW = w
   const chartH = h - padTop - padBottom
 
-  ctx.fillStyle = '#ffffff'
+  ctx.fillStyle = cssColor('--chart-bg', '#ffffff')
   ctx.fillRect(0, 0, w, h)
 
   const all = [...tx, ...rx]
@@ -58,7 +67,7 @@ function draw() {
 
   // 网格线
   const gridLines = 4
-  ctx.strokeStyle = 'rgba(148, 163, 184, 0.25)'
+  ctx.strokeStyle = cssColor('--chart-grid', 'rgba(148, 163, 184, 0.25)')
   ctx.lineWidth = 1
   for (let i = 0; i <= gridLines; i++) {
     const y = padTop + (chartH / gridLines) * i
@@ -110,6 +119,11 @@ watch(
   { deep: true },
 )
 
+// 主题切换后重绘 canvas
+watch(theme, () => {
+  nextTick(draw)
+})
+
 onMounted(() => {
   nextTick(draw)
   const canvas = canvasRef.value
@@ -126,7 +140,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div>
-    <div class="mb-2 flex items-center gap-4 text-xs text-slate-500">
+    <div class="mb-2 flex items-center gap-4 text-xs text-slate-500 dark:text-slate-400">
       <span class="flex items-center gap-1.5">
         <span class="inline-block h-0.5 w-3 rounded bg-blue-500"></span>
         下载速度
@@ -135,7 +149,7 @@ onBeforeUnmount(() => {
         <span class="inline-block h-0.5 w-3 rounded bg-emerald-500"></span>
         上传速度
       </span>
-      <span class="ml-auto font-medium text-slate-400">{{ peakLabel }}</span>
+      <span class="ml-auto font-medium text-slate-400 dark:text-slate-500">{{ peakLabel }}</span>
     </div>
     <canvas ref="canvasRef" class="block w-full rounded-md" :style="{ height: `${height}px` }"></canvas>
   </div>

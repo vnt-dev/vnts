@@ -8,8 +8,8 @@ import { Network } from '@lucide/vue'
       <Network :size="20" :stroke-width="2" />
     </div>
     <div class="leading-tight">
-      <div class="text-[15px] font-bold text-slate-900">vnt 控制中心</div>
-      <div class="text-[11px] text-slate-400">Virtual Network Tool</div>
+      <div class="text-[15px] font-bold text-slate-900 dark:text-slate-100">vnt 控制中心</div>
+      <div class="text-[11px] text-slate-400 dark:text-slate-500">Virtual Network Tool</div>
     </div>
   </div>
 </template>

@@ -53,10 +53,10 @@ const form = reactive({
 })
 
 const inputClass =
-  'w-full rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm text-slate-800 placeholder:text-slate-400 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:text-slate-500'
+  'w-full rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm text-slate-800 placeholder:text-slate-400 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:text-slate-500 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:placeholder:text-slate-500 dark:focus:border-blue-500 dark:focus:ring-blue-500/20 dark:disabled:bg-slate-800/50 dark:disabled:text-slate-600'
 
 const searchInputClass =
-  'w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-3.5 text-sm text-slate-800 placeholder:text-slate-400 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100'
+  'w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-3.5 text-sm text-slate-800 placeholder:text-slate-400 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:placeholder:text-slate-500 dark:focus:border-blue-500 dark:focus:ring-blue-500/20'
 
 function openCreateModal() {
   isEditMode.value = false
@@ -146,12 +146,12 @@ async function executeDelete() {
     <!-- 页头 -->
     <div class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
       <div>
-        <h2 class="text-xl font-bold text-slate-900">网络列表</h2>
-        <p class="mt-0.5 text-sm text-slate-400">共 {{ networks.length }} 个虚拟网络</p>
+        <h2 class="text-xl font-bold text-slate-900 dark:text-slate-100">网络列表</h2>
+        <p class="mt-0.5 text-sm text-slate-400 dark:text-slate-500">共 {{ networks.length }} 个虚拟网络</p>
       </div>
       <div class="flex items-center gap-3">
         <div class="relative w-full sm:w-64">
-          <Search :size="15" class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <Search :size="15" class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-500" />
           <input
             v-model="search"
             type="text"
@@ -174,7 +174,7 @@ async function executeDelete() {
       <LoaderCircle :size="28" class="animate-spin text-blue-500" />
     </div>
 
-    <div v-else-if="filteredNetworks.length === 0" class="rounded-xl border border-dashed border-slate-300 bg-white py-16 text-center text-sm text-slate-400">
+    <div v-else-if="filteredNetworks.length === 0" class="rounded-xl border border-dashed border-slate-300 bg-white py-16 text-center text-sm text-slate-400 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-500">
       未找到匹配的网络
     </div>
 
@@ -193,7 +193,7 @@ async function executeDelete() {
     <BaseModal :open="showFormModal" :title="isEditMode ? '编辑网络' : '新增网络'" @close="showFormModal = false">
       <form class="space-y-4" @submit.prevent="submitForm">
         <div>
-          <label class="mb-1.5 block text-sm font-medium text-slate-700">网络编号</label>
+          <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">网络编号</label>
           <input
             v-model.trim="form.network_code"
             type="text"
@@ -204,14 +204,14 @@ async function executeDelete() {
           />
         </div>
         <div>
-          <label class="mb-1.5 block text-sm font-medium text-slate-700">网络类型</label>
+          <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">网络类型</label>
           <select v-model="form.network_type" :class="inputClass">
             <option value="Public">公开网络</option>
             <option value="Private">私有网络</option>
           </select>
           <p
             class="mt-1.5 rounded-md px-2.5 py-2 text-xs leading-5"
-            :class="form.network_type === 'Private' ? 'bg-amber-50 text-amber-700' : 'bg-blue-50 text-blue-700'"
+            :class="form.network_type === 'Private' ? 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-400' : 'bg-blue-50 text-blue-700 dark:bg-blue-500/10 dark:text-blue-400'"
           >
             <template v-if="form.network_type === 'Private'">
               私有网络：仅允许设备列表中已有的设备 ID 连接，新设备需先手动添加。
@@ -222,7 +222,7 @@ async function executeDelete() {
           </p>
         </div>
         <div>
-          <label class="mb-1.5 block text-sm font-medium text-slate-700">网关地址</label>
+          <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">网关地址</label>
           <input
             v-model.trim="form.gateway"
             type="text"
@@ -232,7 +232,7 @@ async function executeDelete() {
           />
         </div>
         <div>
-          <label class="mb-1.5 block text-sm font-medium text-slate-700">掩码长度</label>
+          <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">掩码长度</label>
           <input
             v-model.number="form.netmask"
             type="number"
@@ -244,7 +244,7 @@ async function executeDelete() {
           />
         </div>
         <div>
-          <label class="mb-1.5 block text-sm font-medium text-slate-700">IP 租期（秒）</label>
+          <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">IP 租期（秒）</label>
           <input
             v-model.number="form.lease_duration"
             type="number"
@@ -253,12 +253,12 @@ async function executeDelete() {
             :required="isEditMode"
             placeholder="如: 86400 (24小时)"
           />
-          <p v-if="!isEditMode" class="mt-1 text-xs text-slate-400">新增时不填则使用默认值</p>
+          <p v-if="!isEditMode" class="mt-1 text-xs text-slate-400 dark:text-slate-500">新增时不填则使用默认值</p>
         </div>
         <div class="flex justify-end gap-3 pt-2">
           <button
             type="button"
-            class="rounded-lg px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100"
+            class="rounded-lg px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700"
             @click="showFormModal = false"
           >
             取消

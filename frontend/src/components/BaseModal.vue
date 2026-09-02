@@ -14,11 +14,11 @@ const emit = defineEmits<{ close: [] }>()
     <Transition name="modal">
       <div v-if="open" class="fixed inset-0 z-50 flex items-center justify-center p-4">
         <div class="absolute inset-0 bg-slate-900/40" @click="emit('close')"></div>
-        <div class="relative w-full max-w-md rounded-2xl bg-white shadow-2xl">
-          <div v-if="title" class="flex items-center justify-between border-b border-slate-100 px-6 py-4">
-            <h3 class="text-base font-bold text-slate-900">{{ title }}</h3>
+        <div class="relative w-full max-w-md rounded-2xl bg-white shadow-2xl dark:bg-slate-800">
+          <div v-if="title" class="flex items-center justify-between border-b border-slate-100 px-6 py-4 dark:border-slate-700">
+            <h3 class="text-base font-bold text-slate-900 dark:text-slate-100">{{ title }}</h3>
             <button
-              class="rounded-lg p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+              class="rounded-lg p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 dark:text-slate-500 dark:hover:bg-slate-700 dark:hover:text-slate-300"
               @click="emit('close')"
             >
               <X :size="18" />

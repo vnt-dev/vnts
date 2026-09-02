@@ -1489,4 +1489,62 @@ mod tests {
         assert_ne!(variable_session.ip, active_ip);
         assert_ne!(variable_session.ip, configured_ip);
     }
+
+    #[tokio::test]
+    async fn re_register_with_same_ip_updates_device_version_in_memory_and_rpc_list() {
+        // 回归测试：客户端升级版本后带同一 IP 重连（ip_matches 分支），
+        // 必须刷新 device_version，否则 web（get_device_infos）与 RPC
+        // 客户端列表（client_info_list）都会继续显示旧版本。
+        let service = ControlService::new(
+            "10.26.0.0/24".parse().unwrap(),
+            HashMap::new(),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        service
+            .add_network(
+                "ver-repro".to_string(),
+                "10.71.0.1".parse().unwrap(),
+                24,
+                None,
+                NetworkType::Public,
+            )
+            .await
+            .unwrap();
+
+        let (sender_a, _recv_a) = mpsc::channel(8);
+        let (sender_b, _recv_b) = mpsc::channel(8);
+
+        let mut reg_old = registration("ver-repro", "device-a");
+        reg_old.version = "2.0.4".to_string();
+        reg_old.ip = Some("10.71.0.2".parse().unwrap());
+        service.register(reg_old, sender_a).await.unwrap();
+
+        // 模拟客户端带新版本号重连（同一 device_id、同一 IP）
+        let mut reg_new = registration("ver-repro", "device-a");
+        reg_new.version = "2.0.5".to_string();
+        reg_new.ip = Some("10.71.0.2".parse().unwrap());
+        let session_b = service.register(reg_new, sender_b).await.unwrap();
+
+        // 另一台设备，用于从旁观察 client_info_list（列表会排除请求者自己）
+        let (sender_c, _recv_c) = mpsc::channel(8);
+        let session_c = service
+            .register(registration("ver-repro", "device-b"), sender_c)
+            .await
+            .unwrap();
+
+        let state = service.get_network_state("ver-repro").unwrap();
+        let infos = state.get_device_infos();
+        let dev = infos.iter().find(|d| d.device_id == "device-a").unwrap();
+        assert_eq!(
+            dev.device_version, "2.0.5",
+            "web 通过 get_device_infos 应看到新版本"
+        );
+
+        let client_list = state.client_info_list(session_c.ip);
+        let dev = client_list.iter().find(|d| d.id == "device-a").unwrap();
+        assert_eq!(dev.version, "2.0.5", "RPC 客户端列表应显示新版本");
+    }
 }

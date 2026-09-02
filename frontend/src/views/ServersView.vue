@@ -33,7 +33,7 @@ const adding = ref(false)
 const serverAddr = ref('')
 
 const inputClass =
-  'w-full rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm text-slate-800 placeholder:text-slate-400 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100'
+  'w-full rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm text-slate-800 placeholder:text-slate-400 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:placeholder:text-slate-500 dark:focus:border-blue-500 dark:focus:ring-blue-500/20'
 
 async function submitAdd() {
   if (adding.value) return
@@ -85,8 +85,8 @@ async function executeDelete() {
     <!-- 页头 -->
     <div class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
       <div>
-        <h2 class="text-xl font-bold text-slate-900">服务器列表</h2>
-        <p class="mt-0.5 text-sm text-slate-400">vnt 服务端之间的互联节点</p>
+        <h2 class="text-xl font-bold text-slate-900 dark:text-slate-100">服务器列表</h2>
+        <p class="mt-0.5 text-sm text-slate-400 dark:text-slate-500">vnt 服务端之间的互联节点</p>
       </div>
       <button
         class="flex shrink-0 items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-2 text-sm font-semibold text-white transition hover:bg-blue-700"
@@ -97,25 +97,25 @@ async function executeDelete() {
       </button>
     </div>
 
-    <div v-if="loading" class="flex justify-center bg-white py-20 shadow-sm">
+    <div v-if="loading" class="flex justify-center bg-white py-20 shadow-sm dark:bg-slate-800">
       <LoaderCircle :size="28" class="animate-spin text-blue-500" />
     </div>
 
     <template v-else>
       <!-- 主动连接的服务器 -->
-      <section class="mb-6 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-        <h3 class="mb-4 flex items-center gap-2 text-base font-bold text-slate-900">
-          <span class="flex h-7 w-7 items-center justify-center rounded-lg bg-blue-50 text-blue-600">
+      <section class="mb-6 rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-800">
+        <h3 class="mb-4 flex items-center gap-2 text-base font-bold text-slate-900 dark:text-slate-100">
+          <span class="flex h-7 w-7 items-center justify-center rounded-lg bg-blue-50 text-blue-600 dark:bg-blue-500/10 dark:text-blue-400">
             <LogOut :size="15" />
           </span>
           主动连接的服务器
-          <span class="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-500">
+          <span class="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-500 dark:bg-slate-700/60 dark:text-slate-400">
             {{ peerServers.outbound.length }}
           </span>
         </h3>
         <div
           v-if="peerServers.outbound.length === 0"
-          class="rounded-lg border border-dashed border-slate-200 py-10 text-center text-sm text-slate-400"
+          class="rounded-lg border border-dashed border-slate-200 py-10 text-center text-sm text-slate-400 dark:border-slate-600 dark:text-slate-500"
         >
           暂无主动连接的服务器
         </div>
@@ -131,19 +131,19 @@ async function executeDelete() {
       </section>
 
       <!-- 被动接受的服务器 -->
-      <section class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-        <h3 class="mb-4 flex items-center gap-2 text-base font-bold text-slate-900">
-          <span class="flex h-7 w-7 items-center justify-center rounded-lg bg-purple-50 text-purple-600">
+      <section class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-800">
+        <h3 class="mb-4 flex items-center gap-2 text-base font-bold text-slate-900 dark:text-slate-100">
+          <span class="flex h-7 w-7 items-center justify-center rounded-lg bg-purple-50 text-purple-600 dark:bg-purple-500/10 dark:text-purple-400">
             <LogIn :size="15" />
           </span>
           被动接受的服务器
-          <span class="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-500">
+          <span class="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-500 dark:bg-slate-700/60 dark:text-slate-400">
             {{ peerServers.inbound.length }}
           </span>
         </h3>
         <div
           v-if="peerServers.inbound.length === 0"
-          class="rounded-lg border border-dashed border-slate-200 py-10 text-center text-sm text-slate-400"
+          class="rounded-lg border border-dashed border-slate-200 py-10 text-center text-sm text-slate-400 dark:border-slate-600 dark:text-slate-500"
         >
           暂无被动接受的服务器连接
         </div>
@@ -163,7 +163,7 @@ async function executeDelete() {
     <BaseModal :open="showAddModal" title="添加服务器" @close="showAddModal = false">
       <form class="space-y-4" @submit.prevent="submitAdd">
         <div>
-          <label class="mb-1.5 block text-sm font-medium text-slate-700">服务器地址</label>
+          <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">服务器地址</label>
           <input
             v-model.trim="serverAddr"
             type="text"
@@ -171,12 +171,12 @@ async function executeDelete() {
             placeholder="如: 192.168.1.100:8080"
             required
           />
-          <p class="mt-1 text-xs text-slate-400">格式: IP:端口 或 域名:端口</p>
+          <p class="mt-1 text-xs text-slate-400 dark:text-slate-500">格式: IP:端口 或 域名:端口</p>
         </div>
         <div class="flex justify-end gap-3 pt-2">
           <button
             type="button"
-            class="rounded-lg px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100"
+            class="rounded-lg px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700"
             @click="showAddModal = false"
           >
             取消

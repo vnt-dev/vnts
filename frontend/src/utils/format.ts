@@ -43,13 +43,13 @@ export function formatSource(source?: string): string {
 export function sourceBadgeClass(source?: string): string {
   switch (source) {
     case 'Config':
-      return 'bg-purple-50 text-purple-700 ring-purple-200'
+      return 'bg-purple-50 text-purple-700 ring-purple-200 dark:bg-purple-500/10 dark:text-purple-400 dark:ring-purple-500/30'
     case 'Manual':
-      return 'bg-emerald-50 text-emerald-700 ring-emerald-200'
+      return 'bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:ring-emerald-500/30'
     case 'DeviceRegister':
-      return 'bg-amber-50 text-amber-700 ring-amber-200'
+      return 'bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-400 dark:ring-amber-500/30'
     default:
-      return 'bg-slate-100 text-slate-600 ring-slate-200'
+      return 'bg-slate-100 text-slate-600 ring-slate-200 dark:bg-slate-700/60 dark:text-slate-400 dark:ring-slate-600/60'
   }
 }
 
@@ -65,12 +65,12 @@ export function latencyLevel(ms: number | null | undefined): LatencyLevel {
 export function latencyTextClass(level: LatencyLevel): string {
   switch (level) {
     case 'good':
-      return 'text-emerald-600'
+      return 'text-emerald-600 dark:text-emerald-400'
     case 'mid':
-      return 'text-amber-600'
+      return 'text-amber-600 dark:text-amber-400'
     case 'bad':
-      return 'text-red-600'
+      return 'text-red-600 dark:text-red-400'
     default:
-      return 'text-slate-400'
+      return 'text-slate-400 dark:text-slate-500'
   }
 }

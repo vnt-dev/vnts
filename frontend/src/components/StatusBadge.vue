@@ -9,19 +9,19 @@ const config = computed(() => {
       return {
         label: '在线',
         dot: 'bg-emerald-500',
-        cls: 'bg-emerald-50 text-emerald-700 ring-emerald-200',
+        cls: 'bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:ring-emerald-500/30',
       }
     case 'Remote':
       return {
         label: '远程',
         dot: 'bg-blue-500',
-        cls: 'bg-blue-50 text-blue-700 ring-blue-200',
+        cls: 'bg-blue-50 text-blue-700 ring-blue-200 dark:bg-blue-500/10 dark:text-blue-400 dark:ring-blue-500/30',
       }
     default:
       return {
         label: '离线',
         dot: 'bg-red-400',
-        cls: 'bg-red-50 text-red-600 ring-red-200',
+        cls: 'bg-red-50 text-red-600 ring-red-200 dark:bg-red-500/10 dark:text-red-400 dark:ring-red-500/30',
       }
   }
 })

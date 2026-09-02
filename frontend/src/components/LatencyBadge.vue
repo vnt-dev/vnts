@@ -16,5 +16,5 @@ const cls = computed(() => latencyTextClass(level.value))
   >
     {{ props.ms }} ms
   </span>
-  <span v-else class="text-slate-400">-</span>
+  <span v-else class="text-slate-400 dark:text-slate-500">-</span>
 </template>

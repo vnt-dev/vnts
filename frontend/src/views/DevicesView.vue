@@ -41,9 +41,9 @@ watch(
 )
 
 const searchInputClass =
-  'w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-3.5 text-sm text-slate-800 placeholder:text-slate-400 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100'
+  'w-full rounded-lg border border-slate-200 bg-white py-2 pl-9 pr-3.5 text-sm text-slate-800 placeholder:text-slate-400 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:placeholder:text-slate-500 dark:focus:border-blue-500 dark:focus:ring-blue-500/20'
 const inputClass =
-  'w-full rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm text-slate-800 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:text-slate-500'
+  'w-full rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm text-slate-800 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:text-slate-500 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:focus:border-blue-500 dark:focus:ring-blue-500/20 dark:disabled:bg-slate-800/50 dark:disabled:text-slate-600'
 
 function goBack() {
   router.push({ name: 'networks' })
@@ -153,20 +153,20 @@ async function executeDelete() {
     <div class="mb-6 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
       <div class="flex items-center gap-3">
         <button
-          class="rounded-lg border border-slate-200 bg-white p-2 text-slate-500 shadow-sm transition hover:bg-slate-50 hover:text-slate-700"
+          class="rounded-lg border border-slate-200 bg-white p-2 text-slate-500 shadow-sm transition hover:bg-slate-50 hover:text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400 dark:hover:bg-slate-700/60 dark:hover:text-slate-200"
           title="返回网络列表"
           @click="goBack"
         >
           <ArrowLeft :size="16" />
         </button>
         <div>
-          <h2 class="text-xl font-bold text-slate-900">设备详情</h2>
-          <p class="mt-0.5 font-mono text-sm text-slate-400">网络: {{ networkCode }}</p>
+          <h2 class="text-xl font-bold text-slate-900 dark:text-slate-100">设备详情</h2>
+          <p class="mt-0.5 font-mono text-sm text-slate-400 dark:text-slate-500">网络: {{ networkCode }}</p>
         </div>
       </div>
       <div class="flex w-full items-center gap-3 lg:w-auto">
         <div class="relative min-w-0 flex-1 lg:w-72">
-          <Search :size="15" class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <Search :size="15" class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-500" />
           <input v-model="search" type="text" :class="searchInputClass" placeholder="搜索 IP 或设备 ID..." />
         </div>
         <button
@@ -180,14 +180,14 @@ async function executeDelete() {
     </div>
 
     <!-- 设备表格 -->
-    <div v-if="loading" class="flex justify-center bg-white py-20 shadow-sm">
+    <div v-if="loading" class="flex justify-center bg-white py-20 shadow-sm dark:bg-slate-800">
       <LoaderCircle :size="28" class="animate-spin text-blue-500" />
     </div>
 
-    <div v-else class="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
+    <div v-else class="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-800">
       <table class="w-full min-w-[1160px] text-left text-sm">
         <thead>
-          <tr class="border-b border-slate-100 bg-slate-50/80 text-xs text-slate-500">
+          <tr class="border-b border-slate-100 bg-slate-50/80 text-xs text-slate-500 dark:border-slate-700 dark:bg-slate-800/80 dark:text-slate-400">
             <th class="w-16 px-4 py-3"></th>
             <th class="px-4 py-3 font-semibold">状态</th>
             <th class="px-4 py-3 font-semibold">设备名称 / ID</th>
@@ -204,12 +204,12 @@ async function executeDelete() {
         <tbody>
           <template v-for="group in mergedDevices" :key="group.key">
             <!-- 主行 -->
-            <tr class="border-b border-slate-50 transition hover:bg-slate-50/60">
+            <tr class="border-b border-slate-50 transition hover:bg-slate-50/60 dark:border-slate-700/60 dark:hover:bg-slate-700/40">
               <td class="px-4 py-3">
                 <div class="flex items-center gap-1">
                   <button
                     v-if="group.devices.length > 1"
-                    class="rounded p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+                    class="rounded p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 dark:text-slate-500 dark:hover:bg-slate-700 dark:hover:text-slate-300"
                     title="展开来源"
                     @click="monitor.toggleGroup(group.key)"
                   >
@@ -217,7 +217,7 @@ async function executeDelete() {
                     <ChevronRight v-else :size="14" />
                   </button>
                   <button
-                    class="rounded p-1 text-slate-400 transition hover:bg-blue-50 hover:text-blue-600"
+                    class="rounded p-1 text-slate-400 transition hover:bg-blue-50 hover:text-blue-600 dark:text-slate-500 dark:hover:bg-blue-500/10 dark:hover:text-blue-400"
                     :title="monitor.chartExpanded[group.key] ? '收起网速历史' : '查看网速历史'"
                     @click="monitor.toggleChart(group.key)"
                   >
@@ -229,50 +229,50 @@ async function executeDelete() {
                 <StatusBadge :status="group.hasOnline ? 'Online' : group.hasRemote ? 'Remote' : 'Offline'" />
               </td>
               <td class="px-4 py-3">
-                <div class="font-medium text-slate-900">{{ group.devices[0]?.device_name }}</div>
-                <div class="font-mono text-xs text-slate-400">{{ group.devices[0]?.device_id }}</div>
-                <div v-if="group.devices.length > 1" class="mt-0.5 text-xs text-blue-500">
+                <div class="font-medium text-slate-900 dark:text-slate-100">{{ group.devices[0]?.device_name }}</div>
+                <div class="font-mono text-xs text-slate-400 dark:text-slate-500">{{ group.devices[0]?.device_id }}</div>
+                <div v-if="group.devices.length > 1" class="mt-0.5 text-xs text-blue-500 dark:text-blue-400">
                   {{ group.devices.length }} 个来源
                 </div>
               </td>
-              <td class="px-4 py-3 font-mono text-slate-600">
+              <td class="px-4 py-3 font-mono text-slate-600 dark:text-slate-400">
                 <span>{{ group.ip || '-' }}</span>
-                <span v-if="differingSessionIp(group)" class="ml-1 text-xs text-amber-600">
+                <span v-if="differingSessionIp(group)" class="ml-1 text-xs text-amber-600 dark:text-amber-400">
                   （当前使用：{{ differingSessionIp(group) }}）
                 </span>
               </td>
               <td class="px-4 py-3 text-xs font-medium">
                 <span
                   v-if="localDevice(group)?.ip_type"
-                  :class="localDevice(group)?.ip_type === 'Fixed' ? 'text-red-600' : localDevice(group)?.ip_type === 'Static' ? 'text-amber-600' : 'text-blue-600'"
+                  :class="localDevice(group)?.ip_type === 'Fixed' ? 'text-red-600 dark:text-red-400' : localDevice(group)?.ip_type === 'Static' ? 'text-amber-600 dark:text-amber-400' : 'text-blue-600 dark:text-blue-400'"
                 >
                   {{ localDevice(group)?.ip_type === 'Fixed' ? '固定 IP' : localDevice(group)?.ip_type === 'Static' ? '静态IP' : '动态IP' }}
                 </span>
-                <span v-else class="text-slate-300">-</span>
+                <span v-else class="text-slate-300 dark:text-slate-600">-</span>
               </td>
-              <td class="px-4 py-3 text-slate-500">{{ group.devices[0]?.device_version }}</td>
+              <td class="px-4 py-3 text-slate-500 dark:text-slate-400">{{ group.devices[0]?.device_version }}</td>
               <td class="px-4 py-3">
                 <LatencyBadge :ms="group.bestLatency" />
               </td>
               <td class="px-3 py-3">
-                <div class="flex items-center gap-1 text-emerald-600">
+                <div class="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
                   ↑ <span class="tabular-nums">{{ formatBytes(group.totalTxBytes) }}</span>
                 </div>
-                <div class="mt-0.5 flex items-center gap-1 text-blue-600">
+                <div class="mt-0.5 flex items-center gap-1 text-blue-600 dark:text-blue-400">
                   ↓ <span class="tabular-nums">{{ formatBytes(group.totalRxBytes) }}</span>
                 </div>
               </td>
               <td class="px-3 py-3">
-                <div class="flex items-center gap-1 text-emerald-600">
+                <div class="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
                   ↑ <span class="tabular-nums">{{ formatSpeed(group.totalTxSpeed) }}</span>
                 </div>
-                <div class="mt-0.5 flex items-center gap-1 text-blue-600">
+                <div class="mt-0.5 flex items-center gap-1 text-blue-600 dark:text-blue-400">
                   ↓ <span class="tabular-nums">{{ formatSpeed(group.totalRxSpeed) }}</span>
                 </div>
               </td>
-              <td class="px-4 py-3 text-xs text-slate-500">
+              <td class="px-4 py-3 text-xs text-slate-500 dark:text-slate-400">
                 {{ group.devices[0]?.last_connect_time }}
-                <div v-if="group.devices[0]?.disconnect_time" class="text-red-400">
+                <div v-if="group.devices[0]?.disconnect_time" class="text-red-400 dark:text-red-400">
                   离线于: {{ group.devices[0].disconnect_time }}
                 </div>
               </td>
@@ -280,7 +280,7 @@ async function executeDelete() {
                 <div class="flex items-center gap-1">
                   <button
                     v-if="localDevice(group)"
-                    class="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition hover:bg-blue-50 hover:text-blue-600"
+                    class="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition hover:bg-blue-50 hover:text-blue-600 dark:text-slate-500 dark:hover:bg-blue-500/10 dark:hover:text-blue-400"
                     title="编辑设备"
                     @click="openEditDevice(group)"
                   >
@@ -288,7 +288,7 @@ async function executeDelete() {
                   </button>
                   <button
                     v-if="group.canDelete"
-                    class="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition hover:bg-red-50 hover:text-red-600"
+                    class="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition hover:bg-red-50 hover:text-red-600 dark:text-slate-500 dark:hover:bg-red-500/10 dark:hover:text-red-400"
                     title="删除设备"
                     @click="confirmRemove(group)"
                   >
@@ -296,7 +296,7 @@ async function executeDelete() {
                   </button>
                   <span
                     v-else
-                    class="flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-lg text-slate-200"
+                    class="flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-lg text-slate-200 dark:text-slate-700"
                     :title="group.hasOnline ? '在线设备无法删除' : '远程设备无法删除'"
                   >
                     <Trash2 :size="15" />
@@ -306,9 +306,9 @@ async function executeDelete() {
             </tr>
 
             <!-- 网速历史图表行 -->
-            <tr v-if="monitor.chartExpanded[group.key]" class="border-b border-slate-50 bg-white">
+            <tr v-if="monitor.chartExpanded[group.key]" class="border-b border-slate-50 bg-white dark:border-slate-700/60 dark:bg-slate-800">
               <td colspan="11" class="px-4 py-3">
-                <div class="rounded-lg border border-slate-100 bg-white px-4 py-3">
+                <div class="rounded-lg border border-slate-100 bg-white px-4 py-3 dark:border-slate-700 dark:bg-slate-900">
                   <SpeedChart :history="monitor.historyOf(group.key)" />
                 </div>
               </td>
@@ -319,40 +319,40 @@ async function executeDelete() {
               <tr
                 v-for="dev in group.devices"
                 :key="dev.device_id"
-                class="border-b border-slate-50 bg-slate-50/50"
+                class="border-b border-slate-50 bg-slate-50/50 dark:border-slate-700/60 dark:bg-slate-700/30"
               >
               <td class="px-4 py-3"></td>
               <td class="px-4 py-3">
                 <StatusBadge :status="dev.status" />
               </td>
               <td class="px-4 py-3">
-                <span v-if="dev.server_addr" class="font-mono text-xs font-medium text-blue-600">
+                <span v-if="dev.server_addr" class="font-mono text-xs font-medium text-blue-600 dark:text-blue-400">
                   {{ dev.server_addr }}
                 </span>
-                <span v-else class="text-xs font-medium text-emerald-600">本地</span>
+                <span v-else class="text-xs font-medium text-emerald-600 dark:text-emerald-400">本地</span>
               </td>
-              <td class="px-4 py-3 text-xs text-slate-400">-</td>
-              <td class="px-4 py-3 text-xs text-slate-400">-</td>
-              <td class="px-4 py-3 text-xs text-slate-500">{{ dev.device_version }}</td>
+              <td class="px-4 py-3 text-xs text-slate-400 dark:text-slate-500">-</td>
+              <td class="px-4 py-3 text-xs text-slate-400 dark:text-slate-500">-</td>
+              <td class="px-4 py-3 text-xs text-slate-500 dark:text-slate-400">{{ dev.device_version }}</td>
               <td class="px-4 py-3 text-xs">
                 <LatencyBadge :ms="dev.latency_ms" />
               </td>
               <td class="px-3 py-3 text-xs">
-                <div class="text-emerald-600">↑ {{ formatBytes(dev.tx_bytes) }}</div>
-                <div class="mt-0.5 text-blue-600">↓ {{ formatBytes(dev.rx_bytes) }}</div>
+                <div class="text-emerald-600 dark:text-emerald-400">↑ {{ formatBytes(dev.tx_bytes) }}</div>
+                <div class="mt-0.5 text-blue-600 dark:text-blue-400">↓ {{ formatBytes(dev.rx_bytes) }}</div>
               </td>
               <td class="px-3 py-3 text-xs">
-                <div class="text-emerald-600">↑ {{ formatSpeed(dev.tx_speed ?? 0) }}</div>
-                <div class="mt-0.5 text-blue-600">↓ {{ formatSpeed(dev.rx_speed ?? 0) }}</div>
+                <div class="text-emerald-600 dark:text-emerald-400">↑ {{ formatSpeed(dev.tx_speed ?? 0) }}</div>
+                <div class="mt-0.5 text-blue-600 dark:text-blue-400">↓ {{ formatSpeed(dev.rx_speed ?? 0) }}</div>
               </td>
-              <td class="px-4 py-3 text-xs text-slate-500">{{ dev.last_connect_time }}</td>
+              <td class="px-4 py-3 text-xs text-slate-500 dark:text-slate-400">{{ dev.last_connect_time }}</td>
               <td class="px-4 py-3"></td>
             </tr>
             </template>
           </template>
 
           <tr v-if="mergedDevices.length === 0">
-            <td colspan="11" class="px-4 py-16 text-center text-sm text-slate-400">
+            <td colspan="11" class="px-4 py-16 text-center text-sm text-slate-400 dark:text-slate-500">
               暂无设备数据
             </td>
           </tr>
@@ -367,7 +367,7 @@ async function executeDelete() {
     >
       <form class="space-y-4" @submit.prevent="submitDevice">
         <div>
-          <label class="mb-1.5 block text-sm font-medium text-slate-700">设备 ID</label>
+          <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">设备 ID</label>
           <input
             v-model.trim="deviceForm.device_id"
             type="text"
@@ -378,28 +378,28 @@ async function executeDelete() {
           />
         </div>
         <div>
-          <label class="mb-1.5 block text-sm font-medium text-slate-700">IP 地址</label>
+          <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">IP 地址</label>
           <input v-model.trim="deviceForm.ip" type="text" :class="inputClass" placeholder="如: 10.26.0.2" required />
         </div>
         <div>
-          <label class="mb-1.5 block text-sm font-medium text-slate-700">IP 类型</label>
+          <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">IP 类型</label>
           <select v-model="deviceForm.ip_type" :class="inputClass">
             <option value="Static">静态IP</option>
             <option value="Dynamic">动态IP</option>
             <option value="Fixed">固定 IP</option>
           </select>
-          <p v-if="deviceForm.ip_type === 'Static'" class="mt-1.5 text-xs leading-5 text-slate-400">
+          <p v-if="deviceForm.ip_type === 'Static'" class="mt-1.5 text-xs leading-5 text-slate-400 dark:text-slate-500">
             注册时优先使用客户端提交的 IP，且不会按租期回收。
           </p>
-          <p v-else-if="deviceForm.ip_type === 'Dynamic'" class="mt-1.5 text-xs leading-5 text-slate-400">
+          <p v-else-if="deviceForm.ip_type === 'Dynamic'" class="mt-1.5 text-xs leading-5 text-slate-400 dark:text-slate-500">
             注册时优先使用客户端提交的 IP，租期到期后会释放 IP。
           </p>
-          <p v-else class="mt-1.5 text-xs leading-5 text-slate-400">
+          <p v-else class="mt-1.5 text-xs leading-5 text-slate-400 dark:text-slate-500">
             强制使用服务端设置的 IP，客户端不能修改，且不会按租期回收。
           </p>
         </div>
         <div class="flex justify-end gap-3 pt-2">
-          <button type="button" class="rounded-lg px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100" @click="showDeviceModal = false">
+          <button type="button" class="rounded-lg px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700" @click="showDeviceModal = false">
             取消
           </button>
           <button type="submit" :disabled="formSubmitting" class="flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60">

@@ -5,6 +5,21 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>vnt 控制中心</title>
+    <script>
+      // 应用挂载前先应用主题，避免刷新时闪白/闪黑
+      ;(function () {
+        try {
+          const t = localStorage.getItem('vnt_theme')
+          const dark =
+            t === 'dark' || (t !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+          const el = document.documentElement
+          el.classList.toggle('dark', dark)
+          el.style.colorScheme = dark ? 'dark' : 'light'
+        } catch (e) {
+          /* ignore */
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="app"></div>
