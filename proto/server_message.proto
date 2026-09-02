@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package protocol.server_message;
 
+
 // 服务端之间的消息
 message ServerMessage {
   oneof payload {
@@ -40,6 +41,12 @@ message NetworkInfo {
 message ClientLatencyInfo {
   fixed32 ip = 1;
   uint32 latency_ms = 2; // 客户端到本服务器的延迟（毫秒），目前用默认值
+  repeated ServerIpv4Subnet advertised_subnets = 3;
+}
+
+message ServerIpv4Subnet {
+  fixed32 network = 1;
+  uint32 prefix_len = 2;
 }
 
 // Ping请求（用于探测服务器间延迟）

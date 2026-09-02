@@ -27,6 +27,7 @@ export interface DeviceGroup {
   hasRemote: boolean
   canDelete: boolean
   bestLatency: number | null
+  advertisedSubnets: string[]
   totalTxBytes: number
   totalRxBytes: number
   totalTxSpeed: number
@@ -168,6 +169,7 @@ export function useDeviceMonitor() {
       (d) =>
         (d.ip && d.ip.includes(q)) ||
         (d.current_ip && d.current_ip.includes(q)) ||
+        d.advertised_subnets.some((subnet) => subnet.toLowerCase().includes(q)) ||
         d.device_id.toLowerCase().includes(q) ||
         d.device_name.toLowerCase().includes(q),
     )
@@ -193,6 +195,9 @@ export function useDeviceMonitor() {
         hasRemote: devs.some((d) => d.status === 'Remote'),
         canDelete: devs.every((d) => d.status !== 'Online' && d.status !== 'Remote'),
         bestLatency: latencies.length > 0 ? Math.min(...latencies) : null,
+        advertisedSubnets: Array.from(
+          new Set(devs.flatMap((device) => device.advertised_subnets)),
+        ).sort(),
         totalTxBytes: devs.reduce((sum, d) => sum + d.tx_bytes, 0),
         totalRxBytes: devs.reduce((sum, d) => sum + d.rx_bytes, 0),
         totalTxSpeed: devs.reduce((sum, d) => sum + (d.tx_speed ?? 0), 0),

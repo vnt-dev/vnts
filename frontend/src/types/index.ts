@@ -38,6 +38,7 @@ export interface DeviceInfo {
   disconnect_time: string | null
   latency_ms: number | null
   server_addr: string | null
+  advertised_subnets: string[]
   tx_bytes: number
   rx_bytes: number
   /** 前端基于两次轮询差分计算出的瞬时网速 */

@@ -1,6 +1,7 @@
 use crate::protocol::control_message::{
     ClientSimpleInfoList, ConfirmRegResponseMsg, ErrorResponseMsg, FastRegRequestMsg,
     FastRegResponseMsg, RegResponseMsg, RequestMessage, ResponseMessage, SelectiveBroadcast,
+    SubnetSyncRequest, SubnetSyncResponse,
 };
 use crate::protocol::ip_packet_protocol::{HEAD_LENGTH, MsgType, NetPacket};
 use crate::protocol::rpc_message::rpc_message_request::RpcReqPayload;
@@ -79,6 +80,7 @@ impl ControlHandler {
             prefix_len: session.network_state.net_prefix_len(),
             gateway: session.network_state.gateway(),
             server_version: env!("CARGO_PKG_VERSION").to_string(),
+            subnet_sync_supported: true,
         };
         let vec = ResponseMessage::Reg(reg_msg_response).encode();
         sender.send(Bytes::from(vec)).await?;
@@ -254,6 +256,22 @@ impl ControlHandler {
             }
             MsgType::RpcReq => {
                 Self::handle_rpc(session, &sender, &packet)?;
+            }
+            MsgType::SubnetSyncReq => {
+                let request = SubnetSyncRequest::from_slice(packet.payload())?;
+                let (snapshot_hash, nodes) = self
+                    .control_service
+                    .subnet_snapshot(&session.network_code, session.ip);
+                if request.known_hash != snapshot_hash {
+                    let response = SubnetSyncResponse {
+                        snapshot_hash,
+                        nodes,
+                    }
+                    .encode();
+                    let response =
+                        Self::gateway_response_packet(MsgType::SubnetSyncRes, &response)?;
+                    _ = sender.try_send(response);
+                }
             }
             _ => {}
         }

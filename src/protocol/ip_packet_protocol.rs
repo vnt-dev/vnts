@@ -109,6 +109,8 @@ pub enum MsgType {
     Quic = 17,
 
     FastReg = 22,
+    SubnetSyncReq = 23,
+    SubnetSyncRes = 24,
 }
 
 impl From<MsgType> for u8 {
@@ -147,6 +149,8 @@ impl TryFrom<u8> for MsgType {
             17 => MsgType::Quic,
 
             22 => MsgType::FastReg,
+            23 => MsgType::SubnetSyncReq,
+            24 => MsgType::SubnetSyncRes,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,

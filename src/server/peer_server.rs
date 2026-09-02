@@ -1,4 +1,5 @@
 use crate::protocol::ProtoToBytesMut;
+use crate::protocol::control_message::NodeSubnetRoutes;
 use crate::protocol::server_message::{Payload, *};
 use crate::server::control_server::db::{self, PeerServerRecord, PeerServerSource};
 use crate::server::network_state_provider::NetworkStateProvider;
@@ -126,6 +127,7 @@ impl PeerServerInfo {
 pub struct IpRouteInfo {
     pub peer_info: Arc<PeerServerInfo>,
     pub client_latency_ms: u32,
+    pub advertised_subnets: Vec<ipnet::Ipv4Net>,
 }
 
 impl IpRouteInfo {
@@ -607,9 +609,18 @@ impl PeerServerManager {
                 let ip = Ipv4Addr::from(client.ip);
                 synced_ips.insert(ip);
 
+                let mut advertised_subnets = client
+                    .advertised_subnets
+                    .into_iter()
+                    .filter_map(server_subnet_from_proto)
+                    .collect::<Vec<_>>();
+                advertised_subnets.sort_by_key(|net| (u32::from(net.network()), net.prefix_len()));
+                advertised_subnets.dedup();
+
                 let route_info = IpRouteInfo {
                     peer_info: peer_info.clone(),
                     client_latency_ms: client.latency_ms,
+                    advertised_subnets,
                 };
 
                 ip_map
@@ -620,6 +631,7 @@ impl PeerServerManager {
                             .find(|r| Arc::ptr_eq(&r.peer_info, peer_info))
                         {
                             existing.client_latency_ms = client.latency_ms;
+                            existing.advertised_subnets = route_info.advertised_subnets.clone();
                         } else {
                             routes.push(route_info.clone());
                         }
@@ -712,6 +724,17 @@ impl PeerServerManager {
                             ClientLatencyInfo {
                                 ip: u32::from(ip),
                                 latency_ms,
+                                advertised_subnets: state
+                                    .get_device_entry_by_ip(ip)
+                                    .filter(|device| device.subnet_advertisement_active)
+                                    .map(|device| {
+                                        device
+                                            .advertised_subnets
+                                            .into_iter()
+                                            .map(server_subnet_to_proto)
+                                            .collect()
+                                    })
+                                    .unwrap_or_default(),
                             }
                         })
                         .collect();
@@ -726,6 +749,41 @@ impl PeerServerManager {
         }
 
         ServerClientInfoResponse { networks }
+    }
+
+    pub fn subnet_snapshot(
+        &self,
+        network_code: &str,
+        exclude_ip: Ipv4Addr,
+    ) -> (Vec<u8>, Vec<NodeSubnetRoutes>) {
+        let mut by_ip = std::collections::BTreeMap::<Ipv4Addr, Vec<ipnet::Ipv4Net>>::new();
+
+        if let Some(state) = self.network_state_provider.get_network_state(network_code) {
+            for (ip, subnets) in state.online_advertised_subnets() {
+                if ip != exclude_ip {
+                    by_ip.entry(ip).or_default().extend(subnets);
+                }
+            }
+        }
+
+        if let Some(ip_map) = self.ip_to_routes.get(network_code) {
+            for entry in ip_map.iter() {
+                let ip = *entry.key();
+                if ip == exclude_ip {
+                    continue;
+                }
+                for route in entry.value() {
+                    if route.peer_info.is_connected() {
+                        by_ip
+                            .entry(ip)
+                            .or_default()
+                            .extend(route.advertised_subnets.iter().copied());
+                    }
+                }
+            }
+        }
+
+        canonical_subnet_snapshot(by_ip)
     }
 
     async fn ping_peer(&self, peer_info: &Arc<PeerServerInfo>) -> Result<()> {
@@ -877,7 +935,10 @@ impl PeerServerManager {
         self.remove_outbound_peer(server_addr).await
     }
 
-    pub fn get_remote_devices(&self, network_code: &str) -> Vec<(Ipv4Addr, String, u32)> {
+    pub fn get_remote_devices(
+        &self,
+        network_code: &str,
+    ) -> Vec<(Ipv4Addr, String, u32, Vec<ipnet::Ipv4Net>)> {
         let mut result = Vec::new();
 
         if let Some(network_routes) = self.ip_to_routes.get(network_code) {
@@ -890,7 +951,12 @@ impl PeerServerManager {
                     }
                     let server_addr = route.peer_info.get_addr();
                     let total_latency = route.total_latency();
-                    result.push((ip, server_addr, total_latency));
+                    result.push((
+                        ip,
+                        server_addr,
+                        total_latency,
+                        route.advertised_subnets.clone(),
+                    ));
                 }
             }
         }
@@ -990,6 +1056,59 @@ impl PeerServerManager {
     }
 }
 
+pub(crate) fn canonical_subnet_snapshot(
+    mut by_ip: std::collections::BTreeMap<Ipv4Addr, Vec<ipnet::Ipv4Net>>,
+) -> (Vec<u8>, Vec<NodeSubnetRoutes>) {
+    for subnets in by_ip.values_mut() {
+        subnets.sort_by_key(|net| (u32::from(net.network()), net.prefix_len()));
+        subnets.dedup();
+    }
+
+    let mut filtered = std::collections::BTreeMap::<Ipv4Addr, Vec<ipnet::Ipv4Net>>::new();
+    let mut claimed = std::collections::HashSet::<ipnet::Ipv4Net>::new();
+    // by_ip is ordered, so an identical CIDR is owned by the smallest node IP.
+    // Different (including overlapping) CIDRs are all retained for LPM routing.
+    for (ip, subnets) in by_ip {
+        for subnet in subnets {
+            if claimed.insert(subnet) {
+                filtered.entry(ip).or_default().push(subnet);
+            }
+        }
+    }
+    let nodes = filtered
+        .into_iter()
+        .filter_map(|(ip, subnets)| {
+            (!subnets.is_empty()).then_some(NodeSubnetRoutes { ip, subnets })
+        })
+        .collect::<Vec<_>>();
+
+    let mut hasher = Sha256::new();
+    hasher.update((nodes.len() as u32).to_be_bytes());
+    for node in &nodes {
+        hasher.update(node.ip.octets());
+        hasher.update((node.subnets.len() as u32).to_be_bytes());
+        for subnet in &node.subnets {
+            hasher.update(subnet.network().octets());
+            hasher.update([subnet.prefix_len()]);
+        }
+    }
+    (hasher.finalize().to_vec(), nodes)
+}
+
+fn server_subnet_from_proto(subnet: ServerIpv4Subnet) -> Option<ipnet::Ipv4Net> {
+    let prefix_len = u8::try_from(subnet.prefix_len).ok()?;
+    ipnet::Ipv4Net::new(Ipv4Addr::from(subnet.network), prefix_len)
+        .ok()
+        .map(|net| net.trunc())
+}
+
+fn server_subnet_to_proto(subnet: ipnet::Ipv4Net) -> ServerIpv4Subnet {
+    ServerIpv4Subnet {
+        network: subnet.network().into(),
+        prefix_len: subnet.prefix_len().into(),
+    }
+}
+
 impl Clone for PeerServerManager {
     fn clone(&self) -> Self {
         Self {
@@ -1047,7 +1166,10 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
 
 #[cfg(test)]
 mod tests {
-    use super::{IpRouteInfo, PeerServerInfo, PeerServerManager, SkipServerVerification};
+    use super::{
+        IpRouteInfo, PeerServerInfo, PeerServerManager, SkipServerVerification,
+        canonical_subnet_snapshot,
+    };
     use crate::protocol::ProtoToBytesMut;
     use crate::protocol::control_message::{RegRequestMsg, RegistrationMode};
     use crate::protocol::ip_packet_protocol::{HEAD_LENGTH, MsgType, NetPacket};
@@ -1076,6 +1198,40 @@ mod tests {
     }
 
     #[test]
+    fn subnet_snapshot_keeps_overlaps_and_assigns_duplicates_to_smallest_ip() {
+        let mut by_ip = std::collections::BTreeMap::new();
+        by_ip.insert(
+            "10.26.0.2".parse().unwrap(),
+            vec![
+                "192.168.0.0/24".parse().unwrap(),
+                "172.16.0.0/24".parse().unwrap(),
+            ],
+        );
+        by_ip.insert(
+            "10.26.0.3".parse().unwrap(),
+            vec![
+                "192.168.0.0/25".parse().unwrap(),
+                "172.16.0.0/24".parse().unwrap(),
+            ],
+        );
+        let (hash, nodes) = canonical_subnet_snapshot(by_ip);
+        assert_eq!(hash.len(), 32);
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(
+            nodes[0].ip,
+            "10.26.0.2".parse::<std::net::Ipv4Addr>().unwrap()
+        );
+        assert_eq!(
+            nodes[0].subnets,
+            vec![
+                "172.16.0.0/24".parse().unwrap(),
+                "192.168.0.0/24".parse().unwrap(),
+            ]
+        );
+        assert_eq!(nodes[1].subnets, vec!["192.168.0.0/25".parse().unwrap()]);
+    }
+
+    #[test]
     fn cleanup_all_routes_removes_only_target_peer() {
         let manager = manager();
         let removed_peer = Arc::new(PeerServerInfo::new("peer-a".to_string(), true));
@@ -1088,10 +1244,12 @@ mod tests {
                 IpRouteInfo {
                     peer_info: removed_peer.clone(),
                     client_latency_ms: 10,
+                    advertised_subnets: Vec::new(),
                 },
                 IpRouteInfo {
                     peer_info: retained_peer.clone(),
                     client_latency_ms: 20,
+                    advertised_subnets: Vec::new(),
                 },
             ],
         );
@@ -1115,6 +1273,7 @@ mod tests {
             vec![IpRouteInfo {
                 peer_info: removed_peer.clone(),
                 client_latency_ms: 10,
+                advertised_subnets: Vec::new(),
             }],
         );
         manager.ip_to_routes.insert("net-a".to_string(), routes);
@@ -1147,6 +1306,7 @@ mod tests {
                     ip_variable: false,
                     server_id: 0,
                     registration_mode: RegistrationMode::Normal,
+                    advertised_subnets: Vec::new(),
                 },
                 1,
                 client_tx,

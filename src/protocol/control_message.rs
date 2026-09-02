@@ -5,6 +5,7 @@ use crate::protocol::control_message::proto::request_message::RequestPayload;
 use crate::protocol::control_message::proto::response_message::ResponsePayload;
 use anyhow::{anyhow, bail};
 use bytes::BytesMut;
+use ipnet::Ipv4Net;
 use prost::Message;
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
@@ -26,6 +27,7 @@ pub struct RegRequestMsg {
     pub ip_variable: bool,
     pub server_id: u32,
     pub registration_mode: RegistrationMode,
+    pub advertised_subnets: Vec<Ipv4Net>,
 }
 impl RegRequestMsg {
     pub const MAX_NETWORK_CODE_LEN: usize = 32;
@@ -74,6 +76,13 @@ impl RegRequestMsg {
     }
     pub fn from(msg: proto::RegRequestMsg) -> anyhow::Result<Self> {
         let registration_mode = msg.registration_mode();
+        let mut advertised_subnets = msg
+            .advertised_subnets
+            .into_iter()
+            .map(ipv4_subnet_from_proto)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        advertised_subnets.sort_by_key(|net| (u32::from(net.network()), net.prefix_len()));
+        advertised_subnets.dedup();
         Ok(Self {
             network_code: msg.network_code,
             device_id: msg.device_id,
@@ -84,6 +93,7 @@ impl RegRequestMsg {
             ip_variable: msg.ip_variable,
             server_id: msg.server_id,
             registration_mode,
+            advertised_subnets,
         })
     }
     pub fn to(self) -> proto::RegRequestMsg {
@@ -97,6 +107,11 @@ impl RegRequestMsg {
             ip_variable: self.ip_variable,
             server_id: self.server_id,
             registration_mode: self.registration_mode as i32,
+            advertised_subnets: self
+                .advertised_subnets
+                .into_iter()
+                .map(ipv4_subnet_to_proto)
+                .collect(),
         }
     }
 }
@@ -106,6 +121,7 @@ pub struct RegResponseMsg {
     pub prefix_len: u8,
     pub gateway: Ipv4Addr,
     pub server_version: String,
+    pub subnet_sync_supported: bool,
 }
 impl RegResponseMsg {
     pub fn to(self) -> proto::RegResponseMsg {
@@ -114,9 +130,67 @@ impl RegResponseMsg {
             prefix_len: self.prefix_len as _,
             gateway: self.gateway.into(),
             server_version: self.server_version,
+            subnet_sync_supported: self.subnet_sync_supported,
         }
     }
 }
+
+pub(crate) fn ipv4_subnet_to_proto(net: Ipv4Net) -> proto::Ipv4Subnet {
+    let net = net.trunc();
+    proto::Ipv4Subnet {
+        network: net.network().into(),
+        prefix_len: net.prefix_len().into(),
+    }
+}
+
+pub(crate) fn ipv4_subnet_from_proto(net: proto::Ipv4Subnet) -> anyhow::Result<Ipv4Net> {
+    let prefix_len = u8::try_from(net.prefix_len)?;
+    Ok(Ipv4Net::new(Ipv4Addr::from(net.network), prefix_len)?.trunc())
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct NodeSubnetRoutes {
+    pub ip: Ipv4Addr,
+    pub subnets: Vec<Ipv4Net>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SubnetSyncRequest {
+    pub known_hash: Vec<u8>,
+}
+
+impl SubnetSyncRequest {
+    pub fn from_slice(buf: &[u8]) -> anyhow::Result<Self> {
+        let msg = proto::SubnetSyncRequest::decode(buf)?;
+        Ok(Self {
+            known_hash: msg.known_hash,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SubnetSyncResponse {
+    pub snapshot_hash: Vec<u8>,
+    pub nodes: Vec<NodeSubnetRoutes>,
+}
+
+impl SubnetSyncResponse {
+    pub fn encode(self) -> BytesMut {
+        proto::SubnetSyncResponse {
+            snapshot_hash: self.snapshot_hash,
+            nodes: self
+                .nodes
+                .into_iter()
+                .map(|node| proto::NodeSubnetRoutes {
+                    ip: node.ip.into(),
+                    subnets: node.subnets.into_iter().map(ipv4_subnet_to_proto).collect(),
+                })
+                .collect(),
+        }
+        .encode_bytes_mut()
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ConfirmRegMsg {}
 impl ConfirmRegMsg {

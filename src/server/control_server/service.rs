@@ -803,6 +803,28 @@ impl ControlService {
         self.peer_manager.read().clone()
     }
 
+    pub fn subnet_snapshot(
+        &self,
+        network_code: &str,
+        exclude_ip: Ipv4Addr,
+    ) -> (
+        Vec<u8>,
+        Vec<crate::protocol::control_message::NodeSubnetRoutes>,
+    ) {
+        if let Some(manager) = self.get_peer_manager() {
+            return manager.subnet_snapshot(network_code, exclude_ip);
+        }
+        let mut by_ip = std::collections::BTreeMap::new();
+        if let Some(state) = self.network_state_provider.get_network_state(network_code) {
+            for (ip, subnets) in state.online_advertised_subnets() {
+                if ip != exclude_ip {
+                    by_ip.insert(ip, subnets);
+                }
+            }
+        }
+        crate::server::peer_server::canonical_subnet_snapshot(by_ip)
+    }
+
     pub fn get_network_state_provider(&self) -> &NetworkStateProvider {
         &self.network_state_provider
     }
@@ -886,6 +908,7 @@ impl ControlService {
                                 disconnect_time: None,
                                 latency_ms: None,
                                 server_addr: None,
+                                advertised_subnets: Vec::new(),
                                 tx_bytes: r.tx_bytes as u64,
                                 rx_bytes: r.rx_bytes as u64,
                             }
@@ -902,7 +925,7 @@ impl ControlService {
         if let Some(peer_manager) = self.peer_manager.read().as_ref() {
             let remote_devices = peer_manager.get_remote_devices(network_code);
 
-            for (ip, server_addr, latency_ms) in remote_devices {
+            for (ip, server_addr, latency_ms, advertised_subnets) in remote_devices {
                 devices.push(DeviceInfoVO {
                     device_id: format!("remote-{}", ip),
                     device_name: format!("Remote Device ({})", ip),
@@ -915,6 +938,7 @@ impl ControlService {
                     disconnect_time: None,
                     latency_ms: Some(latency_ms),
                     server_addr: Some(server_addr),
+                    advertised_subnets,
                     tx_bytes: 0,
                     rx_bytes: 0,
                 });
@@ -979,6 +1003,7 @@ pub struct DeviceInfoVO {
     pub disconnect_time: Option<String>,
     pub latency_ms: Option<u32>,
     pub server_addr: Option<String>,
+    pub advertised_subnets: Vec<Ipv4Net>,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
 }
@@ -1024,6 +1049,7 @@ mod tests {
             ip_variable: true,
             server_id: 0,
             registration_mode: RegistrationMode::Normal,
+            advertised_subnets: Vec::new(),
         }
     }
 
@@ -1605,6 +1631,7 @@ mod tests {
         let mut reg_new = registration("ver-repro", "device-a");
         reg_new.version = "2.0.5".to_string();
         reg_new.ip = Some("10.71.0.2".parse().unwrap());
+        reg_new.advertised_subnets = vec!["192.168.10.0/24".parse().unwrap()];
         let _session_b = service.register(reg_new, sender_b).await.unwrap();
 
         // 另一台设备，用于从旁观察 client_info_list（列表会排除请求者自己）
@@ -1620,6 +1647,10 @@ mod tests {
         assert_eq!(
             dev.device_version, "2.0.5",
             "web 通过 get_device_infos 应看到新版本"
+        );
+        assert_eq!(
+            dev.advertised_subnets,
+            vec!["192.168.10.0/24".parse::<Ipv4Net>().unwrap()]
         );
 
         let client_list = state.client_info_list(session_c.ip);

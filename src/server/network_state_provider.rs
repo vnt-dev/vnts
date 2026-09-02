@@ -97,6 +97,8 @@ pub struct DeviceEntry {
     pub key_sign: Option<String>,
     pub latency_ms: Option<u32>,
     pub traffic_stats: Arc<TrafficStats>,
+    pub advertised_subnets: Vec<Ipv4Net>,
+    pub subnet_advertisement_active: bool,
 }
 
 pub fn system_time_to_i64(st: SystemTime) -> i64 {
@@ -130,6 +132,8 @@ impl DeviceEntry {
             key_sign: None,
             latency_ms: None,
             traffic_stats,
+            advertised_subnets: Vec::new(),
+            subnet_advertisement_active: false,
         }
     }
 
@@ -369,6 +373,8 @@ impl NetworkState {
                     key_sign: None,
                     latency_ms: None,
                     traffic_stats: Arc::new(TrafficStats::new()),
+                    advertised_subnets: Vec::new(),
+                    subnet_advertisement_active: false,
                 },
             );
         }
@@ -460,7 +466,26 @@ impl NetworkState {
             let record = entry.to_record(network_code);
             db::save_or_update_device(&record).await?;
         }
+        let mut guard = self.lease_state.lock();
+        let next_version = guard.data_version + 1;
+        if let Some(entry) = guard.device_map.get_mut(device_id)
+            && !entry.subnet_advertisement_active
+        {
+            entry.subnet_advertisement_active = true;
+            entry.data_version = next_version;
+            guard.data_version = next_version;
+        }
         Ok(())
+    }
+
+    pub fn online_advertised_subnets(&self) -> Vec<(Ipv4Addr, Vec<Ipv4Net>)> {
+        self.lease_state
+            .lock()
+            .device_map
+            .values()
+            .filter(|entry| entry.is_connected && entry.subnet_advertisement_active)
+            .filter_map(|entry| entry.ip.map(|ip| (ip, entry.advertised_subnets.clone())))
+            .collect()
     }
 
     /// 返回 (分配的IP, 旧IP, DeviceEntry克隆)
@@ -564,6 +589,11 @@ impl NetworkState {
                 disconnect_time: disconnect_time.map(|d| d.format(&format).unwrap_or_default()),
                 latency_ms: entry.latency_ms,
                 server_addr: None,
+                advertised_subnets: if entry.subnet_advertisement_active {
+                    entry.advertised_subnets.clone()
+                } else {
+                    Vec::new()
+                },
                 tx_bytes: entry.traffic_stats.get_tx(),
                 rx_bytes: entry.traffic_stats.get_rx(),
             });
@@ -667,6 +697,7 @@ impl NetworkStateInner {
         self.data_version += 1;
         device_entry.data_version = self.data_version;
         device_entry.is_connected = false;
+        device_entry.subnet_advertisement_active = false;
         device_entry.disconnect_time = Some(SystemTime::now());
 
         let record = device_entry.to_record(network_code);
@@ -767,6 +798,9 @@ impl NetworkStateInner {
         reg_req: RegRequestMsg,
         random_id: u64,
     ) -> anyhow::Result<(Ipv4Addr, Option<Ipv4Addr>)> {
+        let advertised_subnets = reg_req.advertised_subnets.clone();
+        let subnet_advertisement_active =
+            reg_req.registration_mode == crate::protocol::control_message::RegistrationMode::Normal;
         let existing_entry = self.device_map.get(&reg_req.device_id).cloned();
         let fixed_ip = existing_entry
             .as_ref()
@@ -806,6 +840,8 @@ impl NetworkStateInner {
             device_entry.key_sign = reg_req.key_sign.clone();
             device_entry.device_name = reg_req.name.clone();
             device_entry.device_version = reg_req.version.clone();
+            device_entry.advertised_subnets = advertised_subnets.clone();
+            device_entry.subnet_advertisement_active = subnet_advertisement_active;
 
             if let Some(ip) = new_ip {
                 device_entry.ip = Some(ip);
@@ -867,6 +903,8 @@ impl NetworkStateInner {
                     entry.data_version = self.data_version;
                     entry.key_sign = reg_req.key_sign;
                     entry.latency_ms = None;
+                    entry.advertised_subnets = advertised_subnets.clone();
+                    entry.subnet_advertisement_active = subnet_advertisement_active;
                     entry
                 } else {
                     DeviceEntry {
@@ -883,6 +921,8 @@ impl NetworkStateInner {
                         key_sign: reg_req.key_sign,
                         latency_ms: None,
                         traffic_stats: Arc::new(TrafficStats::new()),
+                        advertised_subnets: advertised_subnets.clone(),
+                        subnet_advertisement_active,
                     }
                 };
                 self.add_device(entry);
@@ -910,6 +950,8 @@ impl NetworkStateInner {
             entry.data_version = self.data_version;
             entry.key_sign = reg_req.key_sign;
             entry.latency_ms = None;
+            entry.advertised_subnets = advertised_subnets.clone();
+            entry.subnet_advertisement_active = subnet_advertisement_active;
             entry
         } else {
             DeviceEntry {
@@ -926,6 +968,8 @@ impl NetworkStateInner {
                 key_sign: reg_req.key_sign,
                 latency_ms: None,
                 traffic_stats: Arc::new(TrafficStats::new()),
+                advertised_subnets,
+                subnet_advertisement_active,
             }
         };
         self.add_device(entry);
@@ -1111,6 +1155,7 @@ mod tests {
             ip_variable,
             server_id: 0,
             registration_mode: RegistrationMode::Normal,
+            advertised_subnets: Vec::new(),
         }
     }
 
@@ -1149,6 +1194,36 @@ mod tests {
                     2,
                 )
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn reregister_replaces_subnets_and_stale_session_cannot_remove_them() {
+        let net = "10.26.0.0/24".parse::<Ipv4Net>().unwrap();
+        let gateway = Ipv4Addr::new(10, 26, 0, 1);
+        let ip = Ipv4Addr::new(10, 26, 0, 2);
+        let mut state = empty_state();
+        let mut first = request(ip, false);
+        first.advertised_subnets = vec!["192.168.0.0/24".parse().unwrap()];
+        state.allocate_ip(&net, gateway, first, 1).unwrap();
+
+        let mut second = request(ip, false);
+        second.advertised_subnets = vec!["172.16.0.0/16".parse().unwrap()];
+        state.allocate_ip(&net, gateway, second, 2).unwrap();
+        let entry = state.device_map.get(&format!("device-{ip}")).unwrap();
+        assert_eq!(
+            entry.advertised_subnets,
+            vec!["172.16.0.0/16".parse().unwrap()]
+        );
+
+        let (removed, _) = state.offline_ip("test-net", &format!("device-{ip}"), ip, 1);
+        assert!(!removed);
+        assert!(
+            state
+                .device_map
+                .get(&format!("device-{ip}"))
+                .unwrap()
+                .is_connected
         );
     }
 

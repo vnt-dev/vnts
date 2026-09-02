@@ -185,13 +185,14 @@ async function executeDelete() {
     </div>
 
     <div v-else class="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-800">
-      <table class="w-full min-w-[1160px] text-left text-sm">
+      <table class="w-full min-w-[1360px] text-left text-sm">
         <thead>
           <tr class="border-b border-slate-100 bg-slate-50/80 text-xs text-slate-500 dark:border-slate-700 dark:bg-slate-800/80 dark:text-slate-400">
             <th class="w-16 px-4 py-3"></th>
             <th class="px-4 py-3 font-semibold">状态</th>
             <th class="px-4 py-3 font-semibold">设备名称 / ID</th>
             <th class="px-4 py-3 font-semibold">IP 地址</th>
+            <th class="px-4 py-3 font-semibold">上报出口网段</th>
             <th class="px-4 py-3 font-semibold">IP 类型</th>
             <th class="px-4 py-3 font-semibold">版本</th>
             <th class="px-4 py-3 font-semibold">延迟</th>
@@ -240,6 +241,18 @@ async function executeDelete() {
                 <span v-if="differingSessionIp(group)" class="ml-1 text-xs text-amber-600 dark:text-amber-400">
                   （当前使用：{{ differingSessionIp(group) }}）
                 </span>
+              </td>
+              <td class="px-4 py-3">
+                <div v-if="group.advertisedSubnets.length" class="flex max-w-72 flex-wrap gap-1">
+                  <span
+                    v-for="subnet in group.advertisedSubnets"
+                    :key="subnet"
+                    class="rounded bg-violet-50 px-1.5 py-0.5 font-mono text-xs text-violet-700 dark:bg-violet-500/10 dark:text-violet-300"
+                  >
+                    {{ subnet }}
+                  </span>
+                </div>
+                <span v-else class="text-slate-300 dark:text-slate-600">-</span>
               </td>
               <td class="px-4 py-3 text-xs font-medium">
                 <span
@@ -307,7 +320,7 @@ async function executeDelete() {
 
             <!-- 网速历史图表行 -->
             <tr v-if="monitor.chartExpanded[group.key]" class="border-b border-slate-50 bg-white dark:border-slate-700/60 dark:bg-slate-800">
-              <td colspan="11" class="px-4 py-3">
+              <td colspan="12" class="px-4 py-3">
                 <div class="rounded-lg border border-slate-100 bg-white px-4 py-3 dark:border-slate-700 dark:bg-slate-900">
                   <SpeedChart :history="monitor.historyOf(group.key)" />
                 </div>
@@ -332,6 +345,18 @@ async function executeDelete() {
                 <span v-else class="text-xs font-medium text-emerald-600 dark:text-emerald-400">本地</span>
               </td>
               <td class="px-4 py-3 text-xs text-slate-400 dark:text-slate-500">-</td>
+              <td class="px-4 py-3">
+                <div v-if="dev.advertised_subnets.length" class="flex max-w-72 flex-wrap gap-1">
+                  <span
+                    v-for="subnet in dev.advertised_subnets"
+                    :key="subnet"
+                    class="rounded bg-violet-50 px-1.5 py-0.5 font-mono text-xs text-violet-700 dark:bg-violet-500/10 dark:text-violet-300"
+                  >
+                    {{ subnet }}
+                  </span>
+                </div>
+                <span v-else class="text-slate-300 dark:text-slate-600">-</span>
+              </td>
               <td class="px-4 py-3 text-xs text-slate-400 dark:text-slate-500">-</td>
               <td class="px-4 py-3 text-xs text-slate-500 dark:text-slate-400">{{ dev.device_version }}</td>
               <td class="px-4 py-3 text-xs">
@@ -352,7 +377,7 @@ async function executeDelete() {
           </template>
 
           <tr v-if="mergedDevices.length === 0">
-            <td colspan="11" class="px-4 py-16 text-center text-sm text-slate-400 dark:text-slate-500">
+            <td colspan="12" class="px-4 py-16 text-center text-sm text-slate-400 dark:text-slate-500">
               暂无设备数据
             </td>
           </tr>
