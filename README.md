@@ -8,6 +8,15 @@
 1. 支持quic、tcp(tls)和wss协议，会自动生成自签名证书，也可以手动替换
 2. 无参数启动后，会输出配置文件，可以修改配置文件
 3. --conf-example 参数查看配置文件示例
+4. 可选启用内置 IKEv2/IPsec（UDP 500/4500），让系统原生 VPN 客户端以独立设备加入指定 VNT 网络
+
+## IKEv2/IPsec
+
+在配置文件加入 `[ikev2]` 和一个或多个 `[[ikev2.networks]]` 即可启用。PSK 和 EAP 用户凭据会唯一映射到一个 `network_code`；EAP 需要 SAN 与 `remote_id` 匹配的独立 RSA 或 ECDSA P-256 证书。ESP 数据面统一使用 UDP/4500 NAT-T。完整示例可通过 `--conf-example` 查看。
+
+IKEv2 客户端从对应网络的地址池获取虚拟 IP，并可跨互联服务端通信；启用了 `white_list` 时也要包含这些网络编号。普通 VNT 节点必须显式配置 `allow_ikev2 = true` 才会看到并接受 IKEv2 流量。
+
+客户端填写规则：服务器/Remote ID 使用 `remote_id`，PSK 模式的 Local ID 必须非空且保持稳定；EAP 模式使用 `eap_users` 中的用户名和密码，并在系统中信任签发 IKE 证书的 CA。Windows 原生客户端需把 IKE/ESP 加密算法配置为 `GCMAES256`、DH 组配置为 Group14。
 
 
 ## Web 管理端（前端）

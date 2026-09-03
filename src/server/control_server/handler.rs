@@ -219,10 +219,43 @@ impl ControlHandler {
                     return Ok(());
                 }
                 let data_version = u64::from_be_bytes(packet.payload()[8..].try_into()?);
-                if let Some(mut list) = session
-                    .network_state
-                    .changed_client_simple_list(session.ip, data_version)
+                if session.allow_ikev2
+                    && let Some(peer_manager) = self.control_service.get_peer_manager()
                 {
+                    let mut list = session
+                        .network_state
+                        .full_client_simple_list(session.ip, true);
+                    let mut seen = list
+                        .list
+                        .iter()
+                        .map(|client| client.ip)
+                        .collect::<std::collections::HashSet<_>>();
+                    for (ip, _, _, _, client_type) in
+                        peer_manager.get_remote_devices(&session.network_code)
+                    {
+                        if client_type == crate::server::control_server::db::ClientType::Ikev2
+                            && seen.insert(ip)
+                        {
+                            list.list
+                                .push(crate::protocol::control_message::ClientSimpleInfo {
+                                    ip,
+                                    online: true,
+                                    client_type:
+                                        crate::protocol::control_message::ClientType::Ikev2,
+                                });
+                        }
+                    }
+                    list.time = i64::from_be_bytes(packet.payload()[..8].try_into()?);
+                    if let Some(buf) = Self::push_client_ips(list) {
+                        _ = sender.try_send(buf);
+                        return Ok(());
+                    }
+                }
+                if let Some(mut list) = session.network_state.changed_client_simple_list(
+                    session.ip,
+                    data_version,
+                    session.allow_ikev2,
+                ) {
                     list.time = i64::from_be_bytes(packet.payload()[..8].try_into()?);
                     if let Some(buf) = Self::push_client_ips(list) {
                         _ = sender.try_send(buf);
@@ -308,6 +341,45 @@ impl ControlHandler {
         session.network_state.record_tx_traffic(src, packet_len);
 
         match msg_type {
+            MsgType::Ikev2Relay => {
+                if !session.allow_ikev2
+                    || src != session.ip
+                    || self
+                        .control_service
+                        .client_type(&session.network_code, dest)
+                        != Some(crate::server::control_server::db::ClientType::Ikev2)
+                {
+                    return Ok(());
+                }
+                let Some(ipv4) = Ipv4Packet::new(packet.payload()) else {
+                    return Ok(());
+                };
+                let header_length = ipv4.get_header_length() as usize * 4;
+                if ipv4.get_version() != 4
+                    || header_length < Ipv4Packet::minimum_packet_size()
+                    || ipv4.get_total_length() as usize != packet.payload().len()
+                    || ipv4.get_source() != src
+                    || ipv4.get_destination() != dest
+                {
+                    return Ok(());
+                }
+                if !packet.decr_ttl() {
+                    return Ok(());
+                }
+                let data = buf.freeze();
+                let forwarded = if let Some(peer_manager) = self.control_service.get_peer_manager()
+                {
+                    peer_manager
+                        .forward_with_best_route(&session.network_code, dest, data.clone())
+                        .await
+                } else {
+                    false
+                };
+                if !forwarded && let Some(sender) = session.network_state.sender_map().get(&dest) {
+                    session.network_state.record_rx_traffic(dest, data.len());
+                    _ = sender.try_send(data);
+                }
+            }
             MsgType::Turn
             | MsgType::Ping
             | MsgType::Pong

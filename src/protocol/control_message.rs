@@ -14,7 +14,7 @@ mod proto {
     include!(concat!(env!("OUT_DIR"), "/protocol.control_message.rs"));
 }
 
-pub use proto::RegistrationMode;
+pub use proto::{ClientType, RegistrationMode};
 
 #[derive(Debug, Clone)]
 pub struct RegRequestMsg {
@@ -28,6 +28,7 @@ pub struct RegRequestMsg {
     pub server_id: u32,
     pub registration_mode: RegistrationMode,
     pub advertised_subnets: Vec<Ipv4Net>,
+    pub allow_ikev2: bool,
 }
 impl RegRequestMsg {
     pub const MAX_NETWORK_CODE_LEN: usize = 32;
@@ -94,6 +95,7 @@ impl RegRequestMsg {
             server_id: msg.server_id,
             registration_mode,
             advertised_subnets,
+            allow_ikev2: msg.allow_ikev2,
         })
     }
     pub fn to(self) -> proto::RegRequestMsg {
@@ -112,6 +114,7 @@ impl RegRequestMsg {
                 .into_iter()
                 .map(ipv4_subnet_to_proto)
                 .collect(),
+            allow_ikev2: self.allow_ikev2,
         }
     }
 }
@@ -347,18 +350,21 @@ impl SelectiveBroadcast {
 pub struct ClientSimpleInfo {
     pub ip: Ipv4Addr,
     pub online: bool,
+    pub client_type: ClientType,
 }
 impl ClientSimpleInfo {
     pub fn from(msg: proto::ClientSimpleInfo) -> anyhow::Result<Self> {
         Ok(Self {
             ip: msg.ip.into(),
             online: msg.online,
+            client_type: msg.client_type(),
         })
     }
     pub fn to(self) -> proto::ClientSimpleInfo {
         proto::ClientSimpleInfo {
             ip: self.ip.into(),
             online: self.online,
+            client_type: self.client_type as i32,
         }
     }
 }

@@ -40,6 +40,23 @@ pub enum DeviceIpType {
     Fixed = 2,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ClientType {
+    #[default]
+    Vnt = 0,
+    Ikev2 = 1,
+}
+
+impl ClientType {
+    pub fn from_i32(value: i32) -> Self {
+        match value {
+            1 => Self::Ikev2,
+            _ => Self::Vnt,
+        }
+    }
+}
+
 impl DeviceIpType {
     pub fn from_i32(value: i32) -> Self {
         match value {
@@ -120,6 +137,7 @@ pub struct DeviceRecord {
     pub network_code: String,
     pub ip: Option<String>,
     pub ip_type: DeviceIpType,
+    pub client_type: ClientType,
     pub device_name: String,
     pub device_version: String,
     pub last_connect_time: i64,
@@ -177,6 +195,7 @@ pub async fn init_db_pool() -> anyhow::Result<()> {
             network_code TEXT NOT NULL,
             ip TEXT,
             ip_type INTEGER NOT NULL DEFAULT 0,
+            client_type INTEGER NOT NULL DEFAULT 0,
             device_name TEXT NOT NULL,
             device_version TEXT NOT NULL,
             last_connect_time INTEGER NOT NULL,
@@ -190,6 +209,9 @@ pub async fn init_db_pool() -> anyhow::Result<()> {
     .context("Failed to create devices table")?;
 
     let _ = sqlx::query("ALTER TABLE devices ADD COLUMN ip_type INTEGER NOT NULL DEFAULT 0")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN client_type INTEGER NOT NULL DEFAULT 0")
         .execute(&pool)
         .await;
 
@@ -408,11 +430,12 @@ pub async fn save_or_update_device(device: &DeviceRecord) -> anyhow::Result<()> 
     };
 
     sqlx::query(
-        r#"INSERT INTO devices (device_id, network_code, ip, ip_type, device_name, device_version, last_connect_time, tx_bytes, rx_bytes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        r#"INSERT INTO devices (device_id, network_code, ip, ip_type, client_type, device_name, device_version, last_connect_time, tx_bytes, rx_bytes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(device_id, network_code) DO UPDATE SET
                ip = excluded.ip,
                ip_type = excluded.ip_type,
+               client_type = excluded.client_type,
                device_name = excluded.device_name,
                device_version = excluded.device_version,
                last_connect_time = excluded.last_connect_time,
@@ -423,6 +446,7 @@ pub async fn save_or_update_device(device: &DeviceRecord) -> anyhow::Result<()> 
     .bind(&device.network_code)
     .bind(&device.ip)
     .bind(device.ip_type as i32)
+    .bind(device.client_type as i32)
     .bind(&device.device_name)
     .bind(&device.device_version)
     .bind(device.last_connect_time)
@@ -461,7 +485,7 @@ pub async fn get_device(
     };
 
     let row_option = sqlx::query(
-        r#"SELECT device_id, network_code, ip, ip_type, device_name, device_version, last_connect_time,
+        r#"SELECT device_id, network_code, ip, ip_type, client_type, device_name, device_version, last_connect_time,
            COALESCE(tx_bytes, 0) as tx_bytes, COALESCE(rx_bytes, 0) as rx_bytes
            FROM devices WHERE network_code = ? AND device_id = ?"#,
     )
@@ -477,6 +501,7 @@ pub async fn get_device(
             network_code: row.get("network_code"),
             ip: row.get("ip"),
             ip_type: DeviceIpType::from_i32(row.get("ip_type")),
+            client_type: ClientType::from_i32(row.get("client_type")),
             device_name: row.get("device_name"),
             device_version: row.get("device_version"),
             last_connect_time: row.get("last_connect_time"),
@@ -493,7 +518,7 @@ pub async fn load_all_devices(network_code: &str) -> anyhow::Result<Vec<DeviceRe
     };
 
     let records: Vec<DeviceRecord> = sqlx::query(
-        r#"SELECT device_id, network_code, ip, ip_type, device_name, device_version, last_connect_time,
+        r#"SELECT device_id, network_code, ip, ip_type, client_type, device_name, device_version, last_connect_time,
            COALESCE(tx_bytes, 0) as tx_bytes, COALESCE(rx_bytes, 0) as rx_bytes
            FROM devices WHERE network_code = ?"#,
     )
@@ -505,6 +530,7 @@ pub async fn load_all_devices(network_code: &str) -> anyhow::Result<Vec<DeviceRe
             network_code: row.try_get("network_code")?,
             ip: row.try_get("ip")?,
             ip_type: DeviceIpType::from_i32(row.try_get("ip_type")?),
+            client_type: ClientType::from_i32(row.try_get("client_type")?),
             device_name: row.try_get("device_name")?,
             device_version: row.try_get("device_version")?,
             last_connect_time: row.try_get("last_connect_time")?,

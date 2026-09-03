@@ -42,7 +42,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // 提前提取需要在 move 之后使用的字段
-    let need_peer_manager = !conf.peer_servers.is_empty() || conf.web_bind.is_some();
+    let need_peer_manager =
+        conf.server_quic_bind.is_some() || !conf.peer_servers.is_empty() || conf.web_bind.is_some();
     let peer_conf = PeerConf {
         persistence: conf.persistence,
         server_quic_bind: conf.server_quic_bind,
@@ -61,6 +62,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let web_bind = conf.web_bind;
+    let ikev2_config = conf.ikev2.clone();
     let username = conf.username.unwrap_or("admin".to_string());
     let password = conf.password.unwrap_or("admin".to_string());
 
@@ -76,6 +78,11 @@ async fn main() -> anyhow::Result<()> {
 
     if need_peer_manager {
         init_peer_manager(&peer_conf, &control_service).await;
+    }
+
+    if let Some(ikev2_config) = ikev2_config {
+        let ikev2 = server::ikev2::start(ikev2_config, control_service.clone()).await?;
+        control_service.set_ikev2_manager(ikev2);
     }
 
     if let Some(web_bind) = web_bind {

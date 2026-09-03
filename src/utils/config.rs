@@ -6,7 +6,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use toml_edit::{Array, DocumentMut, Item, Value};
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ConfigFile {
     pub tcp_bind: Option<SocketAddr>,
     pub quic_bind: Option<SocketAddr>,
@@ -28,6 +28,28 @@ pub struct ConfigFile {
     #[serde(default)]
     pub peer_servers: Vec<String>,
     pub server_token: Option<String>,
+    pub ikev2: Option<Ikev2Config>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Ikev2Config {
+    pub ike_bind: SocketAddr,
+    pub natt_bind: SocketAddr,
+    pub remote_id: String,
+    pub cert: Option<PathBuf>,
+    pub key: Option<PathBuf>,
+    #[serde(default)]
+    pub dns: Vec<Ipv4Addr>,
+    pub public_ip: Option<std::net::IpAddr>,
+    pub networks: Vec<Ikev2NetworkConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Ikev2NetworkConfig {
+    pub network_code: String,
+    pub psk: Option<String>,
+    #[serde(default)]
+    pub eap_users: HashMap<String, String>,
 }
 impl Default for ConfigFile {
     fn default() -> Self {
@@ -48,6 +70,7 @@ impl Default for ConfigFile {
             server_quic_bind: None,
             peer_servers: vec![],
             server_token: None,
+            ikev2: None,
         }
     }
 }
@@ -82,6 +105,62 @@ impl ConfigFile {
     fn validate(&self) -> anyhow::Result<()> {
         for network_code in self.white_list.iter().chain(self.custom_nets.keys()) {
             validate_network_code(network_code)?;
+        }
+        if let Some(ikev2) = &self.ikev2 {
+            ikev2.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl Ikev2Config {
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        if self.ike_bind == self.natt_bind {
+            anyhow::bail!("ikev2.ike_bind and ikev2.natt_bind must be different");
+        }
+        if self.remote_id.trim().is_empty() {
+            anyhow::bail!("ikev2.remote_id cannot be empty");
+        }
+        if self.networks.is_empty() {
+            anyhow::bail!("ikev2.networks cannot be empty");
+        }
+        let mut network_codes = HashSet::new();
+        let mut psks = HashSet::new();
+        let mut users = HashSet::new();
+        let mut has_eap = false;
+        for network in &self.networks {
+            validate_network_code(&network.network_code)?;
+            if !network_codes.insert(network.network_code.as_str()) {
+                anyhow::bail!("duplicate IKEv2 network_code '{}'", network.network_code);
+            }
+            let psk = network
+                .psk
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty());
+            if let Some(psk) = psk
+                && !psks.insert(psk)
+            {
+                anyhow::bail!("IKEv2 PSKs must be unique across networks");
+            }
+            for (user, password) in &network.eap_users {
+                if user.trim().is_empty() || password.is_empty() {
+                    anyhow::bail!("IKEv2 EAP username and password cannot be empty");
+                }
+                if !users.insert(user.as_str()) {
+                    anyhow::bail!("IKEv2 EAP usernames must be unique across networks");
+                }
+                has_eap = true;
+            }
+            if psk.is_none() && network.eap_users.is_empty() {
+                anyhow::bail!(
+                    "IKEv2 network '{}' must configure psk or eap_users",
+                    network.network_code
+                );
+            }
+        }
+        if has_eap && (self.cert.is_none() || self.key.is_none()) {
+            anyhow::bail!("IKEv2 EAP authentication requires ikev2.cert and ikev2.key");
         }
         Ok(())
     }
@@ -174,6 +253,21 @@ key = "key.pem"
 # 服务器验证码，用于服务器之间的身份验证
 # server_token = "your-secret-token"
 
+# IKEv2/IPsec 接入（可选；启用后通常需要管理员/root权限绑定 500/4500）
+# [ikev2]
+# ike_bind = "0.0.0.0:500"
+# natt_bind = "0.0.0.0:4500"
+# remote_id = "vpn.example.com"
+# public_ip = "203.0.113.10" # 可选；数据面始终使用 UDP/4500 NAT-T
+# cert = "ikev2-cert.pem"
+# key = "ikev2-key.pem"
+# dns = []
+#
+# [[ikev2.networks]]
+# network_code = "net1"
+# psk = "network-secret"
+# eap_users = { alice = "password1" }
+
 # 自定义虚拟网段 格式：网络编号 = "网段"
 [custom_nets]
 
@@ -249,5 +343,65 @@ lease_duration = 86400
             config.white_list,
             HashSet::from(["alpha".to_string(), "beta".to_string()])
         );
+    }
+
+    #[test]
+    fn ikev2_credentials_are_unique_and_eap_requires_certificate() {
+        let valid: ConfigFile = toml::from_str(
+            r#"
+network = "10.26.0.0/24"
+lease_duration = 86400
+[ikev2]
+ike_bind = "0.0.0.0:500"
+natt_bind = "0.0.0.0:4500"
+remote_id = "vpn.example.com"
+cert = "ike.pem"
+key = "ike.key"
+[[ikev2.networks]]
+network_code = "alpha"
+psk = "alpha-secret"
+eap_users = { alice = "password" }
+[[ikev2.networks]]
+network_code = "beta"
+psk = "beta-secret"
+"#,
+        )
+        .unwrap();
+        assert!(valid.validate().is_ok());
+
+        let duplicate: ConfigFile = toml::from_str(
+            r#"
+network = "10.26.0.0/24"
+lease_duration = 86400
+[ikev2]
+ike_bind = "0.0.0.0:500"
+natt_bind = "0.0.0.0:4500"
+remote_id = "vpn.example.com"
+[[ikev2.networks]]
+network_code = "alpha"
+psk = "same"
+[[ikev2.networks]]
+network_code = "beta"
+psk = "same"
+"#,
+        )
+        .unwrap();
+        assert!(duplicate.validate().is_err());
+
+        let missing_certificate: ConfigFile = toml::from_str(
+            r#"
+network = "10.26.0.0/24"
+lease_duration = 86400
+[ikev2]
+ike_bind = "0.0.0.0:500"
+natt_bind = "0.0.0.0:4500"
+remote_id = "vpn.example.com"
+[[ikev2.networks]]
+network_code = "alpha"
+eap_users = { alice = "password" }
+"#,
+        )
+        .unwrap();
+        assert!(missing_certificate.validate().is_err());
     }
 }

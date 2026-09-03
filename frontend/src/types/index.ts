@@ -30,6 +30,7 @@ export interface DeviceInfo {
   device_id: string
   device_name: string
   device_version: string
+  client_type: 'VNT' | 'IKEV2'
   ip: string | null
   current_ip: string | null
   ip_type: DeviceIpType | null

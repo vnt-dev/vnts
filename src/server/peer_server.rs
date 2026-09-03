@@ -128,6 +128,7 @@ pub struct IpRouteInfo {
     pub peer_info: Arc<PeerServerInfo>,
     pub client_latency_ms: u32,
     pub advertised_subnets: Vec<ipnet::Ipv4Net>,
+    pub client_type: crate::server::control_server::db::ClientType,
 }
 
 impl IpRouteInfo {
@@ -528,8 +529,36 @@ impl PeerServerManager {
             use crate::protocol::ip_packet_protocol::NetPacket;
             if let Ok(packet) = NetPacket::new(forward.data) {
                 let dest = Ipv4Addr::from(packet.dest_id());
+                if packet.msg_type().ok()
+                    == Some(crate::protocol::ip_packet_protocol::MsgType::Ikev2Relay)
+                {
+                    let Some(device) = state.get_device_entry_by_ip(dest) else {
+                        return;
+                    };
+                    let allowed = match device.client_type {
+                        crate::server::control_server::db::ClientType::Ikev2 => true,
+                        crate::server::control_server::db::ClientType::Vnt => {
+                            packet.is_gateway() && device.allow_ikev2
+                        }
+                    };
+                    let Some(ipv4) = pnet_packet::ipv4::Ipv4Packet::new(packet.payload()) else {
+                        return;
+                    };
+                    let header_length = ipv4.get_header_length() as usize * 4;
+                    if !allowed
+                        || ipv4.get_version() != 4
+                        || header_length < pnet_packet::ipv4::Ipv4Packet::minimum_packet_size()
+                        || ipv4.get_total_length() as usize != packet.payload().len()
+                        || ipv4.get_source() != Ipv4Addr::from(packet.src_id())
+                        || ipv4.get_destination() != dest
+                    {
+                        return;
+                    }
+                }
                 if let Some(sender) = state.sender_map().get(&dest) {
-                    _ = sender.try_send(Bytes::from(packet.into_buffer()));
+                    let data = Bytes::from(packet.into_buffer());
+                    state.record_rx_traffic(dest, data.len());
+                    _ = sender.try_send(data);
                     log::debug!("Forwarded data to local client: {}", dest);
                 }
             }
@@ -609,6 +638,15 @@ impl PeerServerManager {
                 let ip = Ipv4Addr::from(client.ip);
                 synced_ips.insert(ip);
 
+                let client_type = match client.client_type() {
+                    crate::protocol::server_message::ClientType::Ikev2 => {
+                        crate::server::control_server::db::ClientType::Ikev2
+                    }
+                    crate::protocol::server_message::ClientType::Vnt => {
+                        crate::server::control_server::db::ClientType::Vnt
+                    }
+                };
+
                 let mut advertised_subnets = client
                     .advertised_subnets
                     .into_iter()
@@ -621,6 +659,7 @@ impl PeerServerManager {
                     peer_info: peer_info.clone(),
                     client_latency_ms: client.latency_ms,
                     advertised_subnets,
+                    client_type,
                 };
 
                 ip_map
@@ -632,6 +671,7 @@ impl PeerServerManager {
                         {
                             existing.client_latency_ms = client.latency_ms;
                             existing.advertised_subnets = route_info.advertised_subnets.clone();
+                            existing.client_type = route_info.client_type;
                         } else {
                             routes.push(route_info.clone());
                         }
@@ -735,6 +775,15 @@ impl PeerServerManager {
                                             .collect()
                                     })
                                     .unwrap_or_default(),
+                                client_type: match state
+                                    .get_device_entry_by_ip(ip)
+                                    .map(|device| device.client_type)
+                                {
+                                    Some(crate::server::control_server::db::ClientType::Ikev2) => {
+                                        crate::protocol::server_message::ClientType::Ikev2 as i32
+                                    }
+                                    _ => crate::protocol::server_message::ClientType::Vnt as i32,
+                                },
                             }
                         })
                         .collect();
@@ -938,7 +987,13 @@ impl PeerServerManager {
     pub fn get_remote_devices(
         &self,
         network_code: &str,
-    ) -> Vec<(Ipv4Addr, String, u32, Vec<ipnet::Ipv4Net>)> {
+    ) -> Vec<(
+        Ipv4Addr,
+        String,
+        u32,
+        Vec<ipnet::Ipv4Net>,
+        crate::server::control_server::db::ClientType,
+    )> {
         let mut result = Vec::new();
 
         if let Some(network_routes) = self.ip_to_routes.get(network_code) {
@@ -956,12 +1011,45 @@ impl PeerServerManager {
                         server_addr,
                         total_latency,
                         route.advertised_subnets.clone(),
+                        route.client_type,
                     ));
                 }
             }
         }
 
         result
+    }
+
+    pub fn remote_client_type(
+        &self,
+        network_code: &str,
+        ip: Ipv4Addr,
+    ) -> Option<crate::server::control_server::db::ClientType> {
+        self.ip_to_routes
+            .get(network_code)?
+            .get(&ip)?
+            .iter()
+            .filter(|route| route.peer_info.is_connected())
+            .min_by_key(|route| route.total_latency())
+            .map(|route| route.client_type)
+    }
+
+    pub fn remote_online_ips(&self, network_code: &str) -> std::collections::HashSet<Ipv4Addr> {
+        self.ip_to_routes
+            .get(network_code)
+            .map(|routes| {
+                routes
+                    .iter()
+                    .filter(|entry| {
+                        entry
+                            .value()
+                            .iter()
+                            .any(|route| route.peer_info.is_connected())
+                    })
+                    .map(|entry| *entry.key())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// 通过 QUIC datagram 转发到指定 peer
@@ -1245,11 +1333,13 @@ mod tests {
                     peer_info: removed_peer.clone(),
                     client_latency_ms: 10,
                     advertised_subnets: Vec::new(),
+                    client_type: crate::server::control_server::db::ClientType::Vnt,
                 },
                 IpRouteInfo {
                     peer_info: retained_peer.clone(),
                     client_latency_ms: 20,
                     advertised_subnets: Vec::new(),
+                    client_type: crate::server::control_server::db::ClientType::Vnt,
                 },
             ],
         );
@@ -1274,6 +1364,7 @@ mod tests {
                 peer_info: removed_peer.clone(),
                 client_latency_ms: 10,
                 advertised_subnets: Vec::new(),
+                client_type: crate::server::control_server::db::ClientType::Vnt,
             }],
         );
         manager.ip_to_routes.insert("net-a".to_string(), routes);
@@ -1307,6 +1398,7 @@ mod tests {
                     server_id: 0,
                     registration_mode: RegistrationMode::Normal,
                     advertised_subnets: Vec::new(),
+                    allow_ikev2: false,
                 },
                 1,
                 client_tx,
@@ -1385,5 +1477,36 @@ mod tests {
 
         connection.close(0u32.into(), b"test complete");
         endpoint.close(0u32.into(), b"test complete");
+    }
+
+    #[tokio::test]
+    async fn peer_client_sync_preserves_ikev2_client_type() {
+        let manager = manager();
+        let peer = Arc::new(PeerServerInfo::new("127.0.0.1:40000".to_string(), true));
+        let mut network_codes = std::collections::HashSet::new();
+        let ip = Ipv4Addr::new(10, 44, 0, 9);
+        manager
+            .handle_client_info_response(
+                &peer,
+                &mut network_codes,
+                crate::protocol::server_message::ServerClientInfoResponse {
+                    networks: vec![crate::protocol::server_message::NetworkInfo {
+                        network_code: "ike-peer".to_string(),
+                        clients: vec![crate::protocol::server_message::ClientLatencyInfo {
+                            ip: ip.into(),
+                            latency_ms: 10,
+                            advertised_subnets: Vec::new(),
+                            client_type: crate::protocol::server_message::ClientType::Ikev2 as i32,
+                        }],
+                    }],
+                },
+            )
+            .await;
+        let routes = manager.ip_to_routes.get("ike-peer").unwrap();
+        let route = routes.get(&ip).unwrap();
+        assert_eq!(
+            route[0].client_type,
+            crate::server::control_server::db::ClientType::Ikev2
+        );
     }
 }

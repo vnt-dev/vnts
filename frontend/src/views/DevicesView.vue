@@ -230,7 +230,13 @@ async function executeDelete() {
                 <StatusBadge :status="group.hasOnline ? 'Online' : group.hasRemote ? 'Remote' : 'Offline'" />
               </td>
               <td class="px-4 py-3">
-                <div class="font-medium text-slate-900 dark:text-slate-100">{{ group.devices[0]?.device_name }}</div>
+                <div class="flex items-center gap-2 font-medium text-slate-900 dark:text-slate-100">
+                  <span>{{ group.devices[0]?.device_name }}</span>
+                  <span
+                    class="rounded px-1.5 py-0.5 text-[10px] font-semibold"
+                    :class="group.devices[0]?.client_type === 'IKEV2' ? 'bg-cyan-50 text-cyan-700 dark:bg-cyan-500/10 dark:text-cyan-300' : 'bg-slate-100 text-slate-500 dark:bg-slate-700 dark:text-slate-300'"
+                  >{{ group.devices[0]?.client_type || 'VNT' }}</span>
+                </div>
                 <div class="font-mono text-xs text-slate-400 dark:text-slate-500">{{ group.devices[0]?.device_id }}</div>
                 <div v-if="group.devices.length > 1" class="mt-0.5 text-xs text-blue-500 dark:text-blue-400">
                   {{ group.devices.length }} 个来源
@@ -343,6 +349,7 @@ async function executeDelete() {
                   {{ dev.server_addr }}
                 </span>
                 <span v-else class="text-xs font-medium text-emerald-600 dark:text-emerald-400">本地</span>
+                <span class="ml-2 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500 dark:bg-slate-700 dark:text-slate-300">{{ dev.client_type || 'VNT' }}</span>
               </td>
               <td class="px-4 py-3 text-xs text-slate-400 dark:text-slate-500">-</td>
               <td class="px-4 py-3">
