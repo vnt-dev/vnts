@@ -301,3 +301,16 @@ jobs:
           tag: ${{ github.ref }}
           overwrite: true
           file_glob: true
+
+  release-notes:
+    name: Add download links to release notes
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Update release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node .github/scripts/update-release-downloads.mjs
