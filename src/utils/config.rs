@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value};
+use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ConfigFile {
@@ -33,7 +33,6 @@ pub struct ConfigFile {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Ikev2Config {
-    #[serde(default = "default_true")]
     pub enabled: bool,
     pub ike_bind: SocketAddr,
     pub natt_bind: SocketAddr,
@@ -43,20 +42,6 @@ pub struct Ikev2Config {
     #[serde(default)]
     pub dns: Vec<Ipv4Addr>,
     pub public_ip: Option<std::net::IpAddr>,
-    #[serde(default)]
-    pub networks: Vec<Ikev2NetworkConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct Ikev2NetworkConfig {
-    pub network_code: String,
-    pub psk: Option<String>,
-    #[serde(default)]
-    pub eap_users: HashMap<String, String>,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 impl Default for Ikev2Config {
@@ -70,7 +55,6 @@ impl Default for Ikev2Config {
             key: None,
             dns: Vec::new(),
             public_ip: None,
-            networks: Vec::new(),
         }
     }
 }
@@ -146,39 +130,6 @@ impl Ikev2Config {
         }
         if self.cert.is_some() != self.key.is_some() {
             anyhow::bail!("ikev2.cert and ikev2.key must both be set or both be empty");
-        }
-        let mut network_codes = HashSet::new();
-        let mut psks = HashSet::new();
-        let mut users = HashSet::new();
-        for network in &self.networks {
-            validate_network_code(&network.network_code)?;
-            if !network_codes.insert(network.network_code.as_str()) {
-                anyhow::bail!("duplicate IKEv2 network_code '{}'", network.network_code);
-            }
-            let psk = network
-                .psk
-                .as_deref()
-                .map(str::trim)
-                .filter(|v| !v.is_empty());
-            if let Some(psk) = psk
-                && !psks.insert(psk)
-            {
-                anyhow::bail!("IKEv2 PSKs must be unique across networks");
-            }
-            for (user, password) in &network.eap_users {
-                if user.trim().is_empty() || password.is_empty() {
-                    anyhow::bail!("IKEv2 EAP username and password cannot be empty");
-                }
-                if !users.insert(user.as_str()) {
-                    anyhow::bail!("IKEv2 EAP usernames must be unique across networks");
-                }
-            }
-            if network.eap_users.is_empty() {
-                anyhow::bail!(
-                    "IKEv2 network '{}' must configure at least one EAP-MSCHAPv2 user",
-                    network.network_code
-                );
-            }
         }
         // When both paths are empty the web/startup preparation layer generates a
         // locally managed CA and server certificate before starting the responder.
@@ -259,85 +210,6 @@ pub fn load_ikev2_config(path: &Path) -> anyhow::Result<Option<Ikev2Config>> {
     Ok(ConfigFile::load_from(Some(path.to_path_buf()))?.ikev2)
 }
 
-#[cfg(test)]
-pub fn update_ikev2_network(
-    path: &Path,
-    network_code: &str,
-    network: Option<Ikev2NetworkConfig>,
-) -> anyhow::Result<Ikev2Config> {
-    validate_network_code(network_code)?;
-    if let Some(network) = &network
-        && network.network_code != network_code
-    {
-        anyhow::bail!("IKEv2 network_code does not match the request path");
-    }
-    let content = std::fs::read_to_string(path)?;
-    let mut document = content.parse::<DocumentMut>()?;
-    let ikev2 = document
-        .get_mut("ikev2")
-        .and_then(Item::as_table_mut)
-        .ok_or_else(|| anyhow::anyhow!("IKEv2 服务尚未在配置文件中启用"))?;
-    if !ikev2.contains_key("networks") {
-        ikev2.insert("networks", Item::ArrayOfTables(ArrayOfTables::new()));
-    }
-    let networks = ikev2
-        .get_mut("networks")
-        .and_then(Item::as_array_of_tables_mut)
-        .ok_or_else(|| anyhow::anyhow!("ikev2.networks 必须是表数组"))?;
-    let position = networks
-        .iter()
-        .position(|table| table.get("network_code").and_then(Item::as_str) == Some(network_code));
-
-    match network {
-        Some(network) => {
-            let mut new_table = Table::new();
-            let table = if let Some(position) = position {
-                networks
-                    .get_mut(position)
-                    .expect("position came from the same array")
-            } else {
-                &mut new_table
-            };
-            table.insert(
-                "network_code",
-                Item::Value(Value::from(network.network_code)),
-            );
-            match network.psk {
-                Some(psk) => {
-                    table.insert("psk", Item::Value(Value::from(psk)));
-                }
-                None => {
-                    table.remove("psk");
-                }
-            }
-            let mut users = InlineTable::new();
-            let mut entries = network.eap_users.into_iter().collect::<Vec<_>>();
-            entries.sort_by(|left, right| left.0.cmp(&right.0));
-            for (username, password) in entries {
-                users.insert(username, Value::from(password));
-            }
-            table.insert("eap_users", Item::Value(Value::InlineTable(users)));
-            if position.is_none() {
-                networks.push(new_table);
-            }
-        }
-        None => {
-            if let Some(position) = position {
-                networks.remove(position);
-            }
-        }
-    }
-
-    let rendered = document.to_string();
-    let parsed: ConfigFile = toml::from_str(&rendered)?;
-    parsed.validate()?;
-    let ikev2 = parsed
-        .ikev2
-        .ok_or_else(|| anyhow::anyhow!("IKEv2 服务尚未配置"))?;
-    persist_document(path, rendered)?;
-    Ok(ikev2)
-}
-
 pub fn update_ikev2_config(path: &Path, config: &Ikev2Config) -> anyhow::Result<Ikev2Config> {
     config.validate()?;
     let content = std::fs::read_to_string(path)?;
@@ -394,55 +266,7 @@ pub fn update_ikev2_config(path: &Path, config: &Ikev2Config) -> anyhow::Result<
     }
     insert_value(table, "dns", Value::Array(dns));
 
-    if !table.contains_key("networks") {
-        table.insert("networks", Item::ArrayOfTables(ArrayOfTables::new()));
-    }
-    let networks = table
-        .get_mut("networks")
-        .and_then(Item::as_array_of_tables_mut)
-        .ok_or_else(|| anyhow::anyhow!("ikev2.networks 必须是表数组"))?;
-    for index in (0..networks.len()).rev() {
-        let code = networks
-            .get(index)
-            .and_then(|table| table.get("network_code"))
-            .and_then(Item::as_str);
-        if !config
-            .networks
-            .iter()
-            .any(|network| Some(network.network_code.as_str()) == code)
-        {
-            networks.remove(index);
-        }
-    }
-    for network in &config.networks {
-        let position = networks.iter().position(|table| {
-            table.get("network_code").and_then(Item::as_str) == Some(network.network_code.as_str())
-        });
-        if position.is_none() {
-            networks.push(Table::new());
-        }
-        let index = position.unwrap_or(networks.len() - 1);
-        let network_table = networks
-            .get_mut(index)
-            .expect("network table was just located or inserted");
-        insert_value(
-            network_table,
-            "network_code",
-            Value::from(network.network_code.clone()),
-        );
-        if let Some(psk) = &network.psk {
-            insert_value(network_table, "psk", Value::from(psk.clone()));
-        } else {
-            network_table.remove("psk");
-        }
-        let mut users = InlineTable::new();
-        let mut entries = network.eap_users.iter().collect::<Vec<_>>();
-        entries.sort_by(|left, right| left.0.cmp(right.0));
-        for (username, password) in entries {
-            users.insert(username, Value::from(password.clone()));
-        }
-        insert_value(network_table, "eap_users", Value::InlineTable(users));
-    }
+    table.remove("networks");
 
     let rendered = document.to_string();
     let parsed: ConfigFile = toml::from_str(&rendered)?;
@@ -531,11 +355,6 @@ key = "key.pem"
 # key = "ikev2-key.pem"
 # dns = []
 #
-# [[ikev2.networks]]
-# network_code = "net1"
-# psk = "network-secret"
-# eap_users = { alice = "password1" }
-
 # 自定义虚拟网段 格式：网络编号 = "网段"
 [custom_nets]
 
@@ -548,10 +367,10 @@ key = "key.pem"
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigFile, Ikev2Config, Ikev2NetworkConfig, load_ikev2_config, update_ikev2_config,
-        update_ikev2_network, update_white_list, validate_network_code,
+        ConfigFile, Ikev2Config, load_ikev2_config, update_ikev2_config, update_white_list,
+        validate_network_code,
     };
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
 
     #[test]
     fn missing_white_list_and_custom_nets_use_empty_defaults() {
@@ -568,20 +387,7 @@ lease_duration = 86400
     }
 
     #[test]
-    fn ikev2_enabled_is_backward_compatible_and_disabled_drafts_allow_empty_identity() {
-        let legacy: ConfigFile = toml::from_str(
-            r#"
-network = "10.26.0.0/24"
-lease_duration = 86400
-[ikev2]
-ike_bind = "0.0.0.0:500"
-natt_bind = "0.0.0.0:4500"
-remote_id = "vpn.example.com"
-"#,
-        )
-        .unwrap();
-        assert!(legacy.ikev2.unwrap().enabled);
-
+    fn ikev2_disabled_drafts_allow_empty_identity() {
         let draft: ConfigFile = toml::from_str(
             r#"
 network = "10.26.0.0/24"
@@ -595,7 +401,6 @@ remote_id = ""
         )
         .unwrap();
         assert!(draft.validate().is_ok());
-        assert!(draft.ikev2.unwrap().networks.is_empty());
 
         let mut identity = Ikev2Config {
             enabled: true,
@@ -661,125 +466,20 @@ lease_duration = 86400
     }
 
     #[test]
-    fn ikev2_credentials_are_unique_and_empty_certificate_paths_enable_auto_generation() {
-        let valid: ConfigFile = toml::from_str(
+    fn ikev2_empty_certificate_paths_enable_auto_generation() {
+        let config: ConfigFile = toml::from_str(
             r#"
 network = "10.26.0.0/24"
 lease_duration = 86400
 [ikev2]
+enabled = true
 ike_bind = "0.0.0.0:500"
 natt_bind = "0.0.0.0:4500"
 remote_id = "vpn.example.com"
-cert = "ike.pem"
-key = "ike.key"
-[[ikev2.networks]]
-network_code = "alpha"
-psk = "alpha-secret"
-eap_users = { alice = "password" }
-[[ikev2.networks]]
-network_code = "beta"
-psk = "beta-secret"
-eap_users = { bob = "password" }
 "#,
         )
         .unwrap();
-        assert!(valid.validate().is_ok());
-
-        let duplicate: ConfigFile = toml::from_str(
-            r#"
-network = "10.26.0.0/24"
-lease_duration = 86400
-[ikev2]
-ike_bind = "0.0.0.0:500"
-natt_bind = "0.0.0.0:4500"
-remote_id = "vpn.example.com"
-[[ikev2.networks]]
-network_code = "alpha"
-psk = "same"
-eap_users = { alice = "password" }
-[[ikev2.networks]]
-network_code = "beta"
-psk = "same"
-eap_users = { bob = "password" }
-"#,
-        )
-        .unwrap();
-        assert!(duplicate.validate().is_err());
-
-        let missing_certificate: ConfigFile = toml::from_str(
-            r#"
-network = "10.26.0.0/24"
-lease_duration = 86400
-[ikev2]
-ike_bind = "0.0.0.0:500"
-natt_bind = "0.0.0.0:4500"
-remote_id = "vpn.example.com"
-[[ikev2.networks]]
-network_code = "alpha"
-eap_users = { alice = "password" }
-"#,
-        )
-        .unwrap();
-        assert!(missing_certificate.validate().is_ok());
-    }
-
-    #[test]
-    fn updating_ikev2_network_preserves_global_config_comments_and_other_networks() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("config.toml");
-        std::fs::write(
-            &path,
-            r#"# keep this root comment
-network = "10.26.0.0/24"
-lease_duration = 86400
-[ikev2]
-ike_bind = "0.0.0.0:500"
-natt_bind = "0.0.0.0:4500"
-remote_id = "vpn.example.com" # keep this ike comment
-cert = "ike.pem"
-key = "ike.key"
-[[ikev2.networks]]
-network_code = "alpha"
-psk = "old"
-eap_users = { alice = "old-password" }
-[[ikev2.networks]]
-network_code = "beta"
-psk = "beta-secret"
-eap_users = { bob = "password" }
-"#,
-        )
-        .unwrap();
-
-        update_ikev2_network(
-            &path,
-            "alpha",
-            Some(Ikev2NetworkConfig {
-                network_code: "alpha".to_string(),
-                psk: Some("new-secret".to_string()),
-                eap_users: HashMap::from([("alice".to_string(), "password".to_string())]),
-            }),
-        )
-        .unwrap();
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("# keep this root comment"));
-        assert!(content.contains("# keep this ike comment"));
-        let config = load_ikev2_config(&path).unwrap().unwrap();
-        assert_eq!(config.networks.len(), 2);
-        let alpha = config
-            .networks
-            .iter()
-            .find(|network| network.network_code == "alpha")
-            .unwrap();
-        assert_eq!(alpha.psk.as_deref(), Some("new-secret"));
-        assert_eq!(
-            alpha.eap_users.get("alice").map(String::as_str),
-            Some("password")
-        );
-
-        update_ikev2_network(&path, "alpha", None).unwrap();
-        let config = load_ikev2_config(&path).unwrap().unwrap();
-        assert_eq!(config.networks.len(), 1);
-        assert_eq!(config.networks[0].network_code, "beta");
+        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -797,33 +497,19 @@ ike_bind = "0.0.0.0:500" # bind comment
 natt_bind = "0.0.0.0:4500"
 remote_id = "old.example.com"
 future_global_option = "keep"
-[[ikev2.networks]]
-network_code = "alpha"
-psk = "old"
-eap_users = { alice = "old-password" }
-future_network_option = 42 # network comment
-[[ikev2.networks]]
-network_code = "beta"
-psk = "beta-secret"
-eap_users = { bob = "password" }
 "#,
         )
         .unwrap();
 
         let mut config = load_ikev2_config(&path).unwrap().unwrap();
         config.remote_id = "vpn.example.com".to_string();
-        config.networks[0].psk = Some("new-secret".to_string());
         update_ikev2_config(&path, &config).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("# root comment"));
         assert!(content.contains("# bind comment"));
         assert!(content.contains("future_global_option = \"keep\""));
-        assert!(content.contains("future_network_option = 42 # network comment"));
-        assert!(content.contains("network_code = \"beta\""));
         let updated = load_ikev2_config(&path).unwrap().unwrap();
         assert_eq!(updated.remote_id, "vpn.example.com");
-        assert_eq!(updated.networks[0].psk.as_deref(), Some("new-secret"));
-        assert_eq!(updated.networks[1].psk.as_deref(), Some("beta-secret"));
     }
 }

@@ -4,26 +4,30 @@ import {
   ChartLine,
   ChevronDown,
   ChevronRight,
+  Clipboard,
+  Eye,
+  EyeOff,
+  KeyRound,
   LoaderCircle,
   Pencil,
   Plus,
   Search,
-  ShieldCheck,
+  RefreshCw,
   Trash2,
 } from '@lucide/vue'
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ApiError } from '@/api/client'
-import { deviceApi } from '@/api/modules'
+import { deviceApi, networkApi } from '@/api/modules'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import BaseModal from '@/components/BaseModal.vue'
+import Ikev2AccessModal from '@/components/Ikev2AccessModal.vue'
 import LatencyBadge from '@/components/LatencyBadge.vue'
-import Ikev2Settings from '@/components/Ikev2Settings.vue'
 import SpeedChart from '@/components/SpeedChart.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import { useDeviceMonitor, type DeviceGroup } from '@/composables/useDeviceMonitor'
 import { useToast } from '@/composables/useToast'
-import type { DeviceInfo, DeviceIpType } from '@/types'
+import type { ClientType, DeviceInfo, DeviceIpType, NetworkInfo } from '@/types'
 import { formatBytes, formatSpeed } from '@/utils/format'
 
 const route = useRoute()
@@ -31,14 +35,29 @@ const router = useRouter()
 const toast = useToast()
 
 const networkCode = computed(() => (route.params.code as string | undefined) ?? '')
-const activeTab = computed(() => route.query.tab === 'ikev2' ? 'ikev2' : 'devices')
 const monitor = useDeviceMonitor()
-const { mergedDevices, loading, search } = monitor
+const { devices, mergedDevices, loading, search } = monitor
+const currentNetwork = ref<NetworkInfo | null>(null)
+
+async function loadCurrentNetwork(code: string) {
+  currentNetwork.value = null
+  try {
+    const networks = await networkApi.list()
+    if (networkCode.value === code) {
+      currentNetwork.value = networks.find((network) => network.network_code === code) ?? null
+    }
+  } catch {
+    // 设备列表仍可正常使用；此时仅无法给出可用 IP 示例。
+  }
+}
 
 watch(
   networkCode,
   (code) => {
-    if (code) void monitor.load(code)
+    if (code) {
+      void monitor.load(code)
+      void loadCurrentNetwork(code)
+    }
   },
   { immediate: true },
 )
@@ -52,10 +71,6 @@ function goBack() {
   router.push({ name: 'networks' })
 }
 
-function selectTab(tab: 'devices' | 'ikev2') {
-  router.replace({ name: 'devices', params: { code: networkCode.value }, query: tab === 'ikev2' ? { tab } : {} })
-}
-
 // ---------- 新增 / 编辑设备 ----------
 const showDeviceModal = ref(false)
 const editingDevice = ref<DeviceInfo | null>(null)
@@ -64,11 +79,108 @@ const deviceForm = ref({
   device_id: '',
   ip: '',
   ip_type: 'Dynamic' as DeviceIpType,
+  client_type: 'VNT' as ClientType,
+  ikev2_password: '',
 })
+const showIkev2Password = ref(false)
+
+function ipv4ToNumber(value: string) {
+  const parts = value.split('.')
+  if (parts.length !== 4) return null
+  const octets = parts.map(Number)
+  if (octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return null
+  return octets.reduce((result, octet) => result * 256 + octet, 0)
+}
+
+function numberToIpv4(value: number) {
+  return [
+    Math.floor(value / 16_777_216),
+    Math.floor(value / 65_536) % 256,
+    Math.floor(value / 256) % 256,
+    value % 256,
+  ].join('.')
+}
+
+const availableIpSuggestion = computed<string | null | undefined>(() => {
+  if (!currentNetwork.value || loading.value) return undefined
+  const [networkAddress, prefixText] = currentNetwork.value.net.split('/')
+  const address = ipv4ToNumber(networkAddress ?? '')
+  const prefix = Number(prefixText)
+  if (address === null || !Number.isInteger(prefix) || prefix < 0 || prefix > 30) return undefined
+
+  const blockSize = 2 ** (32 - prefix)
+  const networkStart = Math.floor(address / blockSize) * blockSize
+  const broadcast = networkStart + blockSize - 1
+  let candidate = networkStart + 1
+  const occupied = new Set<number>()
+  const reserve = (ip: string | null) => {
+    if (!ip) return
+    const value = ipv4ToNumber(ip)
+    if (value !== null && value > networkStart && value < broadcast) occupied.add(value)
+  }
+  reserve(currentNetwork.value.gateway)
+  for (const device of devices.value) {
+    reserve(device.ip)
+    reserve(device.current_ip)
+  }
+
+  for (const value of [...occupied].sort((left, right) => left - right)) {
+    if (value < candidate) continue
+    if (value > candidate) break
+    candidate += 1
+  }
+  return candidate < broadcast ? numberToIpv4(candidate) : null
+})
+
+const ipPlaceholder = computed(() => {
+  if (editingDevice.value) return '请输入 IP 地址'
+  if (availableIpSuggestion.value === undefined) return '正在计算可用 IP…'
+  return availableIpSuggestion.value ? `例如：${availableIpSuggestion.value}` : 'IP 已用尽'
+})
+
+function randomValue(length: number, alphabet: string) {
+  const limit = Math.floor(256 / alphabet.length) * alphabet.length
+  let value = ''
+  while (value.length < length) {
+    for (const byte of crypto.getRandomValues(new Uint8Array(length + 8))) {
+      if (byte < limit) value += alphabet[byte % alphabet.length]
+      if (value.length === length) break
+    }
+  }
+  return value
+}
+
+function generateDeviceId() {
+  const prefix = deviceForm.value.client_type === 'IKEV2' ? 'ikev2' : 'vnt'
+  deviceForm.value.device_id = `${prefix}-${randomValue(12, '0123456789abcdef')}`
+}
+
+function generatePassword() {
+  deviceForm.value.ikev2_password = randomValue(24, 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789-_')
+  showIkev2Password.value = true
+}
+
+function changeClientType() {
+  generateDeviceId()
+  if (deviceForm.value.client_type === 'IKEV2') {
+    generatePassword()
+  } else {
+    deviceForm.value.ikev2_password = ''
+    showIkev2Password.value = false
+  }
+}
+
+async function copyCredential(value: string) {
+  if (!value) return
+  await navigator.clipboard.writeText(value)
+  toast.success('已复制到剪贴板')
+}
 
 function openCreateDevice() {
   editingDevice.value = null
-  deviceForm.value = { device_id: '', ip: '', ip_type: 'Dynamic' }
+  deviceForm.value = { device_id: '', ip: '', ip_type: 'Dynamic', client_type: 'VNT', ikev2_password: '' }
+  generateDeviceId()
+  showIkev2Password.value = false
   showDeviceModal.value = true
 }
 
@@ -92,7 +204,10 @@ function openEditDevice(group: DeviceGroup) {
     device_id: device.device_id,
     ip: device.ip ?? '',
     ip_type: device.ip_type ?? 'Dynamic',
+    client_type: device.client_type,
+    ikev2_password: '',
   }
+  showIkev2Password.value = false
   showDeviceModal.value = true
 }
 
@@ -105,6 +220,9 @@ async function submitDevice() {
         network_code: networkCode.value,
         ip: deviceForm.value.ip,
         ip_type: deviceForm.value.ip_type,
+        ...(deviceForm.value.client_type === 'IKEV2' && deviceForm.value.ikev2_password
+          ? { ikev2_password: deviceForm.value.ikev2_password }
+          : {}),
       })
     } else {
       await deviceApi.add({
@@ -112,6 +230,10 @@ async function submitDevice() {
         device_id: deviceForm.value.device_id,
         ip: deviceForm.value.ip,
         ip_type: deviceForm.value.ip_type,
+        client_type: deviceForm.value.client_type,
+        ...(deviceForm.value.client_type === 'IKEV2'
+          ? { ikev2_password: deviceForm.value.ikev2_password }
+          : {}),
       })
     }
     showDeviceModal.value = false
@@ -122,6 +244,13 @@ async function submitDevice() {
   } finally {
     formSubmitting.value = false
   }
+}
+
+const accessDevice = ref<DeviceInfo | null>(null)
+
+function openIkev2Access(group: DeviceGroup) {
+  const device = localDevice(group)
+  if (device?.client_type === 'IKEV2') accessDevice.value = device
 }
 
 // ---------- 删除设备 ----------
@@ -171,7 +300,7 @@ async function executeDelete() {
           <p class="mt-0.5 font-mono text-sm text-slate-400 dark:text-slate-500">网络: {{ networkCode }}</p>
         </div>
       </div>
-      <div v-if="activeTab === 'devices'" class="flex w-full items-center gap-3 lg:w-auto">
+      <div class="flex w-full items-center gap-3 lg:w-auto">
         <div class="relative min-w-0 flex-1 lg:w-72">
           <Search :size="15" class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-500" />
           <input v-model="search" type="text" :class="searchInputClass" placeholder="搜索 IP 或设备 ID..." />
@@ -186,21 +315,12 @@ async function executeDelete() {
       </div>
     </div>
 
-    <div class="mb-5 flex gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm dark:border-slate-700 dark:bg-slate-800">
-      <button type="button" class="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition" :class="activeTab === 'devices' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-slate-700'" @click="selectTab('devices')">
-        <ChartLine :size="16" />设备列表
-      </button>
-      <button type="button" class="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition" :class="activeTab === 'ikev2' ? 'bg-cyan-600 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-slate-700'" @click="selectTab('ikev2')">
-        <ShieldCheck :size="16" />IKEv2 接入
-      </button>
-    </div>
-
     <!-- 设备表格 -->
-    <div v-if="activeTab === 'devices' && loading" class="flex justify-center bg-white py-20 shadow-sm dark:bg-slate-800">
+    <div v-if="loading" class="flex justify-center bg-white py-20 shadow-sm dark:bg-slate-800">
       <LoaderCircle :size="28" class="animate-spin text-blue-500" />
     </div>
 
-    <div v-else-if="activeTab === 'devices'" class="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-800">
+    <div v-else class="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-800">
       <table class="w-full min-w-[1360px] text-left text-sm">
         <thead>
           <tr class="border-b border-slate-100 bg-slate-50/80 text-xs text-slate-500 dark:border-slate-700 dark:bg-slate-800/80 dark:text-slate-400">
@@ -322,6 +442,14 @@ async function executeDelete() {
                     <Pencil :size="15" />
                   </button>
                   <button
+                    v-if="localDevice(group)?.client_type === 'IKEV2'"
+                    class="flex h-7 w-7 items-center justify-center rounded-lg text-cyan-500 transition hover:bg-cyan-50 hover:text-cyan-700 dark:hover:bg-cyan-500/10 dark:hover:text-cyan-300"
+                    title="IKEv2 接入说明"
+                    @click="openIkev2Access(group)"
+                  >
+                    <KeyRound :size="15" />
+                  </button>
+                  <button
                     v-if="group.canDelete"
                     class="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition hover:bg-red-50 hover:text-red-600 dark:text-slate-500 dark:hover:bg-red-500/10 dark:hover:text-red-400"
                     title="删除设备"
@@ -408,8 +536,6 @@ async function executeDelete() {
       </table>
     </div>
 
-    <Ikev2Settings v-else :network-code="networkCode" />
-
     <BaseModal
       :open="showDeviceModal"
       :title="editingDevice ? '编辑设备' : '新增设备'"
@@ -417,19 +543,35 @@ async function executeDelete() {
     >
       <form class="space-y-4" @submit.prevent="submitDevice">
         <div>
-          <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">设备 ID</label>
-          <input
-            v-model.trim="deviceForm.device_id"
-            type="text"
-            :class="inputClass"
-            :disabled="Boolean(editingDevice)"
-            maxlength="64"
-            required
-          />
+          <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">设备类型</label>
+          <select v-model="deviceForm.client_type" :class="inputClass" :disabled="Boolean(editingDevice)" @change="changeClientType">
+            <option value="VNT">VNT</option>
+            <option value="IKEV2">IKEv2</option>
+          </select>
+          <p v-if="editingDevice" class="mt-1.5 text-xs text-slate-400">设备创建后不能修改类型。</p>
+        </div>
+        <div>
+          <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">{{ deviceForm.client_type === 'IKEV2' ? '用户名（设备 ID）' : '设备 ID' }}</label>
+          <div class="flex gap-2">
+            <input v-model.trim="deviceForm.device_id" type="text" :class="inputClass" :disabled="Boolean(editingDevice)" :maxlength="deviceForm.client_type === 'IKEV2' ? 48 : 64" required />
+            <button v-if="!editingDevice" type="button" class="rounded-lg border border-slate-200 px-3 text-slate-500 hover:text-cyan-600 dark:border-slate-600" :title="deviceForm.client_type === 'IKEV2' ? '重新生成用户名' : '重新生成设备 ID'" @click="generateDeviceId"><RefreshCw :size="15" /></button>
+            <button v-if="!editingDevice" type="button" class="rounded-lg border border-slate-200 px-3 text-slate-500 hover:text-cyan-600 dark:border-slate-600" :title="deviceForm.client_type === 'IKEV2' ? '复制用户名' : '复制设备 ID'" @click="copyCredential(deviceForm.device_id)"><Clipboard :size="15" /></button>
+          </div>
+        </div>
+        <div v-if="deviceForm.client_type === 'IKEV2'">
+          <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">{{ editingDevice ? '重置密码' : '密码' }}</label>
+          <div class="flex gap-2">
+            <div class="relative min-w-0 flex-1">
+              <input v-model="deviceForm.ikev2_password" :type="showIkev2Password ? 'text' : 'password'" :class="inputClass" :placeholder="editingDevice ? '留空表示保留当前密码' : ''" :required="!editingDevice" />
+              <button type="button" class="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-cyan-600" title="显示或隐藏密码" @click="showIkev2Password = !showIkev2Password"><EyeOff v-if="showIkev2Password" :size="16" /><Eye v-else :size="16" /></button>
+            </div>
+            <button type="button" class="rounded-lg border border-slate-200 px-3 text-slate-500 hover:text-cyan-600 dark:border-slate-600" title="生成新密码" @click="generatePassword"><RefreshCw :size="15" /></button>
+            <button type="button" class="rounded-lg border border-slate-200 px-3 text-slate-500 hover:text-cyan-600 dark:border-slate-600" title="复制密码" :disabled="!deviceForm.ikev2_password" @click="copyCredential(deviceForm.ikev2_password)"><Clipboard :size="15" /></button>
+          </div>
         </div>
         <div>
           <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">IP 地址</label>
-          <input v-model.trim="deviceForm.ip" type="text" :class="inputClass" placeholder="如: 10.26.0.2" required />
+          <input v-model.trim="deviceForm.ip" type="text" :class="inputClass" :placeholder="ipPlaceholder" required />
         </div>
         <div>
           <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">IP 类型</label>
@@ -459,6 +601,13 @@ async function executeDelete() {
         </div>
       </form>
     </BaseModal>
+
+    <Ikev2AccessModal
+      :open="Boolean(accessDevice)"
+      :network-code="networkCode"
+      :device-id="accessDevice?.device_id ?? ''"
+      @close="accessDevice = null"
+    />
 
     <!-- 删除确认 -->
     <ConfirmDialog

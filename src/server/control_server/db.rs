@@ -138,6 +138,7 @@ pub struct DeviceRecord {
     pub ip: Option<String>,
     pub ip_type: DeviceIpType,
     pub client_type: ClientType,
+    pub ikev2_password: Option<String>,
     pub device_name: String,
     pub device_version: String,
     pub last_connect_time: i64,
@@ -196,6 +197,7 @@ pub async fn init_db_pool() -> anyhow::Result<()> {
             ip TEXT,
             ip_type INTEGER NOT NULL DEFAULT 0,
             client_type INTEGER NOT NULL DEFAULT 0,
+            ikev2_password TEXT,
             device_name TEXT NOT NULL,
             device_version TEXT NOT NULL,
             last_connect_time INTEGER NOT NULL,
@@ -214,6 +216,9 @@ pub async fn init_db_pool() -> anyhow::Result<()> {
     let _ = sqlx::query("ALTER TABLE devices ADD COLUMN client_type INTEGER NOT NULL DEFAULT 0")
         .execute(&pool)
         .await;
+    let _ = sqlx::query("ALTER TABLE devices ADD COLUMN ikev2_password TEXT")
+        .execute(&pool)
+        .await;
 
     sqlx::query(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_network_ip_unique
@@ -222,6 +227,14 @@ pub async fn init_db_pool() -> anyhow::Result<()> {
     .execute(&pool)
     .await
     .context("Failed to enforce unique device IPs; check existing duplicate IP records")?;
+
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_ikev2_username_unique
+         ON devices(device_id) WHERE client_type = 1",
+    )
+    .execute(&pool)
+    .await
+    .context("Failed to enforce globally unique IKEv2 usernames")?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS peer_servers (
@@ -430,12 +443,13 @@ pub async fn save_or_update_device(device: &DeviceRecord) -> anyhow::Result<()> 
     };
 
     sqlx::query(
-        r#"INSERT INTO devices (device_id, network_code, ip, ip_type, client_type, device_name, device_version, last_connect_time, tx_bytes, rx_bytes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        r#"INSERT INTO devices (device_id, network_code, ip, ip_type, client_type, ikev2_password, device_name, device_version, last_connect_time, tx_bytes, rx_bytes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(device_id, network_code) DO UPDATE SET
                ip = excluded.ip,
                ip_type = excluded.ip_type,
                client_type = excluded.client_type,
+               ikev2_password = excluded.ikev2_password,
                device_name = excluded.device_name,
                device_version = excluded.device_version,
                last_connect_time = excluded.last_connect_time,
@@ -447,6 +461,7 @@ pub async fn save_or_update_device(device: &DeviceRecord) -> anyhow::Result<()> 
     .bind(&device.ip)
     .bind(device.ip_type as i32)
     .bind(device.client_type as i32)
+    .bind(&device.ikev2_password)
     .bind(&device.device_name)
     .bind(&device.device_version)
     .bind(device.last_connect_time)
@@ -485,7 +500,7 @@ pub async fn get_device(
     };
 
     let row_option = sqlx::query(
-        r#"SELECT device_id, network_code, ip, ip_type, client_type, device_name, device_version, last_connect_time,
+        r#"SELECT device_id, network_code, ip, ip_type, client_type, ikev2_password, device_name, device_version, last_connect_time,
            COALESCE(tx_bytes, 0) as tx_bytes, COALESCE(rx_bytes, 0) as rx_bytes
            FROM devices WHERE network_code = ? AND device_id = ?"#,
     )
@@ -502,6 +517,7 @@ pub async fn get_device(
             ip: row.get("ip"),
             ip_type: DeviceIpType::from_i32(row.get("ip_type")),
             client_type: ClientType::from_i32(row.get("client_type")),
+            ikev2_password: row.get("ikev2_password"),
             device_name: row.get("device_name"),
             device_version: row.get("device_version"),
             last_connect_time: row.get("last_connect_time"),
@@ -518,7 +534,7 @@ pub async fn load_all_devices(network_code: &str) -> anyhow::Result<Vec<DeviceRe
     };
 
     let records: Vec<DeviceRecord> = sqlx::query(
-        r#"SELECT device_id, network_code, ip, ip_type, client_type, device_name, device_version, last_connect_time,
+        r#"SELECT device_id, network_code, ip, ip_type, client_type, ikev2_password, device_name, device_version, last_connect_time,
            COALESCE(tx_bytes, 0) as tx_bytes, COALESCE(rx_bytes, 0) as rx_bytes
            FROM devices WHERE network_code = ?"#,
     )
@@ -531,6 +547,7 @@ pub async fn load_all_devices(network_code: &str) -> anyhow::Result<Vec<DeviceRe
             ip: row.try_get("ip")?,
             ip_type: DeviceIpType::from_i32(row.try_get("ip_type")?),
             client_type: ClientType::from_i32(row.try_get("client_type")?),
+            ikev2_password: row.try_get("ikev2_password")?,
             device_name: row.try_get("device_name")?,
             device_version: row.try_get("device_version")?,
             last_connect_time: row.try_get("last_connect_time")?,
@@ -543,6 +560,38 @@ pub async fn load_all_devices(network_code: &str) -> anyhow::Result<Vec<DeviceRe
     .context("Failed to load all devices")?;
 
     Ok(records)
+}
+
+pub async fn load_all_ikev2_devices() -> anyhow::Result<Vec<DeviceRecord>> {
+    let Some(pool) = DB_POOL.get() else {
+        return Ok(Vec::new());
+    };
+    let rows = sqlx::query(
+        r#"SELECT device_id, network_code, ip, ip_type, client_type, ikev2_password, device_name, device_version, last_connect_time,
+           COALESCE(tx_bytes, 0) as tx_bytes, COALESCE(rx_bytes, 0) as rx_bytes
+           FROM devices WHERE client_type = 1"#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("Failed to load IKEv2 devices")?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(DeviceRecord {
+                device_id: row.try_get("device_id")?,
+                network_code: row.try_get("network_code")?,
+                ip: row.try_get("ip")?,
+                ip_type: DeviceIpType::from_i32(row.try_get("ip_type")?),
+                client_type: ClientType::from_i32(row.try_get("client_type")?),
+                ikev2_password: row.try_get("ikev2_password")?,
+                device_name: row.try_get("device_name")?,
+                device_version: row.try_get("device_version")?,
+                last_connect_time: row.try_get("last_connect_time")?,
+                tx_bytes: row.try_get("tx_bytes")?,
+                rx_bytes: row.try_get("rx_bytes")?,
+            })
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()
+        .context("Failed to decode IKEv2 devices")
 }
 
 pub async fn delete_device(network_code: &str, device_id: &str) -> anyhow::Result<bool> {

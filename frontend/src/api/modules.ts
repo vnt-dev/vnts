@@ -3,16 +3,14 @@ import type {
   CreateNetworkPayload,
   CreateDevicePayload,
   DeviceInfo,
-  Ikev2Secrets,
+  DeviceIkev2AccessInfo,
   LoginResult,
   NetworkInfo,
-  NetworkIkev2Info,
   NetworkWhitelistSettings,
   PeerServersResponse,
   Ikev2ServiceInfo,
   UpdateIkev2ServicePayload,
   UpdateNetworkPayload,
-  UpdateNetworkIkev2Payload,
   UpdateDevicePayload,
 } from '@/types'
 
@@ -36,17 +34,6 @@ export const networkApi = {
     request<boolean>(`/networks/${encodeURIComponent(code)}`, { method: 'PUT', body: payload }),
   remove: (code: string) =>
     request<boolean>(`/networks/${encodeURIComponent(code)}`, { method: 'DELETE' }),
-  getIkev2: (code: string) =>
-    request<NetworkIkev2Info>(`/networks/${encodeURIComponent(code)}/ikev2`),
-  updateIkev2: (code: string, payload: UpdateNetworkIkev2Payload) =>
-    request<NetworkIkev2Info>(`/networks/${encodeURIComponent(code)}/ikev2`, {
-      method: 'PUT',
-      body: payload,
-    }),
-  getIkev2Secrets: (code: string) =>
-    request<Ikev2Secrets>(`/networks/${encodeURIComponent(code)}/ikev2/secrets`),
-  downloadCaCertificate: (format: 'der' | 'pem' = 'der') =>
-    downloadFile(`/ikev2/ca-certificate?format=${format}`, `vnt-ikev2-ca.${format === 'der' ? 'cer' : 'pem'}`),
 }
 
 export const deviceApi = {
@@ -67,6 +54,10 @@ export const deviceApi = {
     request<boolean>(
       `/devices?code=${encodeURIComponent(code)}&device_id=${encodeURIComponent(deviceId)}`,
       { method: 'DELETE' },
+    ),
+  getIkev2Access: (code: string, deviceId: string) =>
+    request<DeviceIkev2AccessInfo>(
+      `/networks/${encodeURIComponent(code)}/devices/${encodeURIComponent(deviceId)}/ikev2-access`,
     ),
 }
 

@@ -38,6 +38,12 @@ pub struct NetworkConfig {
     pub network_type: NetworkType,
 }
 
+#[derive(Clone, Copy)]
+enum DeviceMutation {
+    Create(ClientType),
+    Update,
+}
+
 fn validate_gateway(net: Ipv4Net, gateway: Ipv4Addr) -> anyhow::Result<()> {
     if net.prefix_len() > 30 {
         bail!("掩码 /{} 没有足够的可用主机地址", net.prefix_len());
@@ -81,6 +87,7 @@ pub struct ControlService {
     network_state_provider: NetworkStateProvider,
     network_init_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     device_mutation_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    ikev2_device_mutation_lock: Arc<tokio::sync::Mutex<()>>,
     peer_manager: Arc<RwLock<Option<Arc<crate::server::peer_server::PeerServerManager>>>>,
     ikev2_manager: Arc<RwLock<Option<crate::server::ikev2::Ikev2Handle>>>,
     ikev2_runtime_error: Arc<RwLock<Option<String>>>,
@@ -110,6 +117,7 @@ impl ControlService {
             network_state_provider: NetworkStateProvider::new(network_states),
             network_init_locks: Arc::new(DashMap::new()),
             device_mutation_locks: Arc::new(DashMap::new()),
+            ikev2_device_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             peer_manager: Arc::new(RwLock::new(None)),
             ikev2_manager: Arc::new(RwLock::new(None)),
             ikev2_runtime_error: Arc::new(RwLock::new(None)),
@@ -235,14 +243,14 @@ impl ControlService {
         reg_req: RegRequestMsg,
         sender: Sender<Bytes>,
     ) -> anyhow::Result<Session> {
-        self.register_inner(reg_req, sender, false).await
+        self.register_inner(reg_req, sender, ClientType::Vnt).await
     }
 
     async fn register_inner(
         &self,
         reg_req: RegRequestMsg,
         sender: Sender<Bytes>,
-        allow_new_private_device: bool,
+        client_type: ClientType,
     ) -> anyhow::Result<Session> {
         reg_req.check()?;
         let network_code = reg_req.network_code.clone();
@@ -272,8 +280,19 @@ impl ControlService {
             .get_or_create_network_state(reg_req.network_code.clone(), config)
             .await;
 
+        let existing = state.get_device_entry(&reg_req.device_id);
+        if existing
+            .as_ref()
+            .is_some_and(|entry| entry.client_type != client_type)
+        {
+            bail!("设备 ID '{}' 已被其他设备类型占用", reg_req.device_id);
+        }
+        if client_type == ClientType::Ikev2 && existing.is_none() {
+            bail!("IKEv2 设备 '{}' 未由管理员预先创建", reg_req.device_id);
+        }
+
         if config.network_type == NetworkType::Private
-            && !allow_new_private_device
+            && client_type == ClientType::Vnt
             && !state.has_device(&reg_req.device_id)
         {
             bail!("私有网络仅允许已添加的设备连接");
@@ -284,7 +303,7 @@ impl ControlService {
             let device_id = reg_req.device_id.clone();
 
             let (ip, _old_ip, entry) =
-                match state.allocate_ip_and_get_entry(reg_req, random_id, sender) {
+                match state.allocate_ip_and_get_entry_as(reg_req, random_id, sender, client_type) {
                     Ok(rs) => rs,
                     Err(e) => {
                         log::warn!("network_code={network_code},device_id={device_id},e={e:?}");
@@ -374,16 +393,8 @@ impl ControlService {
             advertised_subnets: Vec::new(),
             allow_ikev2: true,
         };
-        let session = self.register_inner(request, sender, true).await?;
-        let record = session.network_state.set_session_client_type(
-            &session.device_id,
-            session.ip,
-            session.random_id,
-            ClientType::Ikev2,
-            true,
-        )?;
-        db::save_or_update_device(&record).await?;
-        Ok(session)
+        self.register_inner(request, sender, ClientType::Ikev2)
+            .await
     }
 
     fn network_config(
@@ -735,7 +746,8 @@ impl ControlService {
         device_id: &str,
         ip: Ipv4Addr,
         ip_type: DeviceIpType,
-        create: bool,
+        ikev2_password: Option<String>,
+        mutation: DeviceMutation,
     ) -> anyhow::Result<()> {
         if device_id.is_empty()
             || device_id.trim() != device_id
@@ -743,9 +755,7 @@ impl ControlService {
         {
             bail!("无效的设备 ID");
         }
-        if !create && let Some(manager) = self.get_ikev2_manager() {
-            manager.disconnect_device(network_code, device_id).await;
-        }
+        let _ikev2_guard = self.ikev2_device_mutation_lock.lock().await;
         let mutation_lock = self
             .device_mutation_locks
             .entry(network_code.to_string())
@@ -764,14 +774,59 @@ impl ControlService {
             .get_or_create_network_state(network_code.to_string(), config)
             .await;
 
-        if create && state.has_device(device_id) {
+        if matches!(mutation, DeviceMutation::Create(_)) && state.has_device(device_id) {
             bail!("设备 ID '{}' 已存在", device_id);
         }
-        if !create && !state.has_device(device_id) {
+        if matches!(mutation, DeviceMutation::Update) && !state.has_device(device_id) {
             bail!("设备 ID '{}' 不存在", device_id);
         }
 
-        let previous = state.upsert_device_config(device_id, ip, ip_type)?;
+        let existing = state.get_device_entry(device_id);
+        let client_type = match mutation {
+            DeviceMutation::Create(client_type) => client_type,
+            DeviceMutation::Update => existing
+                .as_ref()
+                .map(|entry| entry.client_type)
+                .context("设备不存在")?,
+        };
+        let password = match client_type {
+            ClientType::Vnt => {
+                if ikev2_password.is_some() {
+                    bail!("VNT 设备不能配置 IKEv2 密码");
+                }
+                None
+            }
+            ClientType::Ikev2 => {
+                if device_id.len() > 48 {
+                    bail!("IKEv2 用户名长度必须为 1..=48 字节");
+                }
+                let password = ikev2_password.or_else(|| {
+                    existing
+                        .as_ref()
+                        .and_then(|entry| entry.ikev2_password.clone())
+                });
+                if password.as_ref().is_none_or(String::is_empty) {
+                    bail!("IKEv2 密码不能为空");
+                }
+                if matches!(mutation, DeviceMutation::Create(_))
+                    && self.ikev2_username_exists(device_id).await?
+                {
+                    bail!("IKEv2 用户名 '{}' 已存在", device_id);
+                }
+                password
+            }
+        };
+
+        if matches!(mutation, DeviceMutation::Update)
+            && existing
+                .as_ref()
+                .is_some_and(|entry| entry.client_type == ClientType::Ikev2)
+            && let Some(manager) = self.get_ikev2_manager()
+        {
+            manager.disconnect_device(network_code, device_id).await;
+        }
+
+        let previous = state.upsert_device_config(device_id, ip, ip_type, client_type, password)?;
         let record = state
             .get_device_entry(device_id)
             .ok_or_else(|| anyhow::anyhow!("设备状态更新失败"))?
@@ -780,9 +835,33 @@ impl ControlService {
             state.restore_device_config(device_id, previous);
             return Err(error);
         }
+        if client_type == ClientType::Ikev2 {
+            self.refresh_ikev2_credentials().await;
+        }
         Ok(())
     }
 
+    pub async fn add_device_typed(
+        &self,
+        network_code: &str,
+        device_id: &str,
+        ip: Ipv4Addr,
+        ip_type: DeviceIpType,
+        client_type: ClientType,
+        ikev2_password: Option<String>,
+    ) -> anyhow::Result<()> {
+        self.upsert_device(
+            network_code,
+            device_id,
+            ip,
+            ip_type,
+            ikev2_password,
+            DeviceMutation::Create(client_type),
+        )
+        .await
+    }
+
+    #[cfg(test)]
     pub async fn add_device(
         &self,
         network_code: &str,
@@ -790,10 +869,30 @@ impl ControlService {
         ip: Ipv4Addr,
         ip_type: DeviceIpType,
     ) -> anyhow::Result<()> {
-        self.upsert_device(network_code, device_id, ip, ip_type, true)
+        self.add_device_typed(network_code, device_id, ip, ip_type, ClientType::Vnt, None)
             .await
     }
 
+    pub async fn update_device_with_password(
+        &self,
+        network_code: &str,
+        device_id: &str,
+        ip: Ipv4Addr,
+        ip_type: DeviceIpType,
+        ikev2_password: Option<String>,
+    ) -> anyhow::Result<()> {
+        self.upsert_device(
+            network_code,
+            device_id,
+            ip,
+            ip_type,
+            ikev2_password,
+            DeviceMutation::Update,
+        )
+        .await
+    }
+
+    #[cfg(test)]
     pub async fn update_device(
         &self,
         network_code: &str,
@@ -801,8 +900,71 @@ impl ControlService {
         ip: Ipv4Addr,
         ip_type: DeviceIpType,
     ) -> anyhow::Result<()> {
-        self.upsert_device(network_code, device_id, ip, ip_type, false)
+        self.update_device_with_password(network_code, device_id, ip, ip_type, None)
             .await
+    }
+
+    async fn ikev2_username_exists(&self, username: &str) -> anyhow::Result<bool> {
+        if db::load_all_ikev2_devices()
+            .await?
+            .iter()
+            .any(|device| device.device_id == username)
+        {
+            return Ok(true);
+        }
+        Ok(self.network_state_provider.iter().any(|network| {
+            network
+                .value()
+                .get_device_entry(username)
+                .is_some_and(|device| device.client_type == ClientType::Ikev2)
+        }))
+    }
+
+    pub async fn ikev2_credentials(&self) -> anyhow::Result<HashMap<String, (String, String)>> {
+        let mut credentials = HashMap::new();
+        for device in db::load_all_ikev2_devices().await? {
+            if let Some(password) = device.ikev2_password {
+                credentials.insert(device.device_id, (device.network_code, password));
+            }
+        }
+        for network in self.network_state_provider.iter() {
+            let network_code = network.key().clone();
+            for (username, password) in network.value().ikev2_credentials() {
+                credentials.insert(username, (network_code.clone(), password));
+            }
+        }
+        Ok(credentials)
+    }
+
+    async fn refresh_ikev2_credentials(&self) {
+        let Some(manager) = self.get_ikev2_manager() else {
+            return;
+        };
+        match self.ikev2_credentials().await {
+            Ok(credentials) => {
+                if let Err(error) = manager.reload_credentials(credentials).await {
+                    log::error!("刷新 IKEv2 设备凭据失败: {error:#}");
+                    self.set_ikev2_runtime_error(Some(error.to_string()));
+                }
+            }
+            Err(error) => {
+                log::error!("读取 IKEv2 设备凭据失败: {error:#}");
+                self.set_ikev2_runtime_error(Some(error.to_string()));
+            }
+        }
+    }
+
+    pub async fn get_device_record(
+        &self,
+        network_code: &str,
+        device_id: &str,
+    ) -> anyhow::Result<Option<db::DeviceRecord>> {
+        if let Some(state) = self.network_state_provider.get(network_code)
+            && let Some(entry) = state.get_device_entry(device_id)
+        {
+            return Ok(Some(entry.to_record(network_code)));
+        }
+        db::get_device(network_code, device_id).await
     }
 
     pub async fn fast_register(
@@ -827,6 +989,11 @@ impl ControlService {
     }
 
     pub async fn delete_device(&self, network_code: &str, device_id: &str) -> anyhow::Result<()> {
+        let _ikev2_guard = self.ikev2_device_mutation_lock.lock().await;
+        let was_ikev2 = self
+            .get_device_record(network_code, device_id)
+            .await?
+            .is_some_and(|device| device.client_type == ClientType::Ikev2);
         if let Some(manager) = self.get_ikev2_manager() {
             manager.disconnect_device(network_code, device_id).await;
         }
@@ -844,6 +1011,10 @@ impl ControlService {
         }
 
         db::delete_device(network_code, device_id).await?;
+
+        if was_ikev2 {
+            self.refresh_ikev2_credentials().await;
+        }
 
         Ok(())
     }
@@ -1205,7 +1376,7 @@ mod tests {
         ControlService, NetworkConfig, first_usable_ip, network_counts, network_from_gateway,
     };
     use crate::protocol::control_message::{RegRequestMsg, RegistrationMode};
-    use crate::server::control_server::db::{DeviceIpType, NetworkSource, NetworkType};
+    use crate::server::control_server::db::{ClientType, DeviceIpType, NetworkSource, NetworkType};
     use ipnet::Ipv4Net;
     use std::collections::{HashMap, HashSet};
     use std::net::Ipv4Addr;
@@ -1834,6 +2005,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ikev2_devices_are_precreated_unique_and_protected_from_vnt_registration() {
+        let service = ControlService::new(
+            "10.92.0.0/24".parse().unwrap(),
+            HashMap::from([
+                ("ike-a".to_string(), "10.92.0.0/24".parse().unwrap()),
+                ("ike-b".to_string(), "10.93.0.0/24".parse().unwrap()),
+            ]),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            service
+                .add_device_typed(
+                    "ike-a",
+                    "missing-password",
+                    "10.92.0.8".parse().unwrap(),
+                    DeviceIpType::Fixed,
+                    ClientType::Ikev2,
+                    None,
+                )
+                .await
+                .is_err()
+        );
+        service
+            .add_device_typed(
+                "ike-a",
+                "alice",
+                "10.92.0.8".parse().unwrap(),
+                DeviceIpType::Fixed,
+                ClientType::Ikev2,
+                Some("old-password".to_string()),
+            )
+            .await
+            .unwrap();
+        assert!(
+            service
+                .add_device_typed(
+                    "ike-b",
+                    "alice",
+                    "10.93.0.8".parse().unwrap(),
+                    DeviceIpType::Fixed,
+                    ClientType::Ikev2,
+                    Some("other-password".to_string()),
+                )
+                .await
+                .is_err()
+        );
+
+        let (sender, _) = mpsc::channel(8);
+        assert!(
+            service
+                .register(registration("ike-a", "alice"), sender)
+                .await
+                .is_err()
+        );
+        let (sender, _) = mpsc::channel(8);
+        assert!(
+            service
+                .register_ikev2(
+                    "ike-a".to_string(),
+                    "unknown".to_string(),
+                    "unknown".to_string(),
+                    sender,
+                )
+                .await
+                .is_err()
+        );
+
+        service
+            .update_device_with_password(
+                "ike-a",
+                "alice",
+                "10.92.0.9".parse().unwrap(),
+                DeviceIpType::Static,
+                Some("new-password".to_string()),
+            )
+            .await
+            .unwrap();
+        let record = service
+            .get_device_record("ike-a", "alice")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.client_type, ClientType::Ikev2);
+        assert_eq!(record.ikev2_password.as_deref(), Some("new-password"));
+        assert_eq!(
+            service.ikev2_credentials().await.unwrap().get("alice"),
+            Some(&("ike-a".to_string(), "new-password".to_string()))
+        );
+    }
+
+    #[tokio::test]
     async fn ikev2_clients_are_visible_only_to_opted_in_vnt_sessions() {
         let service = ControlService::new(
             "10.91.0.0/24".parse().unwrap(),
@@ -1848,11 +2114,22 @@ mod tests {
             .register(registration("ike-access", "vnt-a"), vnt_sender)
             .await
             .unwrap();
+        service
+            .add_device_typed(
+                "ike-access",
+                "phone",
+                "10.91.0.8".parse().unwrap(),
+                DeviceIpType::Fixed,
+                ClientType::Ikev2,
+                Some("password".to_string()),
+            )
+            .await
+            .unwrap();
         let (ike_sender, _ike_receiver) = mpsc::channel(8);
         let ike = service
             .register_ikev2(
                 "ike-access".to_string(),
-                "ikev2:psk:phone".to_string(),
+                "phone".to_string(),
                 "phone".to_string(),
                 ike_sender,
             )

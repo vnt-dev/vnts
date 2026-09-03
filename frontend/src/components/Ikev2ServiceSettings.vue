@@ -123,7 +123,7 @@ onMounted(load)
     <div class="flex flex-col gap-3 border-b border-slate-100 px-5 py-4 dark:border-slate-700 sm:flex-row sm:items-center sm:justify-between">
       <div class="flex items-start gap-3">
         <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-cyan-50 text-cyan-600 dark:bg-cyan-500/10 dark:text-cyan-300"><ShieldCheck :size="21" /></div>
-        <div><div class="flex items-center gap-2"><h3 class="font-semibold text-slate-900 dark:text-slate-100">IKEv2/IPsec 基础配置</h3><span v-if="info" class="rounded-full px-2.5 py-1 text-xs font-semibold" :class="status.cls">{{ status.text }}</span></div><p class="mt-0.5 text-sm text-slate-500 dark:text-slate-400">全局共享设置；各网络的 EAP/PSK 凭据在对应网络详情中管理</p></div>
+        <div><div class="flex items-center gap-2"><h3 class="font-semibold text-slate-900 dark:text-slate-100">IKEv2/IPsec 基础配置</h3><span v-if="info" class="rounded-full px-2.5 py-1 text-xs font-semibold" :class="status.cls">{{ status.text }}</span></div><p class="mt-0.5 text-sm text-slate-500 dark:text-slate-400">全局共享设置；IKEv2 用户名和密码在网络详情的设备列表中管理</p></div>
       </div>
       <label v-if="info" class="flex items-center gap-2 text-sm font-medium"><span>启用服务</span><input v-model="form.enabled" type="checkbox" class="h-5 w-5 accent-cyan-600" /></label>
     </div>

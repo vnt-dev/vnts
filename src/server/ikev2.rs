@@ -8,12 +8,12 @@ use pnet_packet::ipv4::Ipv4Packet;
 use rand::RngCore;
 use rsa::pkcs8::DecodePrivateKey;
 use ryke::{
-    AssignedConfig, AuthConfig, ChildSa, CompletedSaInit, CookiePolicy, EapEvent, EapResponder,
-    Entropy, ExchangeType, Identification, IkeHeader, LocalAuth, LocalSecret, MessageBuilder,
-    Notify, PayloadType, PeerAuth, Role, SaInitResult, ServerAuth, SigningKey, TrafficSelector,
-    TrafficSelectors, build_encrypted_gcm, build_informational, is_eap_request, is_ike_sa_rekey,
-    open_encrypted_gcm, open_informational, payloads, responder_process_auth,
-    responder_process_ike_rekey, responder_process_rekey, responder_respond_natt,
+    AssignedConfig, ChildSa, CompletedSaInit, CookiePolicy, EapEvent, EapResponder, Entropy,
+    ExchangeType, Identification, IkeHeader, LocalSecret, MessageBuilder, Notify, PayloadType,
+    Role, SaInitResult, ServerAuth, SigningKey, TrafficSelector, TrafficSelectors,
+    build_encrypted_gcm, build_informational, is_eap_request, is_ike_sa_rekey, open_encrypted_gcm,
+    open_informational, payloads, responder_process_ike_rekey, responder_process_rekey,
+    responder_respond_natt,
 };
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -30,12 +30,6 @@ const MAX_HALF_OPEN: usize = 1024;
 const IKE_FRAGMENT_CONTENT: usize = 1024;
 const NON_ESP_MARKER: [u8; 4] = [0; 4];
 type EapCredentialMap = HashMap<Vec<u8>, (String, String)>;
-
-#[derive(Clone)]
-struct NetworkAuth {
-    network_code: String,
-    psk: Option<Vec<u8>>,
-}
 
 #[derive(Clone)]
 enum SigningMaterial {
@@ -154,6 +148,10 @@ enum Command {
         changed_network: Option<String>,
         response: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
+    ReloadCredentials {
+        credentials: HashMap<String, (String, String)>,
+        response: tokio::sync::oneshot::Sender<()>,
+    },
     Shutdown {
         response: tokio::sync::oneshot::Sender<()>,
     },
@@ -209,6 +207,23 @@ impl Ikev2Handle {
             .map_err(anyhow::Error::msg)
     }
 
+    pub async fn reload_credentials(
+        &self,
+        credentials: HashMap<String, (String, String)>,
+    ) -> anyhow::Result<()> {
+        let (response, receiver) = tokio::sync::oneshot::channel();
+        self.command_tx
+            .send(Command::ReloadCredentials {
+                credentials,
+                response,
+            })
+            .await
+            .context("IKEv2 service is not running")?;
+        receiver
+            .await
+            .context("IKEv2 service stopped while reloading credentials")
+    }
+
     pub async fn shutdown(&self) {
         let (response, receiver) = tokio::sync::oneshot::channel();
         if self
@@ -235,7 +250,6 @@ struct Engine {
     control: ControlService,
     ike_socket: Arc<UdpSocket>,
     natt_socket: Arc<UdpSocket>,
-    networks: Vec<NetworkAuth>,
     eap_credentials: EapCredentialMap,
     certificate: Option<CertificateMaterial>,
     half_open: HashMap<(u64, u64), HalfOpen>,
@@ -268,7 +282,7 @@ pub async fn start(config: Ikev2Config, control: ControlService) -> anyhow::Resu
             .with_context(|| format!("failed to bind IKEv2 NAT-T socket {}", config.natt_bind))?,
     );
 
-    let (networks, eap_credentials) = runtime_credentials(&config);
+    let eap_credentials = credential_map(control.ikev2_credentials().await?);
     let (command_tx, command_rx) = mpsc::channel(2048);
     let mut cookie_secret = [0u8; 32];
     rand::rng().fill_bytes(&mut cookie_secret);
@@ -280,7 +294,6 @@ pub async fn start(config: Ikev2Config, control: ControlService) -> anyhow::Resu
         control,
         ike_socket,
         natt_socket,
-        networks,
         eap_credentials,
         certificate,
         half_open: HashMap::new(),
@@ -544,90 +557,7 @@ impl Engine {
         if is_eap_request(&half.sa, &data) {
             return self.begin_eap(data, key, half, peer, natt).await;
         }
-        self.finish_psk(data, key, half, peer, natt).await
-    }
-
-    async fn finish_psk(
-        &mut self,
-        data: Vec<u8>,
-        key: (u64, u64),
-        half: HalfOpen,
-        peer: SocketAddr,
-        natt: bool,
-    ) -> anyhow::Result<()> {
-        let child_spi = random_nonzero_u32(&mut self.entropy);
-        let identity = ryke::peer_id_from_auth(&half.sa, &data).map_err(anyhow::Error::msg)?;
-        let identity = identity_string(&identity)?;
-        let mut matched: Option<(NetworkAuth, u32)> = None;
-        for network in &self.networks {
-            let Some(psk) = &network.psk else { continue };
-            let config = AuthConfig {
-                id: responder_identity(&self.config.remote_id),
-                local: LocalAuth::Psk(psk.clone()),
-                peer: PeerAuth::Psk(psk.clone()),
-            };
-            let iv = random_iv(&mut self.entropy);
-            if let Ok((_, _, peer_spi)) =
-                responder_process_auth(&half.sa, &data, &config, child_spi, &iv, None)
-            {
-                matched = Some((network.clone(), peer_spi));
-            }
-        }
-        let (network, peer_spi) = matched.context("IKEv2 PSK authentication failed")?;
-        let (session, receiver) = self
-            .register_endpoint(&network.network_code, "psk", &identity)
-            .await?;
-        let assigned = AssignedConfig {
-            ip: session.ip,
-            dns: self.config.dns.clone(),
-        };
-        let psk = network.psk.context("missing PSK")?;
-        let auth = AuthConfig {
-            id: responder_identity(&self.config.remote_id),
-            local: LocalAuth::Psk(psk.clone()),
-            peer: PeerAuth::Psk(psk),
-        };
-        let iv = random_iv(&mut self.entropy);
-        let (response, _, verified_peer_spi) =
-            responder_process_auth(&half.sa, &data, &auth, child_spi, &iv, Some(&assigned))
-                .map_err(anyhow::Error::msg)?;
-        if verified_peer_spi != peer_spi {
-            bail!("IKEv2 peer CHILD_SA SPI changed during authentication");
-        }
-        let network_net = Ipv4Net::new(session.ip, session.network_state.net_prefix_len())?.trunc();
-        let response = narrow_tsr(&response, &half.sa, network_net, &mut self.entropy)?;
-        let child = ChildSa::derive(
-            &half.sa.keys.sk_d,
-            &half.sa.ni,
-            &half.sa.nr,
-            Role::Responder,
-            child_spi,
-            peer_spi,
-        );
-        let message_id = IkeHeader::parse(&data)
-            .map_err(anyhow::Error::msg)?
-            .message_id;
-        self.send_encrypted_response(
-            &response,
-            &half.sa,
-            peer,
-            natt,
-            half.fragmentation_supported,
-        )
-        .await?;
-        self.install_established(
-            key,
-            half.sa,
-            child,
-            session,
-            receiver,
-            network_net,
-            peer,
-            natt,
-            Some((message_id, response)),
-            half.fragmentation_supported,
-        );
-        Ok(())
+        bail!("IKEv2 only supports EAP-MSCHAPv2 username/password authentication")
     }
 
     async fn begin_eap(
@@ -717,9 +647,7 @@ impl Engine {
                 .cloned()
                 .context("unknown EAP user")?;
             let identity = String::from_utf8(user).context("EAP username must be UTF-8")?;
-            let (session, receiver) = self
-                .register_endpoint(&network_code, "eap", &identity)
-                .await?;
+            let (session, receiver) = self.register_endpoint(&network_code, &identity).await?;
             pending.responder.set_assigned(Some(AssignedConfig {
                 ip: session.ip,
                 dns: self.config.dns.clone(),
@@ -797,19 +725,17 @@ impl Engine {
     async fn register_endpoint(
         &self,
         network_code: &str,
-        auth_kind: &str,
         identity: &str,
     ) -> anyhow::Result<(Session, mpsc::Receiver<Bytes>)> {
         if identity.is_empty() || identity.len() > 48 {
             bail!("IKEv2 identity must contain 1..=48 UTF-8 bytes");
         }
-        let device_id = format!("ikev2:{auth_kind}:{identity}");
         let (sender, receiver) = mpsc::channel(1024);
         let session = self
             .control
             .register_ikev2(
                 network_code.to_string(),
-                device_id,
+                identity.to_string(),
                 identity.to_string(),
                 sender,
             )
@@ -974,12 +900,20 @@ impl Engine {
                 self.half_open.clear();
                 self.eap_pending.clear();
                 self.fragments.clear();
-                let (networks, eap_credentials) = runtime_credentials(&config);
                 self.config = *config;
-                self.networks = networks;
-                self.eap_credentials = eap_credentials;
                 self.certificate = certificate;
                 let _ = response.send(Ok(()));
+                return Ok(());
+            }
+            Command::ReloadCredentials {
+                credentials,
+                response,
+            } => {
+                self.eap_credentials = credential_map(credentials);
+                self.half_open.clear();
+                self.eap_pending.clear();
+                self.fragments.clear();
+                let _ = response.send(());
                 return Ok(());
             }
             Command::Shutdown { response } => {
@@ -1262,13 +1196,6 @@ impl Engine {
     }
 }
 
-fn identity_string(identity: &Identification) -> anyhow::Result<String> {
-    if identity.data.is_empty() {
-        bail!("IKEv2 Local ID cannot be empty");
-    }
-    String::from_utf8(identity.data.clone()).context("IKEv2 Local ID must be UTF-8")
-}
-
 fn responder_identity(remote_id: &str) -> Identification {
     match remote_id.parse::<IpAddr>() {
         Ok(IpAddr::V4(address)) => Identification {
@@ -1297,25 +1224,12 @@ fn checked_ipv4(packet: &[u8]) -> Option<(Ipv4Addr, Ipv4Addr, usize)> {
     Some((ipv4.get_source(), ipv4.get_destination(), total_length))
 }
 
-fn runtime_credentials(config: &Ikev2Config) -> (Vec<NetworkAuth>, EapCredentialMap) {
-    let networks = config
-        .networks
-        .iter()
-        .map(|network| NetworkAuth {
-            network_code: network.network_code.clone(),
-            psk: network.psk.as_ref().map(|value| value.as_bytes().to_vec()),
-        })
-        .collect();
+fn credential_map(credentials: HashMap<String, (String, String)>) -> EapCredentialMap {
     let mut eap_credentials = HashMap::new();
-    for network in &config.networks {
-        for (user, password) in &network.eap_users {
-            eap_credentials.insert(
-                user.as_bytes().to_vec(),
-                (network.network_code.clone(), password.clone()),
-            );
-        }
+    for (username, credential) in credentials {
+        eap_credentials.insert(username.into_bytes(), credential);
     }
-    (networks, eap_credentials)
+    eap_credentials
 }
 
 fn random_nonzero_u32(entropy: &mut impl Entropy) -> u32 {
@@ -1477,15 +1391,11 @@ fn load_certificate(config: &Ikev2Config) -> anyhow::Result<Option<CertificateMa
 #[cfg(test)]
 mod tests {
     use super::{ReplayWindow, SystemEntropy, start};
-    use crate::protocol::control_message::{RegRequestMsg, RegistrationMode};
-    use crate::protocol::ip_packet_protocol::{MsgType, NetPacket};
+    use crate::server::control_server::db::{ClientType, DeviceIpType};
     use crate::server::control_server::service::ControlService;
-    use crate::utils::config::{Ikev2Config, Ikev2NetworkConfig};
+    use crate::utils::config::Ikev2Config;
     use ipnet::Ipv4Net;
-    use ryke::{
-        AuthConfig, Entropy, Identification, LocalSecret, default_offer, initiator_auth_request,
-        initiator_complete, initiator_request, initiator_verify_auth,
-    };
+    use ryke::{Identification, LocalSecret, default_offer, initiator_complete, initiator_request};
     use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1508,218 +1418,6 @@ mod tests {
             .local_addr()
             .unwrap()
             .port()
-    }
-
-    #[tokio::test]
-    async fn psk_handshake_assigns_an_address_from_the_vnt_network() {
-        let ike_port = unused_udp_port();
-        let mut natt_port = unused_udp_port();
-        while natt_port == ike_port {
-            natt_port = unused_udp_port();
-        }
-        let config = Ikev2Config {
-            enabled: true,
-            ike_bind: SocketAddr::from(([127, 0, 0, 1], ike_port)),
-            natt_bind: SocketAddr::from(([127, 0, 0, 1], natt_port)),
-            remote_id: "vpn.example.com".to_string(),
-            cert: None,
-            key: None,
-            dns: Vec::new(),
-            public_ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
-            networks: vec![Ikev2NetworkConfig {
-                network_code: "ike-test".to_string(),
-                psk: Some("test-secret".to_string()),
-                eap_users: HashMap::from([("required-user".to_string(), "password".to_string())]),
-            }],
-        };
-        let mut reloaded_config = config.clone();
-        let control = ControlService::new(
-            "10.77.0.0/24".parse::<Ipv4Net>().unwrap(),
-            HashMap::new(),
-            Default::default(),
-            Duration::from_secs(3600),
-        )
-        .await
-        .unwrap();
-        let vnt_ip = Ipv4Addr::new(10, 77, 0, 50);
-        let (vnt_sender, mut vnt_receiver) = tokio::sync::mpsc::channel(8);
-        let _vnt_session = control
-            .register(
-                RegRequestMsg {
-                    network_code: "ike-test".to_string(),
-                    device_id: "vnt-target".to_string(),
-                    ip: Some(vnt_ip),
-                    name: "target".to_string(),
-                    version: "test".to_string(),
-                    key_sign: None,
-                    ip_variable: false,
-                    server_id: 0,
-                    registration_mode: RegistrationMode::Normal,
-                    advertised_subnets: Vec::new(),
-                    allow_ikev2: true,
-                },
-                vnt_sender,
-            )
-            .await
-            .unwrap();
-        let handle = start(config, control.clone()).await.unwrap();
-
-        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut entropy = SystemEntropy;
-        let local = LocalSecret::generate(&mut entropy, 32);
-        let request = initiator_request(&local, &default_offer());
-        socket
-            .send_to(&request, SocketAddr::from(([127, 0, 0, 1], ike_port)))
-            .await
-            .unwrap();
-        let mut buffer = vec![0u8; 8192];
-        let (length, _) =
-            tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut buffer))
-                .await
-                .unwrap()
-                .unwrap();
-        let sa = initiator_complete(&local, &request, &buffer[..length]).unwrap();
-
-        let auth = AuthConfig::psk(Identification::fqdn("phone-a"), b"test-secret".to_vec());
-        let mut iv = [0u8; 8];
-        entropy.fill(&mut iv);
-        let auth_request = initiator_auth_request(&sa, &auth, 0x1234_5678, &iv).unwrap();
-        let mut framed = vec![0u8; 4];
-        framed.extend_from_slice(&auth_request);
-        socket
-            .send_to(&framed, SocketAddr::from(([127, 0, 0, 1], natt_port)))
-            .await
-            .unwrap();
-        let (length, _) =
-            tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut buffer))
-                .await
-                .unwrap()
-                .unwrap();
-        assert_eq!(&buffer[..4], &[0, 0, 0, 0]);
-        let (first, inner) = ryke::open_encrypted_gcm(&buffer[4..length], &sa.keys.sk_er).unwrap();
-        let tsr = ryke::payloads(first, &inner)
-            .map(Result::unwrap)
-            .find(|payload| payload.payload_type == ryke::PayloadType::TrafficSelectorResponder)
-            .unwrap();
-        let selectors = ryke::TrafficSelectors::parse(tsr.data).unwrap();
-        assert_eq!(selectors.selectors[0].start_addr, vec![10, 77, 0, 0]);
-        assert_eq!(selectors.selectors[0].end_addr, vec![10, 77, 0, 255]);
-        let (server_id, peer_spi, assigned) =
-            initiator_verify_auth(&sa, &buffer[4..length], &auth).unwrap();
-        assert_eq!(server_id, Identification::fqdn("vpn.example.com"));
-        let assigned = assigned.unwrap();
-        assert!(
-            "10.77.0.0/24"
-                .parse::<Ipv4Net>()
-                .unwrap()
-                .contains(&assigned)
-        );
-
-        let mut dpd_iv = [0u8; 8];
-        entropy.fill(&mut dpd_iv);
-        let dpd = ryke::dpd_request(&sa, 2, &dpd_iv).unwrap();
-        let mut framed_dpd = vec![0u8; 4];
-        framed_dpd.extend_from_slice(&dpd);
-        socket
-            .send_to(&framed_dpd, SocketAddr::from(([127, 0, 0, 1], natt_port)))
-            .await
-            .unwrap();
-        let (length, _) =
-            tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut buffer))
-                .await
-                .unwrap()
-                .unwrap();
-        assert!(
-            ryke::open_informational(&sa, &buffer[4..length])
-                .unwrap()
-                .is_empty()
-        );
-
-        let mut rekey_nonce = [0u8; 32];
-        entropy.fill(&mut rekey_nonce);
-        let mut rekey_iv = [0u8; 8];
-        entropy.fill(&mut rekey_iv);
-        let new_client_spi = 0x2233_4455;
-        let rekey = ryke::ikev2::rekey::build_rekey_request(
-            &sa,
-            3,
-            peer_spi,
-            new_client_spi,
-            &rekey_nonce,
-            &rekey_iv,
-        )
-        .unwrap();
-        let mut framed_rekey = vec![0u8; 4];
-        framed_rekey.extend_from_slice(&rekey);
-        socket
-            .send_to(&framed_rekey, SocketAddr::from(([127, 0, 0, 1], natt_port)))
-            .await
-            .unwrap();
-        let (length, _) =
-            tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut buffer))
-                .await
-                .unwrap()
-                .unwrap();
-        let mut child = ryke::ikev2::rekey::initiator_complete_rekey(
-            &sa,
-            &rekey_nonce,
-            new_client_spi,
-            &buffer[4..length],
-        )
-        .unwrap();
-        let request_ip = ipv4_packet(assigned, vnt_ip);
-        let esp = child
-            .outbound
-            .seal(&request_ip, ryke::esp::next_header::IPV4)
-            .unwrap();
-        socket
-            .send_to(&esp, SocketAddr::from(([127, 0, 0, 1], natt_port)))
-            .await
-            .unwrap();
-        let relayed = tokio::time::timeout(Duration::from_secs(2), vnt_receiver.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        let relayed = NetPacket::new(relayed).unwrap();
-        assert_eq!(relayed.msg_type().unwrap(), MsgType::Ikev2Relay);
-        assert!(relayed.is_gateway());
-        assert_eq!(relayed.payload(), request_ip);
-        socket
-            .send_to(&esp, SocketAddr::from(([127, 0, 0, 1], natt_port)))
-            .await
-            .unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), vnt_receiver.recv())
-                .await
-                .is_err()
-        );
-
-        let reply_ip = ipv4_packet(vnt_ip, assigned);
-        assert!(
-            control
-                .forward_ikev2_packet("ike-test", vnt_ip, assigned, &reply_ip)
-                .await
-                .unwrap()
-        );
-        let (length, _) =
-            tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut buffer))
-                .await
-                .unwrap()
-                .unwrap();
-        let (opened, next_header) = child.inbound.open(&buffer[..length]).unwrap();
-        assert_eq!(next_header, ryke::esp::next_header::IPV4);
-        assert_eq!(opened, reply_ip);
-        reloaded_config.networks[0].psk = Some("rotated-secret".to_string());
-        handle
-            .reload_network_config(reloaded_config, Some("ike-test".to_string()))
-            .await
-            .unwrap();
-        assert!(
-            !control
-                .get_network_state("ike-test")
-                .unwrap()
-                .is_device_online("ikev2:psk:phone-a")
-        );
     }
 
     #[tokio::test]
@@ -1746,21 +1444,27 @@ mod tests {
             key: Some(key_path),
             dns: Vec::new(),
             public_ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
-            networks: vec![Ikev2NetworkConfig {
-                network_code: "eap-test".to_string(),
-                psk: None,
-                eap_users: HashMap::from([("alice".to_string(), "password".to_string())]),
-            }],
         };
         let control = ControlService::new(
             "10.78.0.0/24".parse::<Ipv4Net>().unwrap(),
-            HashMap::new(),
+            HashMap::from([("eap-test".to_string(), "10.78.0.0/24".parse().unwrap())]),
             Default::default(),
             Duration::from_secs(3600),
         )
         .await
         .unwrap();
-        let _handle = start(config, control).await.unwrap();
+        control
+            .add_device_typed(
+                "eap-test",
+                "alice",
+                "10.78.0.8".parse().unwrap(),
+                DeviceIpType::Fixed,
+                ClientType::Ikev2,
+                Some("password".to_string()),
+            )
+            .await
+            .unwrap();
+        let _handle = start(config, control.clone()).await.unwrap();
         let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut entropy = SystemEntropy;
         let local = LocalSecret::generate(&mut entropy, 32);
@@ -1810,16 +1514,11 @@ mod tests {
             }
         }
         assert!(established);
-    }
-
-    fn ipv4_packet(source: Ipv4Addr, destination: Ipv4Addr) -> Vec<u8> {
-        let mut packet = vec![0u8; 20];
-        packet[0] = 0x45;
-        packet[2..4].copy_from_slice(&(20u16).to_be_bytes());
-        packet[8] = 64;
-        packet[9] = 1;
-        packet[12..16].copy_from_slice(&source.octets());
-        packet[16..20].copy_from_slice(&destination.octets());
-        packet
+        assert!(
+            control
+                .get_network_state("eap-test")
+                .unwrap()
+                .is_device_online("alice")
+        );
     }
 }

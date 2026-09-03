@@ -1,10 +1,9 @@
 use crate::ControlService;
-use crate::server::control_server::db::{DeviceIpType, NetworkType};
+use crate::server::control_server::db::{ClientType, DeviceIpType, NetworkType};
 use crate::server::control_server::service::{DeviceInfoVO, NetworkInfoVO};
 use crate::utils::config::{
-    Ikev2Config, Ikev2NetworkConfig, load_ikev2_config,
-    update_ikev2_config as persist_ikev2_config, update_white_list as persist_white_list,
-    validate_network_code,
+    Ikev2Config, load_ikev2_config, update_ikev2_config as persist_ikev2_config,
+    update_white_list as persist_white_list, validate_network_code,
 };
 use anyhow::Context;
 use axum::{
@@ -22,7 +21,7 @@ use rand::Rng;
 use rand::distr::Alphanumeric;
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Component, Path as StdPath, PathBuf};
 use std::sync::Arc;
@@ -195,27 +194,6 @@ struct Ikev2ServiceInfo {
     runtime_error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct Ikev2NetworkInfo {
-    enabled: bool,
-    psk_configured: bool,
-    eap_users: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct NetworkIkev2Info {
-    service: Ikev2ServiceInfo,
-    network: Ikev2NetworkInfo,
-    network_code: String,
-    network_net: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct EapUserUpdate {
-    username: String,
-    password: Option<String>,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 struct UpdateIkev2ServiceRequest {
     enabled: bool,
@@ -229,59 +207,10 @@ struct UpdateIkev2ServiceRequest {
     key: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct UpdateIkev2NetworkRequest {
-    enabled: bool,
-    psk: Option<String>,
-    #[serde(default)]
-    eap_users: Vec<EapUserUpdate>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct Ikev2Secrets {
-    psk: Option<String>,
-    eap_users: HashMap<String, String>,
-}
-
 fn optional_text(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-}
-
-fn network_ikev2_info(
-    configured: bool,
-    config: &Ikev2Config,
-    network_code: &str,
-    network_net: String,
-    runtime_active: bool,
-    runtime_error: Option<String>,
-    config_path: &StdPath,
-) -> NetworkIkev2Info {
-    let network = config
-        .networks
-        .iter()
-        .find(|network| network.network_code == network_code);
-    let mut eap_users = network
-        .map(|network| network.eap_users.keys().cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
-    eap_users.sort();
-    NetworkIkev2Info {
-        service: ikev2_service_info(
-            configured,
-            config,
-            runtime_active,
-            runtime_error,
-            config_path,
-        ),
-        network: Ikev2NetworkInfo {
-            enabled: network.is_some(),
-            psk_configured: network.is_some_and(|network| network.psk.is_some()),
-            eap_users,
-        },
-        network_code: network_code.to_string(),
-        network_net,
-    }
 }
 
 fn ikev2_service_info(
@@ -337,43 +266,6 @@ async fn network_net(state: &AppState, network_code: &str) -> Option<String> {
         .map(|network| network.net.to_string())
 }
 
-async fn get_network_ikev2(
-    State(state): State<AppState>,
-    Path(network_code): Path<String>,
-) -> Response {
-    let Some(network_net) = network_net(&state, &network_code).await else {
-        return ApiResponse::<()>::err(format!("网络编号 '{network_code}' 不存在")).into_response();
-    };
-    let _guard = state.config_update_lock.lock().await;
-    let config_path = state.config_path.as_ref().clone();
-    let configured = match tokio::task::spawn_blocking({
-        let config_path = config_path.clone();
-        move || load_ikev2_config(&config_path)
-    })
-    .await
-    {
-        Ok(Ok(config)) => config,
-        Ok(Err(error)) => {
-            return ApiResponse::<()>::err(format!("读取 IKEv2 配置失败: {error}")).into_response();
-        }
-        Err(error) => {
-            return ApiResponse::<()>::err(format!("读取 IKEv2 配置任务失败: {error}"))
-                .into_response();
-        }
-    };
-    let config = configured.clone().unwrap_or_default();
-    ApiResponse::ok(network_ikev2_info(
-        configured.is_some(),
-        &config,
-        &network_code,
-        network_net,
-        state.control_service.get_ikev2_manager().is_some(),
-        state.control_service.get_ikev2_runtime_error(),
-        &config_path,
-    ))
-    .into_response()
-}
-
 async fn get_ikev2_settings(State(state): State<AppState>) -> Response {
     let _guard = state.config_update_lock.lock().await;
     let config_path = state.config_path.as_ref();
@@ -412,10 +304,6 @@ async fn update_ikev2_settings(
             return ApiResponse::<()>::err(format!("基础配置格式错误: {error}")).into_response();
         }
     };
-    candidate.networks = previous
-        .as_ref()
-        .map(|config| config.networks.clone())
-        .unwrap_or_default();
     if !candidate.enabled
         && candidate.cert.is_none()
         && previous.as_ref().is_some_and(|config| {
@@ -443,52 +331,6 @@ async fn update_ikev2_settings(
     ApiResponse::ok(info).into_response()
 }
 
-fn merge_network_ikev2_update(
-    config: &Ikev2Config,
-    network_code: &str,
-    request: UpdateIkev2NetworkRequest,
-) -> anyhow::Result<Option<Ikev2NetworkConfig>> {
-    if !request.enabled {
-        return Ok(None);
-    }
-    let current = config
-        .networks
-        .iter()
-        .find(|network| network.network_code == network_code);
-    let psk = if let Some(psk) = request.psk {
-        if psk.is_empty() {
-            anyhow::bail!("PSK 不能为空；留空字段表示保留原值");
-        }
-        Some(psk)
-    } else {
-        current.and_then(|network| network.psk.clone())
-    };
-    let mut usernames = HashSet::new();
-    let mut eap_users = HashMap::new();
-    for user in request.eap_users {
-        let username = user.username.trim().to_string();
-        if username.is_empty() || !usernames.insert(username.clone()) {
-            anyhow::bail!("EAP 用户名不能为空或重复");
-        }
-        let password = match user.password {
-            Some(password) if !password.is_empty() => password,
-            _ => current
-                .and_then(|network| network.eap_users.get(&username))
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("新增 EAP 用户 '{username}' 必须填写密码"))?,
-        };
-        eap_users.insert(username, password);
-    }
-    if eap_users.is_empty() {
-        anyhow::bail!("启用当前网络时必须至少配置一个 EAP-MSCHAPv2 用户");
-    }
-    Ok(Some(Ikev2NetworkConfig {
-        network_code: network_code.to_string(),
-        psk,
-        eap_users,
-    }))
-}
-
 fn merge_ikev2_service(request: UpdateIkev2ServiceRequest) -> anyhow::Result<Ikev2Config> {
     let dns = request
         .dns
@@ -508,7 +350,6 @@ fn merge_ikev2_service(request: UpdateIkev2ServiceRequest) -> anyhow::Result<Ike
         key: optional_text(request.key).map(PathBuf::from),
         dns,
         public_ip,
-        networks: Vec::new(),
     })
 }
 
@@ -643,55 +484,6 @@ async fn persist_and_apply_ikev2(
     Ok((candidate, certificate))
 }
 
-async fn update_network_ikev2(
-    State(state): State<AppState>,
-    Path(network_code): Path<String>,
-    Json(body): Json<UpdateIkev2NetworkRequest>,
-) -> Response {
-    let Some(network_net) = network_net(&state, &network_code).await else {
-        return ApiResponse::<()>::err(format!("网络编号 '{network_code}' 不存在")).into_response();
-    };
-    let _guard = state.config_update_lock.lock().await;
-    let config_path = state.config_path.as_ref().clone();
-    let previous = match load_ikev2_config(&config_path) {
-        Ok(config) => config,
-        Err(error) => {
-            return ApiResponse::<()>::err(format!("读取 IKEv2 配置失败: {error}")).into_response();
-        }
-    };
-    let mut candidate = previous.clone().unwrap_or_default();
-    let network = match merge_network_ikev2_update(&candidate, &network_code, body) {
-        Ok(network) => network,
-        Err(error) => return ApiResponse::<()>::err(error.to_string()).into_response(),
-    };
-    candidate
-        .networks
-        .retain(|network| network.network_code != network_code);
-    if let Some(network) = network {
-        candidate.networks.push(network);
-    }
-    let (candidate, certificate) =
-        match persist_and_apply_ikev2(&state, previous.as_ref(), candidate, Some(&network_code))
-            .await
-        {
-            Ok(result) => result,
-            Err(error) => return ApiResponse::<()>::err(error.to_string()).into_response(),
-        };
-    let mut info = network_ikev2_info(
-        true,
-        &candidate,
-        &network_code,
-        network_net,
-        candidate.enabled,
-        None,
-        &config_path,
-    );
-    info.service.certificate_managed = certificate.managed;
-    info.service.ca_download_available = certificate.ca_path.is_some();
-    info.service.certificate_not_after = certificate.not_after;
-    ApiResponse::ok(info).into_response()
-}
-
 fn no_store(mut response: Response) -> Response {
     response
         .headers_mut()
@@ -699,47 +491,63 @@ fn no_store(mut response: Response) -> Response {
     response
 }
 
-async fn get_network_ikev2_secrets(
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct Ikev2AccessInfo {
+    service: Ikev2ServiceInfo,
+    network_code: String,
+    network_net: String,
+    username: String,
+    password: String,
+}
+
+async fn get_device_ikev2_access(
     State(state): State<AppState>,
-    Path(network_code): Path<String>,
+    Path((network_code, device_id)): Path<(String, String)>,
 ) -> Response {
-    if !state
-        .control_service
-        .get_network_codes()
-        .contains(&network_code)
-    {
+    let Some(network_net) = network_net(&state, &network_code).await else {
         return no_store(
             ApiResponse::<()>::err(format!("网络编号 '{network_code}' 不存在")).into_response(),
         );
-    }
-    let _guard = state.config_update_lock.lock().await;
-    let config = match load_ikev2_config(state.config_path.as_ref()) {
-        Ok(Some(config)) => config,
-        Ok(None) => {
+    };
+    let device = match state
+        .control_service
+        .get_device_record(&network_code, &device_id)
+        .await
+    {
+        Ok(Some(device)) if device.client_type == ClientType::Ikev2 => device,
+        Ok(_) => {
             return no_store(
-                ApiResponse::ok(Ikev2Secrets {
-                    psk: None,
-                    eap_users: HashMap::new(),
-                })
-                .into_response(),
+                ApiResponse::<()>::err(format!("IKEv2 设备 '{device_id}' 不存在")).into_response(),
             );
         }
+        Err(error) => return no_store(ApiResponse::<()>::err(error.to_string()).into_response()),
+    };
+    let Some(password) = device.ikev2_password else {
+        return no_store(ApiResponse::<()>::err("IKEv2 设备未配置密码").into_response());
+    };
+    let _guard = state.config_update_lock.lock().await;
+    let configured = match load_ikev2_config(state.config_path.as_ref()) {
+        Ok(config) => config,
         Err(error) => {
             return no_store(
                 ApiResponse::<()>::err(format!("读取 IKEv2 配置失败: {error}")).into_response(),
             );
         }
     };
-    let network = config
-        .networks
-        .iter()
-        .find(|network| network.network_code == network_code);
+    let config = configured.clone().unwrap_or_default();
     no_store(
-        ApiResponse::ok(Ikev2Secrets {
-            psk: network.and_then(|network| network.psk.clone()),
-            eap_users: network
-                .map(|network| network.eap_users.clone())
-                .unwrap_or_default(),
+        ApiResponse::ok(Ikev2AccessInfo {
+            service: ikev2_service_info(
+                configured.is_some(),
+                &config,
+                state.control_service.get_ikev2_manager().is_some(),
+                state.control_service.get_ikev2_runtime_error(),
+                state.config_path.as_ref(),
+            ),
+            network_code,
+            network_net,
+            username: device_id,
+            password,
         })
         .into_response(),
     )
@@ -1029,6 +837,9 @@ struct CreateDeviceRequest {
     device_id: String,
     ip: String,
     ip_type: Option<DeviceIpType>,
+    #[serde(default)]
+    client_type: ClientType,
+    ikev2_password: Option<String>,
 }
 
 async fn create_device(
@@ -1041,11 +852,13 @@ async fn create_device(
     };
     match state
         .control_service
-        .add_device(
+        .add_device_typed(
             &body.network_code,
             &body.device_id,
             ip,
             body.ip_type.unwrap_or(DeviceIpType::Dynamic),
+            body.client_type,
+            body.ikev2_password,
         )
         .await
     {
@@ -1059,6 +872,7 @@ struct UpdateDeviceRequest {
     network_code: String,
     ip: String,
     ip_type: DeviceIpType,
+    ikev2_password: Option<String>,
 }
 
 async fn update_device(
@@ -1072,7 +886,13 @@ async fn update_device(
     };
     match state
         .control_service
-        .update_device(&body.network_code, &device_id, ip, body.ip_type)
+        .update_device_with_password(
+            &body.network_code,
+            &device_id,
+            ip,
+            body.ip_type,
+            body.ikev2_password,
+        )
         .await
     {
         Ok(()) => ApiResponse::<()>::ok_msg("更新成功").into_response(),
@@ -1252,12 +1072,8 @@ fn build_app(app_state: AppState) -> Router {
         .route("/networks/{network_code}", put(update_network))
         .route("/networks/{network_code}", delete(delete_network))
         .route(
-            "/networks/{network_code}/ikev2",
-            get(get_network_ikev2).put(update_network_ikev2),
-        )
-        .route(
-            "/networks/{network_code}/ikev2/secrets",
-            get(get_network_ikev2_secrets),
+            "/networks/{network_code}/devices/{device_id}/ikev2-access",
+            get(get_device_ikev2_access),
         )
         .route("/ikev2/ca-certificate", get(download_ikev2_ca))
         .route("/devices", get(list_devices))
@@ -1291,9 +1107,9 @@ fn build_app(app_state: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppState, AuthConfig, Claims, EapUserUpdate, UpdateIkev2NetworkRequest, build_app,
-        merge_network_ikev2_update, normalize_network_codes, safe_static_path,
+        AppState, AuthConfig, Claims, build_app, normalize_network_codes, safe_static_path,
     };
+    use crate::server::control_server::db::{ClientType, DeviceIpType};
     use crate::server::control_server::service::ControlService;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header};
@@ -1336,67 +1152,6 @@ mod tests {
             vec!["alpha".to_string(), "zeta".to_string()]
         );
         assert!(normalize_network_codes(vec![" alpha".to_string()]).is_err());
-    }
-
-    #[test]
-    fn ikev2_update_keeps_redacted_passwords_and_removes_omitted_users() {
-        let config = crate::utils::config::Ikev2Config {
-            enabled: true,
-            ike_bind: "127.0.0.1:500".parse().unwrap(),
-            natt_bind: "127.0.0.1:4500".parse().unwrap(),
-            remote_id: "vpn.example.com".to_string(),
-            cert: None,
-            key: None,
-            dns: Vec::new(),
-            public_ip: None,
-            networks: vec![crate::utils::config::Ikev2NetworkConfig {
-                network_code: "alpha".to_string(),
-                psk: Some("secret".to_string()),
-                eap_users: HashMap::from([("alice".to_string(), "old-password".to_string())]),
-            }],
-        };
-        let merged = merge_network_ikev2_update(
-            &config,
-            "alpha",
-            UpdateIkev2NetworkRequest {
-                enabled: true,
-                psk: None,
-                eap_users: vec![
-                    EapUserUpdate {
-                        username: "alice".to_string(),
-                        password: None,
-                    },
-                    EapUserUpdate {
-                        username: "bob".to_string(),
-                        password: Some("new-password".to_string()),
-                    },
-                ],
-            },
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(merged.psk.as_deref(), Some("secret"));
-        assert_eq!(
-            merged.eap_users.get("alice").map(String::as_str),
-            Some("old-password")
-        );
-        assert_eq!(
-            merged.eap_users.get("bob").map(String::as_str),
-            Some("new-password")
-        );
-
-        assert!(
-            merge_network_ikev2_update(
-                &config,
-                "alpha",
-                UpdateIkev2NetworkRequest {
-                    enabled: true,
-                    psk: Some("psk-only".to_string()),
-                    eap_users: Vec::new(),
-                },
-            )
-            .is_err()
-        );
     }
 
     #[tokio::test]
@@ -1516,23 +1271,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn network_ikev2_routes_redact_secrets_and_persist_updates() {
+    async fn ikev2_access_is_device_scoped_no_store_and_hidden_from_device_list() {
         let directory = tempfile::tempdir().unwrap();
         let config_path = directory.path().join("config.toml");
         std::fs::write(
             &config_path,
-            r#"network = "10.26.0.0/24"
-lease_duration = 86400
-[ikev2]
-enabled = false
-ike_bind = "127.0.0.1:500"
-natt_bind = "127.0.0.1:4500"
-remote_id = "vpn.example.com"
-[[ikev2.networks]]
-network_code = "alpha"
-psk = "old-secret"
-eap_users = { alice = "old-password" }
-"#,
+            "network = \"10.26.0.0/24\"\nlease_duration = 86400\n",
         )
         .unwrap();
         let control_service = ControlService::new(
@@ -1543,7 +1287,18 @@ eap_users = { alice = "old-password" }
         )
         .await
         .unwrap();
-        let jwt_secret = "ike-test-secret".to_string();
+        control_service
+            .add_device_typed(
+                "alpha",
+                "alice",
+                "10.60.0.8".parse().unwrap(),
+                DeviceIpType::Fixed,
+                ClientType::Ikev2,
+                Some("private-password".to_string()),
+            )
+            .await
+            .unwrap();
+        let jwt_secret = "ike-access-test".to_string();
         let app = build_app(AppState {
             control_service,
             auth_config: AuthConfig {
@@ -1551,7 +1306,7 @@ eap_users = { alice = "old-password" }
                 password: "admin".to_string(),
                 jwt_secret: jwt_secret.clone(),
             },
-            config_path: Arc::new(config_path.clone()),
+            config_path: Arc::new(config_path),
             config_update_lock: Arc::new(tokio::sync::Mutex::new(())),
         });
         let token = jsonwebtoken::encode(
@@ -1566,194 +1321,46 @@ eap_users = { alice = "old-password" }
         .unwrap();
         let authorization = format!("Bearer {token}");
 
-        let get_response = app
+        let list = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/networks/alpha/ikev2")
+                    .uri("/api/devices?code=alpha")
                     .header(header::AUTHORIZATION, &authorization)
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        let get_body = to_bytes(get_response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let get_body = String::from_utf8(get_body.to_vec()).unwrap();
-        assert!(get_body.contains("\"psk_configured\":true"));
-        assert!(!get_body.contains("old-secret"));
+        let list_body = to_bytes(list.into_body(), usize::MAX).await.unwrap();
+        assert!(
+            !String::from_utf8(list_body.to_vec())
+                .unwrap()
+                .contains("private-password")
+        );
 
-        let put_response = app
-            .clone()
+        let access = app
             .oneshot(
                 Request::builder()
-                    .method("PUT")
-                    .uri("/api/networks/alpha/ikev2")
+                    .uri("/api/networks/alpha/devices/alice/ikev2-access")
                     .header(header::AUTHORIZATION, authorization)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        r#"{"enabled":true,"psk":"new-secret","eap_users":[{"username":"alice"}]}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let put_body = to_bytes(put_response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let put_body = String::from_utf8(put_body.to_vec()).unwrap();
-        assert!(put_body.contains("\"runtime_active\":false"));
-        assert!(!put_body.contains("new-secret"));
-        let secrets_response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/networks/alpha/ikev2/secrets")
-                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(
-            secrets_response
-                .headers()
-                .get(header::CACHE_CONTROL)
-                .unwrap(),
+            access.headers().get(header::CACHE_CONTROL).unwrap(),
             "no-store"
         );
-        let secrets_body = to_bytes(secrets_response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert!(
-            String::from_utf8(secrets_body.to_vec())
-                .unwrap()
-                .contains("new-secret")
-        );
-        let persisted = std::fs::read_to_string(config_path).unwrap();
-        assert!(persisted.contains("psk = \"new-secret\""));
-        assert!(!persisted.contains("old-secret"));
+        let access_body = to_bytes(access.into_body(), usize::MAX).await.unwrap();
+        let access_body = String::from_utf8(access_body.to_vec()).unwrap();
+        assert!(access_body.contains("private-password"));
+        assert!(access_body.contains("\"username\":\"alice\""));
     }
 
     #[tokio::test]
-    async fn network_ikev2_can_be_configured_and_started_from_an_empty_config() {
-        let directory = tempfile::tempdir().unwrap();
-        let config_path = directory.path().join("config.toml");
-        std::fs::write(
-            &config_path,
-            "network = \"10.26.0.0/24\"\nlease_duration = 86400\n",
-        )
-        .unwrap();
-        let control_service = ControlService::new(
-            "10.26.0.0/24".parse().unwrap(),
-            HashMap::from([("alpha".to_string(), "10.61.0.0/24".parse().unwrap())]),
-            HashSet::new(),
-            Duration::from_secs(3600),
-        )
-        .await
-        .unwrap();
-        let jwt_secret = "ike-first-save".to_string();
-        let app = build_app(AppState {
-            control_service: control_service.clone(),
-            auth_config: AuthConfig {
-                username: "admin".to_string(),
-                password: "admin".to_string(),
-                jwt_secret: jwt_secret.clone(),
-            },
-            config_path: Arc::new(config_path.clone()),
-            config_update_lock: Arc::new(tokio::sync::Mutex::new(())),
-        });
-        let token = jsonwebtoken::encode(
-            &Header::default(),
-            &Claims {
-                sub: "admin".to_string(),
-                exp: (time::OffsetDateTime::now_utc() + time::Duration::minutes(5))
-                    .unix_timestamp(),
-            },
-            &EncodingKey::from_secret(jwt_secret.as_bytes()),
-        )
-        .unwrap();
-        let free_port = || {
-            std::net::UdpSocket::bind("127.0.0.1:0")
-                .unwrap()
-                .local_addr()
-                .unwrap()
-                .port()
-        };
-        let ike_port = free_port();
-        let mut natt_port = free_port();
-        while natt_port == ike_port {
-            natt_port = free_port();
-        }
-        let network_response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/api/networks/alpha/ikev2")
-                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        r#"{"enabled":true,"psk":"first-secret","eap_users":[{"username":"alice","password":"password"}]}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let network_body = to_bytes(network_response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert!(
-            String::from_utf8(network_body.to_vec())
-                .unwrap()
-                .contains("\"enabled\":true")
-        );
-        let body = format!(
-            r#"{{"enabled":true,"ike_bind":"127.0.0.1:{ike_port}","natt_bind":"127.0.0.1:{natt_port}","remote_id":"127.0.0.1","dns":[]}}"#
-        );
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/api/settings/ikev2")
-                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let response_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let response_body = String::from_utf8(response_body.to_vec()).unwrap();
-        assert!(response_body.contains("\"runtime_active\":true"));
-        assert!(response_body.contains("\"certificate_managed\":true"));
-        assert!(config_path.with_file_name("ikev2-cert.pem").exists());
-        assert!(config_path.with_file_name("ikev2-key.pem").exists());
-        assert!(config_path.with_file_name("ikev2-ca.pem").exists());
-
-        let ca_response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/ikev2/ca-certificate?format=der")
-                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(ca_response.status(), StatusCode::OK);
-        assert_eq!(
-            ca_response.headers().get(header::CACHE_CONTROL).unwrap(),
-            "no-store"
-        );
-        if let Some(manager) = control_service.replace_ikev2_manager(None) {
-            manager.shutdown().await;
-        }
-    }
-
-    #[tokio::test]
-    async fn network_ikev2_start_failure_rolls_back_config_and_generated_certificates() {
+    async fn ikev2_start_failure_rolls_back_config_and_generated_certificates() {
         let directory = tempfile::tempdir().unwrap();
         let config_path = directory.path().join("config.toml");
         let original = "network = \"10.26.0.0/24\"\nlease_duration = 86400\n";
@@ -1822,7 +1429,7 @@ eap_users = { alice = "old-password" }
         let status = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/networks/alpha/ikev2")
+                    .uri("/api/settings/ikev2")
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .body(Body::empty())
                     .unwrap(),

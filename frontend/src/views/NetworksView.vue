@@ -113,10 +113,6 @@ async function submitForm() {
   }
 }
 
-function openIkev2(net: NetworkInfo) {
-  router.push({ name: 'devices', params: { code: net.network_code }, query: { tab: 'ikev2' } })
-}
-
 // ---------- 删除网络 ----------
 const confirmOpen = ref(false)
 const confirmMessage = ref('')
@@ -189,7 +185,6 @@ async function executeDelete() {
         :network="net"
         @select="selectNetwork(net)"
         @edit="openEditModal(net)"
-        @ikev2="openIkev2(net)"
         @remove="confirmDelete(net)"
       />
     </div>

@@ -11,6 +11,7 @@ export interface LoginResult {
 export type NetworkSource = 'Config' | 'Manual' | 'DeviceRegister' | string
 export type NetworkType = 'Public' | 'Private'
 export type DeviceIpType = 'Dynamic' | 'Static' | 'Fixed'
+export type ClientType = 'VNT' | 'IKEV2'
 
 export interface NetworkInfo {
   network_code: string
@@ -30,7 +31,7 @@ export interface DeviceInfo {
   device_id: string
   device_name: string
   device_version: string
-  client_type: 'VNT' | 'IKEV2'
+  client_type: ClientType
   ip: string | null
   current_ip: string | null
   ip_type: DeviceIpType | null
@@ -67,12 +68,15 @@ export interface CreateDevicePayload {
   device_id: string
   ip: string
   ip_type?: DeviceIpType
+  client_type: ClientType
+  ikev2_password?: string
 }
 
 export interface UpdateDevicePayload {
   network_code: string
   ip: string
   ip_type: DeviceIpType
+  ikev2_password?: string
 }
 
 export interface PeerServerInfo {
@@ -87,11 +91,12 @@ export interface PeerServersResponse {
   inbound: PeerServerInfo[]
 }
 
-export interface NetworkIkev2Info {
+export interface DeviceIkev2AccessInfo {
   service: Ikev2ServiceInfo
-  network: Ikev2NetworkInfo
   network_code: string
   network_net: string
+  username: string
+  password: string
 }
 
 export interface Ikev2ServiceInfo {
@@ -112,23 +117,6 @@ export interface Ikev2ServiceInfo {
   runtime_error: string | null
 }
 
-export interface Ikev2NetworkInfo {
-  enabled: boolean
-  psk_configured: boolean
-  eap_users: string[]
-}
-
-export interface Ikev2EapUserUpdate {
-  username: string
-  password?: string
-}
-
-export interface UpdateNetworkIkev2Payload {
-  enabled: boolean
-  psk?: string
-  eap_users: Ikev2EapUserUpdate[]
-}
-
 export interface UpdateIkev2ServicePayload {
   enabled: boolean
   ike_bind: string
@@ -138,11 +126,6 @@ export interface UpdateIkev2ServicePayload {
   dns: string[]
   cert?: string
   key?: string
-}
-
-export interface Ikev2Secrets {
-  psk: string | null
-  eap_users: Record<string, string>
 }
 
 export interface NetworkWhitelistSettings {
