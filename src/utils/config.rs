@@ -31,8 +31,10 @@ pub struct ConfigFile {
     pub ikev2: Option<Ikev2Config>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Ikev2Config {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     pub ike_bind: SocketAddr,
     pub natt_bind: SocketAddr,
     pub remote_id: String,
@@ -41,15 +43,36 @@ pub struct Ikev2Config {
     #[serde(default)]
     pub dns: Vec<Ipv4Addr>,
     pub public_ip: Option<std::net::IpAddr>,
+    #[serde(default)]
     pub networks: Vec<Ikev2NetworkConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Ikev2NetworkConfig {
     pub network_code: String,
     pub psk: Option<String>,
     #[serde(default)]
     pub eap_users: HashMap<String, String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for Ikev2Config {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ike_bind: "0.0.0.0:500".parse().expect("valid IKE bind default"),
+            natt_bind: "0.0.0.0:4500".parse().expect("valid NAT-T bind default"),
+            remote_id: String::new(),
+            cert: None,
+            key: None,
+            dns: Vec::new(),
+            public_ip: None,
+            networks: Vec::new(),
+        }
+    }
 }
 impl Default for ConfigFile {
     fn default() -> Self {
@@ -118,13 +141,15 @@ impl Ikev2Config {
         if self.ike_bind == self.natt_bind {
             anyhow::bail!("ikev2.ike_bind and ikev2.natt_bind must be different");
         }
-        if self.remote_id.trim().is_empty() {
-            anyhow::bail!("ikev2.remote_id cannot be empty");
+        if self.enabled {
+            validate_ikev2_remote_id(&self.remote_id)?;
+        }
+        if self.cert.is_some() != self.key.is_some() {
+            anyhow::bail!("ikev2.cert and ikev2.key must both be set or both be empty");
         }
         let mut network_codes = HashSet::new();
         let mut psks = HashSet::new();
         let mut users = HashSet::new();
-        let mut has_eap = false;
         for network in &self.networks {
             validate_network_code(&network.network_code)?;
             if !network_codes.insert(network.network_code.as_str()) {
@@ -147,20 +172,48 @@ impl Ikev2Config {
                 if !users.insert(user.as_str()) {
                     anyhow::bail!("IKEv2 EAP usernames must be unique across networks");
                 }
-                has_eap = true;
             }
-            if psk.is_none() && network.eap_users.is_empty() {
+            if network.eap_users.is_empty() {
                 anyhow::bail!(
-                    "IKEv2 network '{}' must configure psk or eap_users",
+                    "IKEv2 network '{}' must configure at least one EAP-MSCHAPv2 user",
                     network.network_code
                 );
             }
         }
-        if has_eap && (self.cert.is_none() || self.key.is_none()) {
-            anyhow::bail!("IKEv2 EAP authentication requires ikev2.cert and ikev2.key");
-        }
+        // When both paths are empty the web/startup preparation layer generates a
+        // locally managed CA and server certificate before starting the responder.
         Ok(())
     }
+}
+
+fn validate_ikev2_remote_id(remote_id: &str) -> anyhow::Result<()> {
+    if remote_id.trim().is_empty() {
+        anyhow::bail!("ikev2.remote_id cannot be empty");
+    }
+    if remote_id.trim() != remote_id {
+        anyhow::bail!("ikev2.remote_id cannot contain surrounding whitespace");
+    }
+    if remote_id.parse::<Ipv4Addr>().is_ok() {
+        return Ok(());
+    }
+    if remote_id.parse::<std::net::IpAddr>().is_ok() {
+        anyhow::bail!("ikev2.remote_id only supports a domain name or IPv4 address");
+    }
+    if remote_id.len() > 253
+        || !remote_id.is_ascii()
+        || remote_id.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+    {
+        anyhow::bail!("ikev2.remote_id must be a valid domain name or IPv4 address");
+    }
+    Ok(())
 }
 
 pub fn validate_network_code(network_code: &str) -> anyhow::Result<()> {
@@ -206,6 +259,7 @@ pub fn load_ikev2_config(path: &Path) -> anyhow::Result<Option<Ikev2Config>> {
     Ok(ConfigFile::load_from(Some(path.to_path_buf()))?.ikev2)
 }
 
+#[cfg(test)]
 pub fn update_ikev2_network(
     path: &Path,
     network_code: &str,
@@ -284,7 +338,133 @@ pub fn update_ikev2_network(
     Ok(ikev2)
 }
 
-fn persist_document(path: &Path, content: String) -> anyhow::Result<()> {
+pub fn update_ikev2_config(path: &Path, config: &Ikev2Config) -> anyhow::Result<Ikev2Config> {
+    config.validate()?;
+    let content = std::fs::read_to_string(path)?;
+    let mut document = content.parse::<DocumentMut>()?;
+    if !document.contains_key("ikev2") {
+        document["ikev2"] = Item::Table(Table::new());
+    }
+    let table = document["ikev2"]
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("ikev2 必须是表"))?;
+    insert_value(table, "enabled", Value::from(config.enabled));
+    insert_value(table, "ike_bind", Value::from(config.ike_bind.to_string()));
+    insert_value(
+        table,
+        "natt_bind",
+        Value::from(config.natt_bind.to_string()),
+    );
+    insert_value(table, "remote_id", Value::from(config.remote_id.clone()));
+    match &config.cert {
+        Some(path) => {
+            insert_value(
+                table,
+                "cert",
+                Value::from(path.to_string_lossy().to_string()),
+            );
+        }
+        None => {
+            table.remove("cert");
+        }
+    }
+    match &config.key {
+        Some(path) => {
+            insert_value(
+                table,
+                "key",
+                Value::from(path.to_string_lossy().to_string()),
+            );
+        }
+        None => {
+            table.remove("key");
+        }
+    }
+    match config.public_ip {
+        Some(ip) => {
+            insert_value(table, "public_ip", Value::from(ip.to_string()));
+        }
+        None => {
+            table.remove("public_ip");
+        }
+    }
+    let mut dns = Array::new();
+    for address in &config.dns {
+        dns.push(address.to_string());
+    }
+    insert_value(table, "dns", Value::Array(dns));
+
+    if !table.contains_key("networks") {
+        table.insert("networks", Item::ArrayOfTables(ArrayOfTables::new()));
+    }
+    let networks = table
+        .get_mut("networks")
+        .and_then(Item::as_array_of_tables_mut)
+        .ok_or_else(|| anyhow::anyhow!("ikev2.networks 必须是表数组"))?;
+    for index in (0..networks.len()).rev() {
+        let code = networks
+            .get(index)
+            .and_then(|table| table.get("network_code"))
+            .and_then(Item::as_str);
+        if !config
+            .networks
+            .iter()
+            .any(|network| Some(network.network_code.as_str()) == code)
+        {
+            networks.remove(index);
+        }
+    }
+    for network in &config.networks {
+        let position = networks.iter().position(|table| {
+            table.get("network_code").and_then(Item::as_str) == Some(network.network_code.as_str())
+        });
+        if position.is_none() {
+            networks.push(Table::new());
+        }
+        let index = position.unwrap_or(networks.len() - 1);
+        let network_table = networks
+            .get_mut(index)
+            .expect("network table was just located or inserted");
+        insert_value(
+            network_table,
+            "network_code",
+            Value::from(network.network_code.clone()),
+        );
+        if let Some(psk) = &network.psk {
+            insert_value(network_table, "psk", Value::from(psk.clone()));
+        } else {
+            network_table.remove("psk");
+        }
+        let mut users = InlineTable::new();
+        let mut entries = network.eap_users.iter().collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.0.cmp(right.0));
+        for (username, password) in entries {
+            users.insert(username, Value::from(password.clone()));
+        }
+        insert_value(network_table, "eap_users", Value::InlineTable(users));
+    }
+
+    let rendered = document.to_string();
+    let parsed: ConfigFile = toml::from_str(&rendered)?;
+    let ikev2 = parsed
+        .ikev2
+        .ok_or_else(|| anyhow::anyhow!("IKEv2 服务尚未配置"))?;
+    persist_document(path, rendered)?;
+    Ok(ikev2)
+}
+
+fn insert_value(table: &mut Table, key: &str, value: Value) {
+    let decor = table
+        .get(key)
+        .and_then(Item::as_value)
+        .map(|value| value.decor().clone());
+    table.insert(key, Item::Value(value));
+    if let (Some(decor), Some(value)) = (decor, table.get_mut(key).and_then(Item::as_value_mut)) {
+        *value.decor_mut() = decor;
+    }
+}
+
+pub(crate) fn persist_config_text(path: &Path, content: String) -> anyhow::Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -298,6 +478,10 @@ fn persist_document(path: &Path, content: String) -> anyhow::Result<()> {
     temporary.as_file().sync_all()?;
     temporary.persist(path)?;
     Ok(())
+}
+
+fn persist_document(path: &Path, content: String) -> anyhow::Result<()> {
+    persist_config_text(path, content)
 }
 
 pub fn print_example() {
@@ -338,6 +522,7 @@ key = "key.pem"
 
 # IKEv2/IPsec 接入（可选；启用后通常需要管理员/root权限绑定 500/4500）
 # [ikev2]
+# enabled = true
 # ike_bind = "0.0.0.0:500"
 # natt_bind = "0.0.0.0:4500"
 # remote_id = "vpn.example.com"
@@ -363,8 +548,8 @@ key = "key.pem"
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigFile, Ikev2NetworkConfig, load_ikev2_config, update_ikev2_network, update_white_list,
-        validate_network_code,
+        ConfigFile, Ikev2Config, Ikev2NetworkConfig, load_ikev2_config, update_ikev2_config,
+        update_ikev2_network, update_white_list, validate_network_code,
     };
     use std::collections::{HashMap, HashSet};
 
@@ -380,6 +565,50 @@ lease_duration = 86400
 
         assert!(config.white_list.is_empty());
         assert!(config.custom_nets.is_empty());
+    }
+
+    #[test]
+    fn ikev2_enabled_is_backward_compatible_and_disabled_drafts_allow_empty_identity() {
+        let legacy: ConfigFile = toml::from_str(
+            r#"
+network = "10.26.0.0/24"
+lease_duration = 86400
+[ikev2]
+ike_bind = "0.0.0.0:500"
+natt_bind = "0.0.0.0:4500"
+remote_id = "vpn.example.com"
+"#,
+        )
+        .unwrap();
+        assert!(legacy.ikev2.unwrap().enabled);
+
+        let draft: ConfigFile = toml::from_str(
+            r#"
+network = "10.26.0.0/24"
+lease_duration = 86400
+[ikev2]
+enabled = false
+ike_bind = "0.0.0.0:500"
+natt_bind = "0.0.0.0:4500"
+remote_id = ""
+"#,
+        )
+        .unwrap();
+        assert!(draft.validate().is_ok());
+        assert!(draft.ikev2.unwrap().networks.is_empty());
+
+        let mut identity = Ikev2Config {
+            enabled: true,
+            remote_id: "192.0.2.1".to_string(),
+            ..Ikev2Config::default()
+        };
+        assert!(identity.validate().is_ok());
+        identity.remote_id = "vpn.example.com".to_string();
+        assert!(identity.validate().is_ok());
+        identity.remote_id = "2001:db8::1".to_string();
+        assert!(identity.validate().is_err());
+        identity.remote_id = "not a host".to_string();
+        assert!(identity.validate().is_err());
     }
 
     #[test]
@@ -432,7 +661,7 @@ lease_duration = 86400
     }
 
     #[test]
-    fn ikev2_credentials_are_unique_and_eap_requires_certificate() {
+    fn ikev2_credentials_are_unique_and_empty_certificate_paths_enable_auto_generation() {
         let valid: ConfigFile = toml::from_str(
             r#"
 network = "10.26.0.0/24"
@@ -450,6 +679,7 @@ eap_users = { alice = "password" }
 [[ikev2.networks]]
 network_code = "beta"
 psk = "beta-secret"
+eap_users = { bob = "password" }
 "#,
         )
         .unwrap();
@@ -466,9 +696,11 @@ remote_id = "vpn.example.com"
 [[ikev2.networks]]
 network_code = "alpha"
 psk = "same"
+eap_users = { alice = "password" }
 [[ikev2.networks]]
 network_code = "beta"
 psk = "same"
+eap_users = { bob = "password" }
 "#,
         )
         .unwrap();
@@ -488,7 +720,7 @@ eap_users = { alice = "password" }
 "#,
         )
         .unwrap();
-        assert!(missing_certificate.validate().is_err());
+        assert!(missing_certificate.validate().is_ok());
     }
 
     #[test]
@@ -509,9 +741,11 @@ key = "ike.key"
 [[ikev2.networks]]
 network_code = "alpha"
 psk = "old"
+eap_users = { alice = "old-password" }
 [[ikev2.networks]]
 network_code = "beta"
 psk = "beta-secret"
+eap_users = { bob = "password" }
 "#,
         )
         .unwrap();
@@ -546,5 +780,50 @@ psk = "beta-secret"
         let config = load_ikev2_config(&path).unwrap().unwrap();
         assert_eq!(config.networks.len(), 1);
         assert_eq!(config.networks[0].network_code, "beta");
+    }
+
+    #[test]
+    fn updating_full_ikev2_config_preserves_comments_and_unknown_fields() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"# root comment
+network = "10.26.0.0/24"
+lease_duration = 86400
+[ikev2]
+enabled = true
+ike_bind = "0.0.0.0:500" # bind comment
+natt_bind = "0.0.0.0:4500"
+remote_id = "old.example.com"
+future_global_option = "keep"
+[[ikev2.networks]]
+network_code = "alpha"
+psk = "old"
+eap_users = { alice = "old-password" }
+future_network_option = 42 # network comment
+[[ikev2.networks]]
+network_code = "beta"
+psk = "beta-secret"
+eap_users = { bob = "password" }
+"#,
+        )
+        .unwrap();
+
+        let mut config = load_ikev2_config(&path).unwrap().unwrap();
+        config.remote_id = "vpn.example.com".to_string();
+        config.networks[0].psk = Some("new-secret".to_string());
+        update_ikev2_config(&path, &config).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("# root comment"));
+        assert!(content.contains("# bind comment"));
+        assert!(content.contains("future_global_option = \"keep\""));
+        assert!(content.contains("future_network_option = 42 # network comment"));
+        assert!(content.contains("network_code = \"beta\""));
+        let updated = load_ikev2_config(&path).unwrap().unwrap();
+        assert_eq!(updated.remote_id, "vpn.example.com");
+        assert_eq!(updated.networks[0].psk.as_deref(), Some("new-secret"));
+        assert_eq!(updated.networks[1].psk.as_deref(), Some("beta-secret"));
     }
 }

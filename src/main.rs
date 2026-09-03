@@ -36,7 +36,17 @@ async fn main() -> anyhow::Result<()> {
         .conf
         .clone()
         .unwrap_or_else(|| PathBuf::from("config.toml"));
-    let conf = ConfigFile::load_from(args.conf)?;
+    let mut conf = ConfigFile::load_from(args.conf)?;
+    if let Some(ikev2) = conf.ikev2.as_mut()
+        && ikev2.enabled
+    {
+        let before = ikev2.clone();
+        utils::ikev2_cert::prepare_certificate(ikev2, &config_path)?;
+        server::ikev2::validate_runtime_config(ikev2)?;
+        if *ikev2 != before {
+            utils::config::update_ikev2_config(&config_path, ikev2)?;
+        }
+    }
     if conf.persistence {
         server::control_server::db::init_db_pool().await?;
     }
@@ -80,7 +90,7 @@ async fn main() -> anyhow::Result<()> {
         init_peer_manager(&peer_conf, &control_service).await;
     }
 
-    if let Some(ikev2_config) = ikev2_config {
+    if let Some(ikev2_config) = ikev2_config.filter(|config| config.enabled) {
         let ikev2 = server::ikev2::start(ikev2_config, control_service.clone()).await?;
         control_service.set_ikev2_manager(ikev2);
     }

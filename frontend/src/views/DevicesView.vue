@@ -8,6 +8,7 @@ import {
   Pencil,
   Plus,
   Search,
+  ShieldCheck,
   Trash2,
 } from '@lucide/vue'
 import { computed, ref, watch } from 'vue'
@@ -17,6 +18,7 @@ import { deviceApi } from '@/api/modules'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import BaseModal from '@/components/BaseModal.vue'
 import LatencyBadge from '@/components/LatencyBadge.vue'
+import Ikev2Settings from '@/components/Ikev2Settings.vue'
 import SpeedChart from '@/components/SpeedChart.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import { useDeviceMonitor, type DeviceGroup } from '@/composables/useDeviceMonitor'
@@ -29,6 +31,7 @@ const router = useRouter()
 const toast = useToast()
 
 const networkCode = computed(() => (route.params.code as string | undefined) ?? '')
+const activeTab = computed(() => route.query.tab === 'ikev2' ? 'ikev2' : 'devices')
 const monitor = useDeviceMonitor()
 const { mergedDevices, loading, search } = monitor
 
@@ -47,6 +50,10 @@ const inputClass =
 
 function goBack() {
   router.push({ name: 'networks' })
+}
+
+function selectTab(tab: 'devices' | 'ikev2') {
+  router.replace({ name: 'devices', params: { code: networkCode.value }, query: tab === 'ikev2' ? { tab } : {} })
 }
 
 // ---------- 新增 / 编辑设备 ----------
@@ -160,11 +167,11 @@ async function executeDelete() {
           <ArrowLeft :size="16" />
         </button>
         <div>
-          <h2 class="text-xl font-bold text-slate-900 dark:text-slate-100">设备详情</h2>
+          <h2 class="text-xl font-bold text-slate-900 dark:text-slate-100">网络详情</h2>
           <p class="mt-0.5 font-mono text-sm text-slate-400 dark:text-slate-500">网络: {{ networkCode }}</p>
         </div>
       </div>
-      <div class="flex w-full items-center gap-3 lg:w-auto">
+      <div v-if="activeTab === 'devices'" class="flex w-full items-center gap-3 lg:w-auto">
         <div class="relative min-w-0 flex-1 lg:w-72">
           <Search :size="15" class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-500" />
           <input v-model="search" type="text" :class="searchInputClass" placeholder="搜索 IP 或设备 ID..." />
@@ -179,12 +186,21 @@ async function executeDelete() {
       </div>
     </div>
 
+    <div class="mb-5 flex gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm dark:border-slate-700 dark:bg-slate-800">
+      <button type="button" class="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition" :class="activeTab === 'devices' ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-slate-700'" @click="selectTab('devices')">
+        <ChartLine :size="16" />设备列表
+      </button>
+      <button type="button" class="flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition" :class="activeTab === 'ikev2' ? 'bg-cyan-600 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-50 dark:text-slate-400 dark:hover:bg-slate-700'" @click="selectTab('ikev2')">
+        <ShieldCheck :size="16" />IKEv2 接入
+      </button>
+    </div>
+
     <!-- 设备表格 -->
-    <div v-if="loading" class="flex justify-center bg-white py-20 shadow-sm dark:bg-slate-800">
+    <div v-if="activeTab === 'devices' && loading" class="flex justify-center bg-white py-20 shadow-sm dark:bg-slate-800">
       <LoaderCircle :size="28" class="animate-spin text-blue-500" />
     </div>
 
-    <div v-else class="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-800">
+    <div v-else-if="activeTab === 'devices'" class="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-800">
       <table class="w-full min-w-[1360px] text-left text-sm">
         <thead>
           <tr class="border-b border-slate-100 bg-slate-50/80 text-xs text-slate-500 dark:border-slate-700 dark:bg-slate-800/80 dark:text-slate-400">
@@ -391,6 +407,8 @@ async function executeDelete() {
         </tbody>
       </table>
     </div>
+
+    <Ikev2Settings v-else :network-code="networkCode" />
 
     <BaseModal
       :open="showDeviceModal"

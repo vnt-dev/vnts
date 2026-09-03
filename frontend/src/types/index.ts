@@ -88,18 +88,34 @@ export interface PeerServersResponse {
 }
 
 export interface NetworkIkev2Info {
-  service_configured: boolean
-  runtime_active: boolean
+  service: Ikev2ServiceInfo
+  network: Ikev2NetworkInfo
+  network_code: string
+  network_net: string
+}
+
+export interface Ikev2ServiceInfo {
+  configured: boolean
   enabled: boolean
-  ike_bind: string | null
-  natt_bind: string | null
-  remote_id: string | null
+  runtime_active: boolean
+  ike_bind: string
+  natt_bind: string
+  remote_id: string
   public_ip: string | null
   dns: string[]
+  cert: string | null
+  key: string | null
   certificate_configured: boolean
+  certificate_managed: boolean
+  certificate_not_after: number | null
+  ca_download_available: boolean
+  runtime_error: string | null
+}
+
+export interface Ikev2NetworkInfo {
+  enabled: boolean
   psk_configured: boolean
   eap_users: string[]
-  restart_required: boolean
 }
 
 export interface Ikev2EapUserUpdate {
@@ -110,8 +126,23 @@ export interface Ikev2EapUserUpdate {
 export interface UpdateNetworkIkev2Payload {
   enabled: boolean
   psk?: string
-  clear_psk?: boolean
   eap_users: Ikev2EapUserUpdate[]
+}
+
+export interface UpdateIkev2ServicePayload {
+  enabled: boolean
+  ike_bind: string
+  natt_bind: string
+  remote_id: string
+  public_ip?: string
+  dns: string[]
+  cert?: string
+  key?: string
+}
+
+export interface Ikev2Secrets {
+  psk: string | null
+  eap_users: Record<string, string>
 }
 
 export interface NetworkWhitelistSettings {

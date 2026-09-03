@@ -19,7 +19,7 @@ const routes: RouteRecordRaw[] = [
     path: '/devices/:code',
     name: 'devices',
     component: () => import('@/views/DevicesView.vue'),
-    meta: { title: '设备详情' },
+    meta: { title: '网络详情' },
   },
   {
     path: '/servers',

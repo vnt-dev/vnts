@@ -12,6 +12,10 @@ static/
 config.toml
 cert.pem
 key.pem
+ikev2-ca.pem
+ikev2-ca-key.pem
+ikev2-cert.pem
+ikev2-key.pem
 
 # 本地构建工具缓存（protoc 等）
 .tools/

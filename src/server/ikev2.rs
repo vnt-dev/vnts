@@ -151,8 +151,11 @@ enum Command {
     ReloadConfig {
         config: Box<Ikev2Config>,
         certificate: Option<CertificateMaterial>,
-        changed_network: String,
+        changed_network: Option<String>,
         response: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    Shutdown {
+        response: tokio::sync::oneshot::Sender<()>,
     },
 }
 
@@ -182,7 +185,7 @@ impl Ikev2Handle {
     pub async fn reload_network_config(
         &self,
         config: Ikev2Config,
-        changed_network: String,
+        changed_network: Option<String>,
     ) -> anyhow::Result<()> {
         config.validate()?;
         let certificate_config = config.clone();
@@ -204,6 +207,18 @@ impl Ikev2Handle {
             .await
             .context("IKEv2 service stopped while reloading")?
             .map_err(anyhow::Error::msg)
+    }
+
+    pub async fn shutdown(&self) {
+        let (response, receiver) = tokio::sync::oneshot::channel();
+        if self
+            .command_tx
+            .send(Command::Shutdown { response })
+            .await
+            .is_ok()
+        {
+            let _ = receiver.await;
+        }
     }
 }
 
@@ -233,10 +248,14 @@ struct Engine {
     command_rx: mpsc::Receiver<Command>,
     entropy: SystemEntropy,
     cookie_secret: [u8; 32],
+    shutdown: bool,
 }
 
 pub async fn start(config: Ikev2Config, control: ControlService) -> anyhow::Result<Ikev2Handle> {
     config.validate()?;
+    if !config.enabled {
+        bail!("IKEv2 service is disabled");
+    }
     let certificate = load_certificate(&config)?;
     let ike_socket = Arc::new(
         UdpSocket::bind(config.ike_bind)
@@ -274,6 +293,7 @@ pub async fn start(config: Ikev2Config, control: ControlService) -> anyhow::Resu
         command_rx,
         entropy: SystemEntropy,
         cookie_secret,
+        shutdown: false,
     };
     log::info!(
         "IKEv2 listening on {} and NAT-T {}",
@@ -327,6 +347,9 @@ impl Engine {
                 Some(command) = self.command_rx.recv() => {
                     if let Err(error) = self.handle_command(command).await {
                         log::debug!("IKEv2 outbound packet dropped: {error:#}");
+                    }
+                    if self.shutdown {
+                        return Ok(());
                     }
                 }
                 _ = cleanup.tick() => self.cleanup(),
@@ -539,7 +562,7 @@ impl Engine {
         for network in &self.networks {
             let Some(psk) = &network.psk else { continue };
             let config = AuthConfig {
-                id: Identification::fqdn(&self.config.remote_id),
+                id: responder_identity(&self.config.remote_id),
                 local: LocalAuth::Psk(psk.clone()),
                 peer: PeerAuth::Psk(psk.clone()),
             };
@@ -560,7 +583,7 @@ impl Engine {
         };
         let psk = network.psk.context("missing PSK")?;
         let auth = AuthConfig {
-            id: Identification::fqdn(&self.config.remote_id),
+            id: responder_identity(&self.config.remote_id),
             local: LocalAuth::Psk(psk.clone()),
             peer: PeerAuth::Psk(psk),
         };
@@ -627,7 +650,7 @@ impl Engine {
         let child_spi = random_nonzero_u32(&mut self.entropy);
         let mut responder = EapResponder::new_multi(
             half.sa.clone(),
-            Identification::fqdn(&self.config.remote_id),
+            responder_identity(&self.config.remote_id),
             ServerAuth::Cert {
                 key: certificate.signing.signing_key()?,
                 chain: certificate.chain.clone(),
@@ -939,7 +962,10 @@ impl Engine {
                     .established
                     .iter()
                     .filter_map(|(id, established)| {
-                        (established.session.network_code == changed_network).then_some(*id)
+                        changed_network
+                            .as_ref()
+                            .is_none_or(|network| established.session.network_code == *network)
+                            .then_some(*id)
                     })
                     .collect::<Vec<_>>();
                 for session_id in session_ids {
@@ -954,6 +980,15 @@ impl Engine {
                 self.eap_credentials = eap_credentials;
                 self.certificate = certificate;
                 let _ = response.send(Ok(()));
+                return Ok(());
+            }
+            Command::Shutdown { response } => {
+                let session_ids = self.established.keys().copied().collect::<Vec<_>>();
+                for session_id in session_ids {
+                    self.disconnect_established(session_id).await;
+                }
+                self.shutdown = true;
+                let _ = response.send(());
                 return Ok(());
             }
         };
@@ -1234,6 +1269,20 @@ fn identity_string(identity: &Identification) -> anyhow::Result<String> {
     String::from_utf8(identity.data.clone()).context("IKEv2 Local ID must be UTF-8")
 }
 
+fn responder_identity(remote_id: &str) -> Identification {
+    match remote_id.parse::<IpAddr>() {
+        Ok(IpAddr::V4(address)) => Identification {
+            id_type: ryke::ikev2::payload::id_type::IPV4_ADDR,
+            data: address.octets().to_vec(),
+        },
+        Ok(IpAddr::V6(address)) => Identification {
+            id_type: ryke::ikev2::payload::id_type::IPV6_ADDR,
+            data: address.octets().to_vec(),
+        },
+        Err(_) => Identification::fqdn(remote_id),
+    }
+}
+
 fn checked_ipv4(packet: &[u8]) -> Option<(Ipv4Addr, Ipv4Addr, usize)> {
     let ipv4 = Ipv4Packet::new(packet)?;
     let header_length = usize::from(ipv4.get_header_length()) * 4;
@@ -1377,17 +1426,9 @@ fn narrow_tsr(
 }
 
 fn load_certificate(config: &Ikev2Config) -> anyhow::Result<Option<CertificateMaterial>> {
-    let has_eap = config
-        .networks
-        .iter()
-        .any(|network| !network.eap_users.is_empty());
-    if !has_eap {
+    let Some(cert_path) = config.cert.as_ref() else {
         return Ok(None);
-    }
-    let cert_path = config
-        .cert
-        .as_ref()
-        .context("ikev2.cert is required for EAP")?;
+    };
     let key_path = config
         .key
         .as_ref()
@@ -1400,7 +1441,7 @@ fn load_certificate(config: &Ikev2Config) -> anyhow::Result<Option<CertificateMa
         .map(|cert| cert.as_ref().to_vec())
         .collect::<Vec<_>>();
     let leaf = chain.first().context("IKEv2 certificate chain is empty")?;
-    if !ryke::ikev2::sign::cert_has_dns_name(leaf, &config.remote_id).map_err(anyhow::Error::msg)? {
+    if !crate::utils::ikev2_cert::certificate_matches_remote_id(leaf, &config.remote_id)? {
         bail!("IKEv2 certificate SAN does not match remote_id");
     }
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -1477,6 +1518,7 @@ mod tests {
             natt_port = unused_udp_port();
         }
         let config = Ikev2Config {
+            enabled: true,
             ike_bind: SocketAddr::from(([127, 0, 0, 1], ike_port)),
             natt_bind: SocketAddr::from(([127, 0, 0, 1], natt_port)),
             remote_id: "vpn.example.com".to_string(),
@@ -1487,7 +1529,7 @@ mod tests {
             networks: vec![Ikev2NetworkConfig {
                 network_code: "ike-test".to_string(),
                 psk: Some("test-secret".to_string()),
-                eap_users: HashMap::new(),
+                eap_users: HashMap::from([("required-user".to_string(), "password".to_string())]),
             }],
         };
         let mut reloaded_config = config.clone();
@@ -1669,7 +1711,7 @@ mod tests {
         assert_eq!(opened, reply_ip);
         reloaded_config.networks[0].psk = Some("rotated-secret".to_string());
         handle
-            .reload_network_config(reloaded_config, "ike-test".to_string())
+            .reload_network_config(reloaded_config, Some("ike-test".to_string()))
             .await
             .unwrap();
         assert!(
@@ -1696,6 +1738,7 @@ mod tests {
         std::fs::write(&key_path, generated.signing_key.serialize_pem()).unwrap();
         let cert_der = generated.cert.der().as_ref().to_vec();
         let config = Ikev2Config {
+            enabled: true,
             ike_bind: SocketAddr::from(([127, 0, 0, 1], ike_port)),
             natt_bind: SocketAddr::from(([127, 0, 0, 1], natt_port)),
             remote_id: "vpn.example.com".to_string(),

@@ -83,6 +83,7 @@ pub struct ControlService {
     device_mutation_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     peer_manager: Arc<RwLock<Option<Arc<crate::server::peer_server::PeerServerManager>>>>,
     ikev2_manager: Arc<RwLock<Option<crate::server::ikev2::Ikev2Handle>>>,
+    ikev2_runtime_error: Arc<RwLock<Option<String>>>,
 }
 
 impl ControlService {
@@ -111,6 +112,7 @@ impl ControlService {
             device_mutation_locks: Arc::new(DashMap::new()),
             peer_manager: Arc::new(RwLock::new(None)),
             ikev2_manager: Arc::new(RwLock::new(None)),
+            ikev2_runtime_error: Arc::new(RwLock::new(None)),
         };
 
         let cleanup_interval = Duration::from_secs(30 * 60);
@@ -954,6 +956,21 @@ impl ControlService {
 
     pub fn get_ikev2_manager(&self) -> Option<crate::server::ikev2::Ikev2Handle> {
         self.ikev2_manager.read().clone()
+    }
+
+    pub fn replace_ikev2_manager(
+        &self,
+        manager: Option<crate::server::ikev2::Ikev2Handle>,
+    ) -> Option<crate::server::ikev2::Ikev2Handle> {
+        std::mem::replace(&mut *self.ikev2_manager.write(), manager)
+    }
+
+    pub fn set_ikev2_runtime_error(&self, error: Option<String>) {
+        *self.ikev2_runtime_error.write() = error;
+    }
+
+    pub fn get_ikev2_runtime_error(&self) -> Option<String> {
+        self.ikev2_runtime_error.read().clone()
     }
 
     pub fn subnet_snapshot(

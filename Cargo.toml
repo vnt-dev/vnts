@@ -16,9 +16,11 @@ futures = "0.3"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rustls-pemfile = "2"
-rcgen = "0.14"
+rcgen = { version = "0.14", features = ["x509-parser"] }
 sha2 = "0.10"
 hex = "0.4"
+der = "0.7"
+x509-cert = "0.2"
 
 quinn = { version = "0.11", default-features = false, features = ["log", "platform-verifier", "rustls", "runtime-tokio"] }
 bytes = "1"

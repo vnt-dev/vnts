@@ -1,13 +1,16 @@
-import { fetchSilent, request } from './client'
+import { downloadFile, fetchSilent, request } from './client'
 import type {
   CreateNetworkPayload,
   CreateDevicePayload,
   DeviceInfo,
+  Ikev2Secrets,
   LoginResult,
   NetworkInfo,
   NetworkIkev2Info,
   NetworkWhitelistSettings,
   PeerServersResponse,
+  Ikev2ServiceInfo,
+  UpdateIkev2ServicePayload,
   UpdateNetworkPayload,
   UpdateNetworkIkev2Payload,
   UpdateDevicePayload,
@@ -40,6 +43,10 @@ export const networkApi = {
       method: 'PUT',
       body: payload,
     }),
+  getIkev2Secrets: (code: string) =>
+    request<Ikev2Secrets>(`/networks/${encodeURIComponent(code)}/ikev2/secrets`),
+  downloadCaCertificate: (format: 'der' | 'pem' = 'der') =>
+    downloadFile(`/ikev2/ca-certificate?format=${format}`, `vnt-ikev2-ca.${format === 'der' ? 'cer' : 'pem'}`),
 }
 
 export const deviceApi = {
@@ -79,4 +86,12 @@ export const settingsApi = {
       method: 'PUT',
       body: payload,
     }),
+  getIkev2: () => request<Ikev2ServiceInfo>('/settings/ikev2'),
+  updateIkev2: (payload: UpdateIkev2ServicePayload) =>
+    request<Ikev2ServiceInfo>('/settings/ikev2', {
+      method: 'PUT',
+      body: payload,
+    }),
+  downloadIkev2Ca: (format: 'der' | 'pem' = 'der') =>
+    downloadFile(`/ikev2/ca-certificate?format=${format}`, `vnt-ikev2-ca.${format === 'der' ? 'cer' : 'pem'}`),
 }
