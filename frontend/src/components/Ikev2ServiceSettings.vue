@@ -34,6 +34,10 @@ const status = computed(() => {
 const certificateExpiry = computed(() => info.value?.certificate_not_after
   ? new Date(info.value.certificate_not_after * 1000).toLocaleDateString()
   : '未知')
+const usesNonstandardPorts = computed(() => {
+  const port = (address: string) => Number(address.match(/:(\d+)$/)?.[1])
+  return port(form.ikeBind.trim()) !== 500 || port(form.nattBind.trim()) !== 4500
+})
 
 function applyInfo(value: Ikev2ServiceInfo) {
   info.value = value
@@ -121,12 +125,13 @@ onMounted(load)
         <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-cyan-50 text-cyan-600 dark:bg-cyan-500/10 dark:text-cyan-300"><ShieldCheck :size="21" /></div>
         <div><div class="flex items-center gap-2"><h3 class="font-semibold text-slate-900 dark:text-slate-100">IKEv2/IPsec 基础配置</h3><span v-if="info" class="rounded-full px-2.5 py-1 text-xs font-semibold" :class="status.cls">{{ status.text }}</span></div><p class="mt-0.5 text-sm text-slate-500 dark:text-slate-400">全局共享设置；各网络的 EAP/PSK 凭据在对应网络详情中管理</p></div>
       </div>
-      <label v-if="info" class="flex items-center gap-2 text-sm font-medium"><span>{{ form.enabled ? '服务已启用' : '启用服务' }}</span><input v-model="form.enabled" type="checkbox" class="h-5 w-5 accent-cyan-600" /></label>
+      <label v-if="info" class="flex items-center gap-2 text-sm font-medium"><span>启用服务</span><input v-model="form.enabled" type="checkbox" class="h-5 w-5 accent-cyan-600" /></label>
     </div>
     <div v-if="loading" class="flex justify-center py-20"><LoaderCircle :size="28" class="animate-spin text-cyan-500" /></div>
     <div v-else-if="info" class="space-y-5 p-5 sm:p-6">
       <p v-if="saveError || info.runtime_error" class="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600 dark:bg-red-500/10 dark:text-red-300">{{ saveError || info.runtime_error }}</p>
       <div class="rounded-lg bg-amber-50 px-3.5 py-3 text-sm leading-6 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">修改监听地址、Remote ID 或证书会断开现有 IKEv2 会话并要求客户端重连。保存失败时自动恢复原配置和服务。</div>
+      <div v-if="usesNonstandardPorts" class="rounded-lg border border-orange-300 bg-orange-50 px-3.5 py-3 text-sm font-medium leading-6 text-orange-700 dark:border-orange-500/40 dark:bg-orange-500/10 dark:text-orange-300">当前使用了非标准 IKEv2 端口。Windows、macOS、iOS、Android 等系统内置客户端通常不能指定非 UDP 500/4500 端口，可能无法连接；除非使用明确支持自定义端口的客户端，否则建议保持默认端口。</div>
       <div class="grid gap-5 lg:grid-cols-2">
         <div><label class="label">IKE 监听地址</label><input v-model="form.ikeBind" class="field" placeholder="0.0.0.0:500" /><p class="hint">初始协商监听地址，通常保持 0.0.0.0:500；防火墙需放行 UDP 500。</p></div>
         <div><label class="label">NAT-T 监听地址</label><input v-model="form.nattBind" class="field" placeholder="0.0.0.0:4500" /><p class="hint">NAT-T/ESP 数据监听地址，通常保持 0.0.0.0:4500；需放行 UDP 4500。</p></div>

@@ -80,16 +80,21 @@ pub fn prepare_certificate(
     config: &mut Ikev2Config,
     config_path: &Path,
 ) -> anyhow::Result<CertificateInfo> {
+    let directory = config_directory(config_path);
+    let default_cert = directory.join(CERT_FILE);
+    let default_key = directory.join(KEY_FILE);
     if !config.enabled {
+        let managed = is_managed_certificate(config, config_path);
+        if managed {
+            config.cert = Some(default_cert);
+            config.key = Some(default_key);
+        }
         return Ok(CertificateInfo {
-            managed: is_managed_certificate(config, config_path),
+            managed,
             ca_path: None,
             not_after: None,
         });
     }
-    let directory = config_directory(config_path);
-    let default_cert = directory.join(CERT_FILE);
-    let default_key = directory.join(KEY_FILE);
     let managed = match (&config.cert, &config.key) {
         (None, None) => {
             config.cert = Some(default_cert.clone());
@@ -103,6 +108,11 @@ pub fn prepare_certificate(
     };
 
     if managed {
+        // Windows canonicalize() returns verbatim paths such as \\?\D:\..., which
+        // are valid but confusing in TOML and the web UI. Always persist the
+        // normalized managed paths, including when migrating an existing config.
+        config.cert = Some(default_cert.clone());
+        config.key = Some(default_key.clone());
         let ca_cert = directory.join(CA_CERT_FILE);
         let ca_key = directory.join(CA_KEY_FILE);
         let renew = !default_cert.exists()
@@ -138,13 +148,29 @@ fn config_directory(config_path: &Path) -> PathBuf {
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf())
+    normalize_path(std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf()))
 }
 
 fn paths_equal(left: &Path, right: &Path) -> bool {
-    let absolute_left = std::fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
-    let absolute_right = std::fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+    let absolute_left =
+        normalize_path(std::fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf()));
+    let absolute_right =
+        normalize_path(std::fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf()));
     absolute_left == absolute_right
+}
+
+fn normalize_path(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy();
+        if let Some(path) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{path}"));
+        }
+        if let Some(path) = text.strip_prefix(r"\\?\") {
+            return PathBuf::from(path);
+        }
+    }
+    path
 }
 
 fn certificate_needs_renewal(path: &Path, remote_id: &str) -> anyhow::Result<bool> {
@@ -321,6 +347,8 @@ mod tests {
     };
     use crate::utils::config::Ikev2Config;
     use std::io::Cursor;
+    #[cfg(windows)]
+    use std::path::PathBuf;
 
     #[test]
     fn managed_ca_issues_and_reissues_domain_and_ip_certificates() {
@@ -334,6 +362,15 @@ mod tests {
         };
         let first = prepare_certificate(&mut config, &config_path).unwrap();
         assert!(first.managed);
+        #[cfg(windows)]
+        assert!(
+            !config
+                .cert
+                .as_ref()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(r"\\?\")
+        );
         let ca_path = managed_ca_path(&config_path);
         let ca_before = std::fs::read(&ca_path).unwrap();
         let cert_path = config.cert.clone().unwrap();
@@ -353,6 +390,16 @@ mod tests {
                 .unwrap()
                 .unwrap();
         assert!(certificate_matches_remote_id(second_leaf.as_ref(), "192.0.2.10").unwrap());
+
+        #[cfg(windows)]
+        {
+            let cert = config.cert.as_ref().unwrap().to_string_lossy();
+            let key = config.key.as_ref().unwrap().to_string_lossy();
+            config.cert = Some(PathBuf::from(format!(r"\\?\{cert}")));
+            config.key = Some(PathBuf::from(format!(r"\\?\{key}")));
+            prepare_certificate(&mut config, &config_path).unwrap();
+            assert!(!config.cert.unwrap().to_string_lossy().starts_with(r"\\?\"));
+        }
 
         let backup = backup_managed_certificate_files(&config_path).unwrap();
         let key_path = config.key.as_ref().unwrap();
