@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { ArrowRight, Clock, Globe, Pencil, Server, Trash2 } from '@lucide/vue'
+import { ArrowRight, Clock, Globe, Pencil, Server, ShieldCheck, Trash2 } from '@lucide/vue'
 import { computed } from 'vue'
 import SourceBadge from './SourceBadge.vue'
 import type { NetworkInfo } from '@/types'
 import { formatDuration } from '@/utils/format'
 
 const props = defineProps<{ network: NetworkInfo }>()
-const emit = defineEmits<{ select: []; edit: []; remove: [] }>()
+const emit = defineEmits<{ select: []; edit: []; ikev2: []; remove: [] }>()
 
 const onlineRatio = computed(() =>
   props.network.all_count > 0
@@ -28,6 +28,13 @@ const onlineRatio = computed(() =>
         <p class="mt-0.5 font-mono text-sm text-slate-500 dark:text-slate-400">{{ network.net }}</p>
       </div>
       <div class="flex shrink-0 items-center gap-1">
+        <button
+          class="rounded-lg p-1.5 text-slate-400 transition hover:bg-cyan-50 hover:text-cyan-600 dark:text-slate-500 dark:hover:bg-cyan-500/10 dark:hover:text-cyan-400"
+          title="IKEv2 配置"
+          @click.stop="emit('ikev2')"
+        >
+          <ShieldCheck :size="15" />
+        </button>
         <button
           class="rounded-lg p-1.5 text-slate-400 transition hover:bg-blue-50 hover:text-blue-600 dark:text-slate-500 dark:hover:bg-blue-500/10 dark:hover:text-blue-400"
           title="编辑"

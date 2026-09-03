@@ -87,6 +87,33 @@ export interface PeerServersResponse {
   inbound: PeerServerInfo[]
 }
 
+export interface NetworkIkev2Info {
+  service_configured: boolean
+  runtime_active: boolean
+  enabled: boolean
+  ike_bind: string | null
+  natt_bind: string | null
+  remote_id: string | null
+  public_ip: string | null
+  dns: string[]
+  certificate_configured: boolean
+  psk_configured: boolean
+  eap_users: string[]
+  restart_required: boolean
+}
+
+export interface Ikev2EapUserUpdate {
+  username: string
+  password?: string
+}
+
+export interface UpdateNetworkIkev2Payload {
+  enabled: boolean
+  psk?: string
+  clear_psk?: boolean
+  eap_users: Ikev2EapUserUpdate[]
+}
+
 export interface NetworkWhitelistSettings {
   network_codes: string[]
 }

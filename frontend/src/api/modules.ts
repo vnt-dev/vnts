@@ -5,9 +5,11 @@ import type {
   DeviceInfo,
   LoginResult,
   NetworkInfo,
+  NetworkIkev2Info,
   NetworkWhitelistSettings,
   PeerServersResponse,
   UpdateNetworkPayload,
+  UpdateNetworkIkev2Payload,
   UpdateDevicePayload,
 } from '@/types'
 
@@ -31,6 +33,13 @@ export const networkApi = {
     request<boolean>(`/networks/${encodeURIComponent(code)}`, { method: 'PUT', body: payload }),
   remove: (code: string) =>
     request<boolean>(`/networks/${encodeURIComponent(code)}`, { method: 'DELETE' }),
+  getIkev2: (code: string) =>
+    request<NetworkIkev2Info>(`/networks/${encodeURIComponent(code)}/ikev2`),
+  updateIkev2: (code: string, payload: UpdateNetworkIkev2Payload) =>
+    request<NetworkIkev2Info>(`/networks/${encodeURIComponent(code)}/ikev2`, {
+      method: 'PUT',
+      body: payload,
+    }),
 }
 
 export const deviceApi = {

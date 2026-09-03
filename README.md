@@ -16,6 +16,8 @@
 
 IKEv2 客户端从对应网络的地址池获取虚拟 IP，并可跨互联服务端通信；启用了 `white_list` 时也要包含这些网络编号。普通 VNT 节点必须显式配置 `allow_ikev2 = true` 才会看到并接受 IKEv2 流量。
 
+全局 IKEv2 监听、Remote ID 和证书路径仍由 `config.toml` 管理；服务启动后，可在 Web 管理端的网络卡片中打开“IKEv2 配置”，按网络启停接入、轮换 PSK 或增删 EAP 用户。保存后会热加载，并断开该网络的旧 IKEv2 会话。
+
 客户端填写规则：服务器/Remote ID 使用 `remote_id`，PSK 模式的 Local ID 必须非空且保持稳定；EAP 模式使用 `eap_users` 中的用户名和密码，并在系统中信任签发 IKE 证书的 CA。Windows 原生客户端需把 IKE/ESP 加密算法配置为 `GCMAES256`、DH 组配置为 Group14。
 
 

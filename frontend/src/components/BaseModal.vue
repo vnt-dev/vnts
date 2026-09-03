@@ -4,6 +4,7 @@ import { X } from '@lucide/vue'
 defineProps<{
   open: boolean
   title?: string
+  wide?: boolean
 }>()
 
 const emit = defineEmits<{ close: [] }>()
@@ -14,7 +15,10 @@ const emit = defineEmits<{ close: [] }>()
     <Transition name="modal">
       <div v-if="open" class="fixed inset-0 z-50 flex items-center justify-center p-4">
         <div class="absolute inset-0 bg-slate-900/40" @click="emit('close')"></div>
-        <div class="relative w-full max-w-md rounded-2xl bg-white shadow-2xl dark:bg-slate-800">
+        <div
+          class="relative max-h-[90vh] w-full overflow-y-auto rounded-2xl bg-white shadow-2xl dark:bg-slate-800"
+          :class="wide ? 'max-w-2xl' : 'max-w-md'"
+        >
           <div v-if="title" class="flex items-center justify-between border-b border-slate-100 px-6 py-4 dark:border-slate-700">
             <h3 class="text-base font-bold text-slate-900 dark:text-slate-100">{{ title }}</h3>
             <button

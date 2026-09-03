@@ -8,7 +8,13 @@ import BaseModal from '@/components/BaseModal.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import NetworkCard from '@/components/NetworkCard.vue'
 import { useToast } from '@/composables/useToast'
-import type { CreateNetworkPayload, NetworkInfo, NetworkType } from '@/types'
+import type {
+  CreateNetworkPayload,
+  NetworkIkev2Info,
+  NetworkInfo,
+  NetworkType,
+  UpdateNetworkIkev2Payload,
+} from '@/types'
 
 const router = useRouter()
 const toast = useToast()
@@ -113,6 +119,100 @@ async function submitForm() {
   }
 }
 
+// ---------- 当前网络 IKEv2 ----------
+const showIkev2Modal = ref(false)
+const ikev2Loading = ref(false)
+const ikev2Saving = ref(false)
+const ikev2Target = ref<NetworkInfo | null>(null)
+const ikev2Info = ref<NetworkIkev2Info | null>(null)
+const ikev2Form = reactive({
+  enabled: false,
+  psk: '',
+  clear_psk: false,
+  eap_users: [] as Array<{ username: string; password: string; existing: boolean }>,
+})
+
+async function openIkev2Modal(net: NetworkInfo) {
+  ikev2Target.value = net
+  ikev2Info.value = null
+  ikev2Form.enabled = false
+  ikev2Form.psk = ''
+  ikev2Form.clear_psk = false
+  ikev2Form.eap_users = []
+  showIkev2Modal.value = true
+  ikev2Loading.value = true
+  try {
+    const info = await networkApi.getIkev2(net.network_code)
+    ikev2Info.value = info
+    ikev2Form.enabled = info.enabled
+    ikev2Form.eap_users = info.eap_users.map((username) => ({
+      username,
+      password: '',
+      existing: true,
+    }))
+  } catch (e) {
+    toast.error(e instanceof ApiError ? e.message : '加载 IKEv2 配置失败')
+  } finally {
+    ikev2Loading.value = false
+  }
+}
+
+function addEapUser() {
+  ikev2Form.eap_users.push({ username: '', password: '', existing: false })
+}
+
+function removeEapUser(index: number) {
+  ikev2Form.eap_users.splice(index, 1)
+}
+
+async function saveIkev2() {
+  if (!ikev2Target.value || !ikev2Info.value || ikev2Saving.value) return
+  const usernames = ikev2Form.eap_users.map((user) => user.username.trim())
+  if (usernames.some((username) => !username) || new Set(usernames).size !== usernames.length) {
+    toast.error('EAP 用户名不能为空或重复')
+    return
+  }
+  const missingPassword = ikev2Form.eap_users.some(
+    (user) => !user.existing && !user.password,
+  )
+  if (missingPassword) {
+    toast.error('新增 EAP 用户必须填写密码')
+    return
+  }
+  const payload: UpdateNetworkIkev2Payload = {
+    enabled: ikev2Form.enabled,
+    clear_psk: ikev2Form.clear_psk,
+    eap_users: ikev2Form.eap_users.map((user) => ({
+      username: user.username.trim(),
+      ...(user.password ? { password: user.password } : {}),
+    })),
+  }
+  if (ikev2Form.psk) payload.psk = ikev2Form.psk
+
+  ikev2Saving.value = true
+  try {
+    const info = await networkApi.updateIkev2(ikev2Target.value.network_code, payload)
+    ikev2Info.value = info
+    ikev2Form.psk = ''
+    ikev2Form.clear_psk = false
+    ikev2Form.eap_users = info.eap_users.map((username) => ({
+      username,
+      password: '',
+      existing: true,
+    }))
+    if (info.restart_required) {
+      toast.info('IKEv2 配置已保存，重启 vnts 后生效')
+    } else {
+      toast.success('IKEv2 配置已保存并热加载')
+    }
+    showIkev2Modal.value = false
+  } catch (e) {
+    toast.error(e instanceof ApiError ? e.message : '保存 IKEv2 配置失败')
+  } finally {
+    ikev2Saving.value = false
+  }
+}
+
 // ---------- 删除网络 ----------
 const confirmOpen = ref(false)
 const confirmMessage = ref('')
@@ -185,6 +285,7 @@ async function executeDelete() {
         :network="net"
         @select="selectNetwork(net)"
         @edit="openEditModal(net)"
+        @ikev2="openIkev2Modal(net)"
         @remove="confirmDelete(net)"
       />
     </div>
@@ -273,6 +374,86 @@ async function executeDelete() {
           </button>
         </div>
       </form>
+    </BaseModal>
+
+    <BaseModal
+      :open="showIkev2Modal"
+      :title="`IKEv2 · ${ikev2Target?.network_code || ''}`"
+      wide
+      @close="showIkev2Modal = false"
+    >
+      <div v-if="ikev2Loading" class="flex items-center justify-center gap-2 py-10 text-sm text-slate-400">
+        <LoaderCircle :size="16" class="animate-spin" />
+        正在读取 IKEv2 配置...
+      </div>
+      <div v-else-if="ikev2Info" class="space-y-5">
+        <div
+          v-if="!ikev2Info.service_configured"
+          class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-700 dark:border-amber-800 dark:bg-amber-500/10 dark:text-amber-300"
+        >
+          IKEv2 服务尚未配置。请先在 config.toml 添加全局 [ikev2] 监听、Remote ID 和证书配置并重启 vnts。
+        </div>
+
+        <div v-else class="grid gap-3 rounded-lg border border-slate-200 bg-slate-50 p-4 text-xs dark:border-slate-700 dark:bg-slate-900/60 sm:grid-cols-2">
+          <div><span class="text-slate-400">IKE：</span><span class="font-mono text-slate-700 dark:text-slate-300">{{ ikev2Info.ike_bind }}</span></div>
+          <div><span class="text-slate-400">NAT-T：</span><span class="font-mono text-slate-700 dark:text-slate-300">{{ ikev2Info.natt_bind }}</span></div>
+          <div><span class="text-slate-400">Remote ID：</span><span class="font-mono text-slate-700 dark:text-slate-300">{{ ikev2Info.remote_id }}</span></div>
+          <div><span class="text-slate-400">运行状态：</span><span :class="ikev2Info.runtime_active ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'">{{ ikev2Info.runtime_active ? '已启动' : '等待重启' }}</span></div>
+          <div><span class="text-slate-400">服务端证书：</span><span :class="ikev2Info.certificate_configured ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500'">{{ ikev2Info.certificate_configured ? '已配置' : '未配置（不能启用 EAP）' }}</span></div>
+          <div><span class="text-slate-400">DNS：</span><span class="font-mono text-slate-700 dark:text-slate-300">{{ ikev2Info.dns.join(', ') || '-' }}</span></div>
+        </div>
+
+        <label class="flex items-center justify-between rounded-lg border border-slate-200 px-4 py-3 dark:border-slate-700">
+          <div>
+            <div class="text-sm font-medium text-slate-800 dark:text-slate-200">允许 IKEv2 接入当前网络</div>
+            <div class="mt-0.5 text-xs text-slate-400">关闭后会删除该网络的认证配置并断开现有 IKEv2 会话</div>
+          </div>
+          <input v-model="ikev2Form.enabled" type="checkbox" class="h-4 w-4 accent-blue-600" :disabled="!ikev2Info.service_configured" />
+        </label>
+
+        <template v-if="ikev2Form.enabled">
+          <div>
+            <div class="mb-1.5 flex items-center justify-between">
+              <label class="text-sm font-medium text-slate-700 dark:text-slate-300">预共享密钥（PSK）</label>
+              <span v-if="ikev2Info.psk_configured" class="text-xs text-emerald-600 dark:text-emerald-400">已配置</span>
+            </div>
+            <input v-model="ikev2Form.psk" type="password" autocomplete="new-password" :class="inputClass" :placeholder="ikev2Info.psk_configured ? '留空保留原密钥' : '输入新的 PSK'" />
+            <label v-if="ikev2Info.psk_configured" class="mt-2 flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+              <input v-model="ikev2Form.clear_psk" type="checkbox" class="accent-red-500" />
+              删除现有 PSK
+            </label>
+          </div>
+
+          <div>
+            <div class="mb-2 flex items-center justify-between">
+              <div>
+                <div class="text-sm font-medium text-slate-700 dark:text-slate-300">EAP 用户</div>
+                <div class="mt-0.5 text-xs text-slate-400">已有用户密码留空表示不修改</div>
+              </div>
+              <button type="button" class="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50 dark:border-slate-600 dark:text-blue-400 dark:hover:bg-blue-500/10" @click="addEapUser">添加用户</button>
+            </div>
+            <div v-if="ikev2Form.eap_users.length" class="space-y-2">
+              <div v-for="(user, index) in ikev2Form.eap_users" :key="`${index}-${user.username}`" class="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_1fr_auto]">
+                <input v-model="user.username" type="text" :class="inputClass" placeholder="用户名" />
+                <input v-model="user.password" type="password" autocomplete="new-password" :class="inputClass" :placeholder="user.existing ? '留空保留密码' : '密码'" />
+                <button type="button" class="rounded-lg px-3 text-sm text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10" @click="removeEapUser(index)">删除</button>
+              </div>
+            </div>
+            <div v-else class="rounded-lg border border-dashed border-slate-200 py-5 text-center text-xs text-slate-400 dark:border-slate-700">未配置 EAP 用户</div>
+          </div>
+        </template>
+
+        <div class="flex justify-end gap-3 border-t border-slate-100 pt-4 dark:border-slate-700">
+          <button type="button" class="rounded-lg px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700" @click="showIkev2Modal = false">取消</button>
+          <button type="button" class="flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50" :disabled="ikev2Saving || !ikev2Info.service_configured" @click="saveIkev2">
+            <LoaderCircle v-if="ikev2Saving" :size="14" class="animate-spin" />
+            {{ ikev2Saving ? '保存中...' : '保存 IKEv2' }}
+          </button>
+        </div>
+      </div>
+      <div v-else class="rounded-lg border border-red-200 bg-red-50 px-4 py-5 text-sm text-red-600 dark:border-red-900 dark:bg-red-500/10 dark:text-red-300">
+        无法读取当前网络的 IKEv2 配置，请关闭窗口后重试。
+      </div>
     </BaseModal>
 
     <!-- 删除确认 -->

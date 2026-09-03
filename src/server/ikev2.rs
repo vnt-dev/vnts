@@ -29,6 +29,7 @@ const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_HALF_OPEN: usize = 1024;
 const IKE_FRAGMENT_CONTENT: usize = 1024;
 const NON_ESP_MARKER: [u8; 4] = [0; 4];
+type EapCredentialMap = HashMap<Vec<u8>, (String, String)>;
 
 #[derive(Clone)]
 struct NetworkAuth {
@@ -147,6 +148,12 @@ enum Command {
         device_id: String,
         response: tokio::sync::oneshot::Sender<bool>,
     },
+    ReloadConfig {
+        config: Box<Ikev2Config>,
+        certificate: Option<CertificateMaterial>,
+        changed_network: String,
+        response: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
 }
 
 #[derive(Clone)]
@@ -171,6 +178,33 @@ impl Ikev2Handle {
         }
         receiver.await.unwrap_or(false)
     }
+
+    pub async fn reload_network_config(
+        &self,
+        config: Ikev2Config,
+        changed_network: String,
+    ) -> anyhow::Result<()> {
+        config.validate()?;
+        let certificate_config = config.clone();
+        let certificate =
+            tokio::task::spawn_blocking(move || load_certificate(&certificate_config))
+                .await
+                .context("IKEv2 certificate validation task failed")??;
+        let (response, receiver) = tokio::sync::oneshot::channel();
+        self.command_tx
+            .send(Command::ReloadConfig {
+                config: Box::new(config),
+                certificate,
+                changed_network,
+                response,
+            })
+            .await
+            .context("IKEv2 service is not running")?;
+        receiver
+            .await
+            .context("IKEv2 service stopped while reloading")?
+            .map_err(anyhow::Error::msg)
+    }
 }
 
 struct SystemEntropy;
@@ -187,7 +221,7 @@ struct Engine {
     ike_socket: Arc<UdpSocket>,
     natt_socket: Arc<UdpSocket>,
     networks: Vec<NetworkAuth>,
-    eap_credentials: HashMap<Vec<u8>, (String, String)>,
+    eap_credentials: EapCredentialMap,
     certificate: Option<CertificateMaterial>,
     half_open: HashMap<(u64, u64), HalfOpen>,
     eap_pending: HashMap<(u64, u64), EapPending>,
@@ -215,23 +249,7 @@ pub async fn start(config: Ikev2Config, control: ControlService) -> anyhow::Resu
             .with_context(|| format!("failed to bind IKEv2 NAT-T socket {}", config.natt_bind))?,
     );
 
-    let networks = config
-        .networks
-        .iter()
-        .map(|network| NetworkAuth {
-            network_code: network.network_code.clone(),
-            psk: network.psk.as_ref().map(|value| value.as_bytes().to_vec()),
-        })
-        .collect();
-    let mut eap_credentials = HashMap::new();
-    for network in &config.networks {
-        for (user, password) in &network.eap_users {
-            eap_credentials.insert(
-                user.as_bytes().to_vec(),
-                (network.network_code.clone(), password.clone()),
-            );
-        }
-    }
+    let (networks, eap_credentials) = runtime_credentials(&config);
     let (command_tx, command_rx) = mpsc::channel(2048);
     let mut cookie_secret = [0u8; 32];
     rand::rng().fill_bytes(&mut cookie_secret);
@@ -268,6 +286,11 @@ pub async fn start(config: Ikev2Config, control: ControlService) -> anyhow::Resu
         }
     });
     Ok(handle)
+}
+
+pub(crate) fn validate_runtime_config(config: &Ikev2Config) -> anyhow::Result<()> {
+    config.validate()?;
+    load_certificate(config).map(|_| ())
 }
 
 impl Engine {
@@ -899,32 +922,38 @@ impl Engine {
                         .then_some(*id)
                 });
                 let disconnected = if let Some(session_id) = session_id {
-                    let deletion = {
-                        let established = self
-                            .established
-                            .get_mut(&session_id)
-                            .context("IKEv2 session disappeared")?;
-                        let iv = random_iv(&mut self.entropy);
-                        let payload = ryke::ikev2::payload::Delete::ike_sa().to_bytes();
-                        let packet = build_informational(
-                            &established.sa,
-                            established.outbound_message_id,
-                            false,
-                            &[(PayloadType::Delete, payload)],
-                            &iv,
-                        )
-                        .map_err(anyhow::Error::msg)?;
-                        established.outbound_message_id =
-                            established.outbound_message_id.wrapping_add(1);
-                        (packet, established.peer, established.natt)
-                    };
-                    let _ = self.send_ike(&deletion.0, deletion.1, deletion.2).await;
-                    self.remove_established(session_id);
-                    true
+                    self.disconnect_established(session_id).await
                 } else {
                     false
                 };
                 let _ = response.send(disconnected);
+                return Ok(());
+            }
+            Command::ReloadConfig {
+                config,
+                certificate,
+                changed_network,
+                response,
+            } => {
+                let session_ids = self
+                    .established
+                    .iter()
+                    .filter_map(|(id, established)| {
+                        (established.session.network_code == changed_network).then_some(*id)
+                    })
+                    .collect::<Vec<_>>();
+                for session_id in session_ids {
+                    self.disconnect_established(session_id).await;
+                }
+                self.half_open.clear();
+                self.eap_pending.clear();
+                self.fragments.clear();
+                let (networks, eap_credentials) = runtime_credentials(&config);
+                self.config = *config;
+                self.networks = networks;
+                self.eap_credentials = eap_credentials;
+                self.certificate = certificate;
+                let _ = response.send(Ok(()));
                 return Ok(());
             }
         };
@@ -962,6 +991,32 @@ impl Engine {
         }
         self.natt_socket.send_to(&esp, peer).await?;
         Ok(())
+    }
+
+    async fn disconnect_established(&mut self, session_id: u64) -> bool {
+        let deletion = self
+            .established
+            .get_mut(&session_id)
+            .and_then(|established| {
+                let iv = random_iv(&mut self.entropy);
+                let payload = ryke::ikev2::payload::Delete::ike_sa().to_bytes();
+                let packet = build_informational(
+                    &established.sa,
+                    established.outbound_message_id,
+                    false,
+                    &[(PayloadType::Delete, payload)],
+                    &iv,
+                )
+                .ok()?;
+                established.outbound_message_id = established.outbound_message_id.wrapping_add(1);
+                Some((packet, established.peer, established.natt))
+            });
+        if let Some((packet, peer, natt)) = deletion {
+            let _ = self.send_ike(&packet, peer, natt).await;
+        }
+        let existed = self.established.contains_key(&session_id);
+        self.remove_established(session_id);
+        existed
     }
 
     async fn handle_informational(
@@ -1193,6 +1248,27 @@ fn checked_ipv4(packet: &[u8]) -> Option<(Ipv4Addr, Ipv4Addr, usize)> {
     Some((ipv4.get_source(), ipv4.get_destination(), total_length))
 }
 
+fn runtime_credentials(config: &Ikev2Config) -> (Vec<NetworkAuth>, EapCredentialMap) {
+    let networks = config
+        .networks
+        .iter()
+        .map(|network| NetworkAuth {
+            network_code: network.network_code.clone(),
+            psk: network.psk.as_ref().map(|value| value.as_bytes().to_vec()),
+        })
+        .collect();
+    let mut eap_credentials = HashMap::new();
+    for network in &config.networks {
+        for (user, password) in &network.eap_users {
+            eap_credentials.insert(
+                user.as_bytes().to_vec(),
+                (network.network_code.clone(), password.clone()),
+            );
+        }
+    }
+    (networks, eap_credentials)
+}
+
 fn random_nonzero_u32(entropy: &mut impl Entropy) -> u32 {
     loop {
         let value = entropy.next_u64() as u32;
@@ -1414,6 +1490,7 @@ mod tests {
                 eap_users: HashMap::new(),
             }],
         };
+        let mut reloaded_config = config.clone();
         let control = ControlService::new(
             "10.77.0.0/24".parse::<Ipv4Net>().unwrap(),
             HashMap::new(),
@@ -1590,11 +1667,11 @@ mod tests {
         let (opened, next_header) = child.inbound.open(&buffer[..length]).unwrap();
         assert_eq!(next_header, ryke::esp::next_header::IPV4);
         assert_eq!(opened, reply_ip);
-        assert!(
-            handle
-                .disconnect_device("ike-test", "ikev2:psk:phone-a")
-                .await
-        );
+        reloaded_config.networks[0].psk = Some("rotated-secret".to_string());
+        handle
+            .reload_network_config(reloaded_config, "ike-test".to_string())
+            .await
+            .unwrap();
         assert!(
             !control
                 .get_network_state("ike-test")
