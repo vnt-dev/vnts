@@ -5,6 +5,7 @@ import { ApiError } from '@/api/client'
 import { deviceApi, settingsApi } from '@/api/modules'
 import { useToast } from '@/composables/useToast'
 import type { DeviceIkev2AccessInfo } from '@/types'
+import { copyText } from '@/utils/clipboard'
 import BaseModal from './BaseModal.vue'
 
 const props = defineProps<{ open: boolean; networkCode: string; deviceId: string }>()
@@ -56,8 +57,12 @@ async function load() {
 watch(() => [props.open, props.networkCode, props.deviceId], load, { immediate: true })
 
 async function copy(value: string) {
-  await navigator.clipboard.writeText(value)
-  toast.success('已复制到剪贴板')
+  try {
+    await copyText(value)
+    toast.success('已复制到剪贴板')
+  } catch {
+    toast.error('复制失败，请手动复制')
+  }
 }
 
 async function downloadCa() {

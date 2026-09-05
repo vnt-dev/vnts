@@ -28,6 +28,7 @@ import StatusBadge from '@/components/StatusBadge.vue'
 import { useDeviceMonitor, type DeviceGroup } from '@/composables/useDeviceMonitor'
 import { useToast } from '@/composables/useToast'
 import type { ClientType, DeviceInfo, DeviceIpType, NetworkInfo } from '@/types'
+import { copyText } from '@/utils/clipboard'
 import { formatBytes, formatSpeed } from '@/utils/format'
 
 const route = useRoute()
@@ -172,8 +173,12 @@ function changeClientType() {
 
 async function copyCredential(value: string) {
   if (!value) return
-  await navigator.clipboard.writeText(value)
-  toast.success('已复制到剪贴板')
+  try {
+    await copyText(value)
+    toast.success('已复制到剪贴板')
+  } catch {
+    toast.error('复制失败，请手动复制')
+  }
 }
 
 function openCreateDevice() {
