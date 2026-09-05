@@ -563,7 +563,13 @@ impl ControlService {
                     .as_millis() as u64;
 
                 for entry in state.sender_map().iter() {
-                    let _ip = *entry.key();
+                    let ip = *entry.key();
+                    if state
+                        .get_device_entry_by_ip(ip)
+                        .is_some_and(|device| device.client_type == ClientType::Ikev2)
+                    {
+                        continue;
+                    }
                     let sender = entry.value().clone();
 
                     let mut buf = BytesMut::zeroed(HEAD_LENGTH + 8);
@@ -2109,7 +2115,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let (vnt_sender, _vnt_receiver) = mpsc::channel(8);
+        let (vnt_sender, mut vnt_receiver) = mpsc::channel(8);
         let vnt = service
             .register(registration("ike-access", "vnt-a"), vnt_sender)
             .await
@@ -2125,7 +2131,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let (ike_sender, _ike_receiver) = mpsc::channel(8);
+        let (ike_sender, mut ike_receiver) = mpsc::channel(8);
         let ike = service
             .register_ikev2(
                 "ike-access".to_string(),
@@ -2143,6 +2149,19 @@ mod tests {
             client.ip == ike.ip
                 && client.client_type == crate::protocol::control_message::ClientType::Ikev2
         }));
+
+        service.ping_local_clients().await;
+        let ping = vnt_receiver
+            .try_recv()
+            .expect("VNT clients should receive server pings");
+        let ping = crate::protocol::ip_packet_protocol::NetPacket::new(ping)
+            .expect("server ping should be a valid packet");
+        assert_eq!(
+            ping.msg_type().unwrap(),
+            crate::protocol::ip_packet_protocol::MsgType::Ping
+        );
+        assert!(ping.is_gateway());
+        assert!(ike_receiver.try_recv().is_err());
 
         let packet = test_ipv4(ike.ip, vnt.ip);
         assert!(
