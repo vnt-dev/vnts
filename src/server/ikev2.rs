@@ -647,6 +647,12 @@ impl Engine {
                 .cloned()
                 .context("unknown EAP user")?;
             let identity = String::from_utf8(user).context("EAP username must be UTF-8")?;
+            log::info!(
+                "IKEv2 client authentication started: network={}, identity={}, peer={}",
+                network_code,
+                identity,
+                peer
+            );
             let (session, receiver) = self.register_endpoint(&network_code, &identity).await?;
             pending.responder.set_assigned(Some(AssignedConfig {
                 ip: session.ip,
@@ -717,7 +723,19 @@ impl Engine {
                     pending.fragmentation_supported,
                 );
             }
-            EapEvent::Failed => bail!("EAP authentication failed"),
+            EapEvent::Failed => {
+                if let Some(session) = &pending.session {
+                    log::info!(
+                        "IKEv2 client authentication failed: network={}, identity={}, peer={}",
+                        session.network_code,
+                        session.device_id,
+                        peer
+                    );
+                } else {
+                    log::info!("IKEv2 client authentication failed: peer={peer}");
+                }
+                bail!("EAP authentication failed")
+            }
         }
         Ok(())
     }
@@ -1187,8 +1205,9 @@ impl Engine {
             self.esp_to_session.remove(&established.child.inbound.spi());
             self.ike_to_session.retain(|_, id| *id != session_id);
             log::info!(
-                "IKEv2 client disconnected: network={}, ip={}, peer={}",
+                "IKEv2 client disconnected: network={}, identity={}, ip={}, peer={}",
                 established.session.network_code,
+                established.session.device_id,
                 established.session.ip,
                 established.peer
             );

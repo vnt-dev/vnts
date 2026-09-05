@@ -295,12 +295,14 @@ async fn update_ikev2_settings(
     let previous = match load_ikev2_config(config_path) {
         Ok(config) => config,
         Err(error) => {
+            log::error!("读取 IKEv2 配置失败: {error:#}");
             return ApiResponse::<()>::err(format!("读取 IKEv2 配置失败: {error}")).into_response();
         }
     };
     let mut candidate = match merge_ikev2_service(body) {
         Ok(config) => config,
         Err(error) => {
+            log::error!("IKEv2 配置格式错误: {error:#}");
             return ApiResponse::<()>::err(format!("基础配置格式错误: {error}")).into_response();
         }
     };
@@ -456,19 +458,45 @@ async fn persist_and_apply_ikev2(
         match crate::utils::ikev2_cert::prepare_certificate(&mut candidate, config_path) {
             Ok(certificate) => certificate,
             Err(error) => {
+                log::error!(
+                    "准备 IKEv2 证书失败: enabled={}, remote_id={:?}, error={error:#}",
+                    candidate.enabled,
+                    candidate.remote_id
+                );
                 restore_certificate_backup(&mut certificate_backup);
                 return Err(error).context("准备 IKEv2 证书失败");
             }
         };
     if let Err(error) = crate::server::ikev2::validate_runtime_config(&candidate) {
+        log::error!(
+            "IKEv2 配置校验失败: enabled={}, ike_bind={}, natt_bind={}, remote_id={:?}, error={error:#}",
+            candidate.enabled,
+            candidate.ike_bind,
+            candidate.natt_bind,
+            candidate.remote_id
+        );
         restore_certificate_backup(&mut certificate_backup);
         return Err(error).context("IKEv2 配置无效");
     }
     if let Err(error) = persist_ikev2_config(config_path, &candidate) {
+        log::error!(
+            "保存 IKEv2 配置失败: enabled={}, ike_bind={}, natt_bind={}, remote_id={:?}, error={error:#}",
+            candidate.enabled,
+            candidate.ike_bind,
+            candidate.natt_bind,
+            candidate.remote_id
+        );
         restore_certificate_backup(&mut certificate_backup);
         return Err(error).context("保存 IKEv2 配置失败");
     }
     if let Err(error) = apply_ikev2_runtime(state, previous, &candidate, changed_network).await {
+        log::error!(
+            "IKEv2 服务启动或应用配置失败: enabled={}, ike_bind={}, natt_bind={}, remote_id={:?}, error={error:#}",
+            candidate.enabled,
+            candidate.ike_bind,
+            candidate.natt_bind,
+            candidate.remote_id
+        );
         if let Err(rollback_error) =
             crate::utils::config::persist_config_text(config_path, previous_text)
         {
