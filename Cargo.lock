@@ -2316,6 +2316,7 @@ dependencies = [
  "pkcs1",
  "pkcs8",
  "rand_core 0.6.4",
+ "sha1",
  "sha2",
  "signature",
  "spki",
@@ -2486,14 +2487,13 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 [[package]]
 name = "ryke"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3adddc10517440752dcb58301428fc1d6c2f6bc1ffcc0516c931ab2ddd1111fc"
 dependencies = [
  "aes",
  "aes-gcm",
  "cbc",
  "der",
  "des",
+ "getrandom 0.2.16",
  "hmac",
  "md4",
  "num-bigint-dig",

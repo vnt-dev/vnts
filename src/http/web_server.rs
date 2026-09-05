@@ -191,6 +191,7 @@ struct Ikev2ServiceInfo {
     certificate_managed: bool,
     certificate_not_after: Option<u64>,
     ca_download_available: bool,
+    server_certificate_download_available: bool,
     runtime_error: Option<String>,
 }
 
@@ -252,6 +253,13 @@ fn ikev2_service_info(
                 .map(|(_, expiry)| expiry)
         }),
         ca_download_available: certificate_managed,
+        server_certificate_download_available: config.cert.as_ref().is_some_and(|path| {
+            std::fs::read(path).is_ok_and(|pem| {
+                rustls_pemfile::certs(&mut std::io::Cursor::new(pem))
+                    .next()
+                    .is_some_and(|certificate| certificate.is_ok())
+            })
+        }),
         runtime_error,
     }
 }
@@ -636,6 +644,76 @@ async fn download_ikev2_ca(
             }
         };
         (der, "application/pkix-cert", "vnt-ikev2-ca.cer")
+    };
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (
+                header::CONTENT_DISPOSITION,
+                &format!("attachment; filename=\"{filename}\""),
+            ),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+fn first_pem_certificate(pem: &[u8]) -> Option<Vec<u8>> {
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+    const END: &str = "-----END CERTIFICATE-----";
+    let text = std::str::from_utf8(pem).ok()?;
+    let start = text.find(BEGIN)?;
+    let end = start + text[start..].find(END)? + END.len();
+    let mut certificate = text.as_bytes()[start..end].to_vec();
+    certificate.push(b'\n');
+    Some(certificate)
+}
+
+async fn download_ikev2_server_certificate(
+    State(state): State<AppState>,
+    Query(query): Query<CertificateDownloadQuery>,
+) -> Response {
+    let _guard = state.config_update_lock.lock().await;
+    let config = match load_ikev2_config(state.config_path.as_ref()) {
+        Ok(Some(config)) => config,
+        Ok(None) => {
+            return no_store(ApiResponse::<()>::err("尚未配置 IKEv2 服务器证书").into_response());
+        }
+        Err(error) => {
+            return no_store(
+                ApiResponse::<()>::err(format!("读取 IKEv2 配置失败: {error}")).into_response(),
+            );
+        }
+    };
+    let Some(path) = config.cert else {
+        return no_store(ApiResponse::<()>::err("尚未配置 IKEv2 服务器证书").into_response());
+    };
+    let pem = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return no_store(
+                ApiResponse::<()>::err(format!("读取 IKEv2 服务器证书失败: {error}"))
+                    .into_response(),
+            );
+        }
+    };
+    let der = match rustls_pemfile::certs(&mut std::io::Cursor::new(&pem))
+        .next()
+        .transpose()
+    {
+        Ok(Some(cert)) => cert.as_ref().to_vec(),
+        _ => {
+            return no_store(ApiResponse::<()>::err("IKEv2 服务器证书无效").into_response());
+        }
+    };
+    let (body, content_type, filename) = if query.format.eq_ignore_ascii_case("pem") {
+        let Some(leaf_pem) = first_pem_certificate(&pem) else {
+            return no_store(ApiResponse::<()>::err("IKEv2 服务器证书 PEM 无效").into_response());
+        };
+        (leaf_pem, "application/x-pem-file", "vnt-ikev2-server.pem")
+    } else {
+        (der, "application/pkix-cert", "vnt-ikev2-server.cer")
     };
     (
         [
@@ -1103,6 +1181,10 @@ fn build_app(app_state: AppState) -> Router {
             get(get_device_ikev2_access),
         )
         .route("/ikev2/ca-certificate", get(download_ikev2_ca))
+        .route(
+            "/ikev2/server-certificate",
+            get(download_ikev2_server_certificate),
+        )
         .route("/devices", get(list_devices))
         .route("/devices", post(create_device))
         .route("/devices", delete(delete_device))
@@ -1138,6 +1220,7 @@ mod tests {
     };
     use crate::server::control_server::db::{ClientType, DeviceIpType};
     use crate::server::control_server::service::ControlService;
+    use crate::utils::config::{Ikev2Config, update_ikev2_config};
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header};
     use jsonwebtoken::{EncodingKey, Header};
@@ -1384,6 +1467,118 @@ mod tests {
         let access_body = String::from_utf8(access_body.to_vec()).unwrap();
         assert!(access_body.contains("private-password"));
         assert!(access_body.contains("\"username\":\"alice\""));
+    }
+
+    #[tokio::test]
+    async fn ikev2_server_certificate_download_returns_only_the_leaf() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "network = \"10.26.0.0/24\"\nlease_duration = 86400\n",
+        )
+        .unwrap();
+        let mut ikev2 = Ikev2Config {
+            enabled: true,
+            server_address: "192.0.2.10".to_string(),
+            remote_id: "192.0.2.10".to_string(),
+            ..Ikev2Config::default()
+        };
+        crate::utils::ikev2_cert::prepare_certificate(&mut ikev2, &config_path).unwrap();
+        update_ikev2_config(&config_path, &ikev2).unwrap();
+        let certificate_path = ikev2.cert.as_ref().unwrap();
+        let certificate_file = std::fs::read(certificate_path).unwrap();
+        let expected_der = rustls_pemfile::certs(&mut std::io::Cursor::new(&certificate_file))
+            .next()
+            .unwrap()
+            .unwrap()
+            .as_ref()
+            .to_vec();
+
+        let control_service = ControlService::new(
+            "10.26.0.0/24".parse().unwrap(),
+            HashMap::new(),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        let jwt_secret = "ike-server-cert-download".to_string();
+        let app = build_app(AppState {
+            control_service,
+            auth_config: AuthConfig {
+                username: "admin".to_string(),
+                password: "admin".to_string(),
+                jwt_secret: jwt_secret.clone(),
+            },
+            config_path: Arc::new(config_path),
+            config_update_lock: Arc::new(tokio::sync::Mutex::new(())),
+        });
+        let token = jsonwebtoken::encode(
+            &Header::default(),
+            &Claims {
+                sub: "admin".to_string(),
+                exp: (time::OffsetDateTime::now_utc() + time::Duration::minutes(5))
+                    .unix_timestamp(),
+            },
+            &EncodingKey::from_secret(jwt_secret.as_bytes()),
+        )
+        .unwrap();
+        let authorization = format!("Bearer {token}");
+
+        let der_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/ikev2/server-certificate?format=der")
+                    .header(header::AUTHORIZATION, &authorization)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(der_response.status(), StatusCode::OK);
+        assert_eq!(
+            der_response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/pkix-cert"
+        );
+        assert_eq!(
+            der_response
+                .headers()
+                .get(header::CONTENT_DISPOSITION)
+                .unwrap(),
+            "attachment; filename=\"vnt-ikev2-server.cer\""
+        );
+        assert_eq!(
+            to_bytes(der_response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .as_ref(),
+            expected_der
+        );
+
+        let pem_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/ikev2/server-certificate?format=pem")
+                    .header(header::AUTHORIZATION, authorization)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pem_response.status(), StatusCode::OK);
+        let pem = to_bytes(pem_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let pem = std::str::from_utf8(&pem).unwrap();
+        assert_eq!(pem.matches("-----BEGIN CERTIFICATE-----").count(), 1);
+        assert_eq!(pem.matches("-----END CERTIFICATE-----").count(), 1);
+        let downloaded_der = rustls_pemfile::certs(&mut std::io::Cursor::new(pem.as_bytes()))
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(downloaded_der.as_ref(), expected_der);
     }
 
     #[tokio::test]

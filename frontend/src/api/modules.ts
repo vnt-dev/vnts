@@ -85,4 +85,6 @@ export const settingsApi = {
     }),
   downloadIkev2Ca: (format: 'der' | 'pem' = 'der') =>
     downloadFile(`/ikev2/ca-certificate?format=${format}`, `vnt-ikev2-ca.${format === 'der' ? 'cer' : 'pem'}`),
+  downloadIkev2ServerCertificate: (format: 'der' | 'pem' = 'der') =>
+    downloadFile(`/ikev2/server-certificate?format=${format}`, `vnt-ikev2-server.${format === 'der' ? 'cer' : 'pem'}`),
 }

@@ -119,6 +119,14 @@ async function downloadCa(format: 'der' | 'pem') {
   }
 }
 
+async function downloadServerCertificate(format: 'der' | 'pem') {
+  try {
+    await settingsApi.downloadIkev2ServerCertificate(format)
+  } catch (error) {
+    toast.error(error instanceof ApiError ? error.message : '下载服务器证书失败')
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -144,8 +152,8 @@ onMounted(load)
         <div class="lg:col-span-2"><label class="label">客户端 DNS（可选）</label><input v-model="form.dns" class="field" placeholder="1.1.1.1, 8.8.8.8" /><p class="hint">下发给 VPN 客户端的 IPv4 DNS，多个值用逗号或空格分隔。</p></div>
         <div class="lg:col-span-2 rounded-lg border border-slate-200 p-4 dark:border-slate-700">
           <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><div class="label">服务器证书</div><p class="hint mt-1">推荐自动管理：生成本地 CA，并签发匹配远程ID的 RSA-2048 证书。</p></div><label class="flex items-center gap-2 text-sm"><input v-model="autoCertificate" type="checkbox" class="accent-cyan-600" />自动生成和续签</label></div>
-          <div v-if="autoCertificate" class="mt-3 flex flex-wrap items-center gap-2 rounded-lg bg-cyan-50 px-3 py-2 text-xs text-cyan-700 dark:bg-cyan-500/10 dark:text-cyan-300"><CheckCircle2 :size="15" />cert/key 留空时自动生成<span v-if="info.certificate_managed">；有效期至 {{ certificateExpiry }}</span><button v-if="info.ca_download_available" type="button" class="ml-auto secondary" @click="downloadCa('der')"><Download :size="14" />下载 CA (.cer)</button><button v-if="info.ca_download_available" type="button" class="secondary" @click="downloadCa('pem')">PEM</button></div>
-          <div v-else class="mt-3 grid gap-4 lg:grid-cols-2"><div><label class="label">cert 证书链路径</label><input v-model="form.cert" class="field" placeholder="/etc/vnts/ikev2-cert.pem" /><p class="hint">PEM 证书链，首张证书 SAN 必须匹配远程ID。</p></div><div><label class="label">key 私钥路径</label><input v-model="form.key" class="field" placeholder="/etc/vnts/ikev2-key.pem" /><p class="hint">匹配证书的 RSA 或 ECDSA P-256 PKCS#8 私钥路径。</p></div><p v-if="info.certificate_configured && !info.certificate_managed" class="text-xs text-slate-500 lg:col-span-2">当前自定义证书有效期至 {{ certificateExpiry }}；私有 CA 需自行安装到客户端。</p></div>
+          <div v-if="autoCertificate" class="mt-3 flex flex-wrap items-center gap-2 rounded-lg bg-cyan-50 px-3 py-2 text-xs text-cyan-700 dark:bg-cyan-500/10 dark:text-cyan-300"><CheckCircle2 :size="15" />cert/key 留空时自动生成<span v-if="info.certificate_managed">；有效期至 {{ certificateExpiry }}</span><button v-if="info.ca_download_available" type="button" class="ml-auto secondary" @click="downloadCa('der')"><Download :size="14" />下载 CA (.cer)</button><button v-if="info.ca_download_available" type="button" class="secondary" @click="downloadCa('pem')">CA PEM</button><button v-if="info.server_certificate_download_available" type="button" class="secondary" @click="downloadServerCertificate('der')"><Download :size="14" />服务器证书 (.cer)</button><button v-if="info.server_certificate_download_available" type="button" class="secondary" @click="downloadServerCertificate('pem')">服务器 PEM</button></div>
+          <div v-else class="mt-3 grid gap-4 lg:grid-cols-2"><div><label class="label">cert 证书链路径</label><input v-model="form.cert" class="field" placeholder="/etc/vnts/ikev2-cert.pem" /><p class="hint">PEM 证书链，首张证书 SAN 必须匹配远程ID。</p></div><div><label class="label">key 私钥路径</label><input v-model="form.key" class="field" placeholder="/etc/vnts/ikev2-key.pem" /><p class="hint">匹配证书的 RSA 或 ECDSA P-256 PKCS#8 私钥路径。</p></div><div v-if="info.certificate_configured && !info.certificate_managed" class="flex flex-wrap items-center gap-2 text-xs text-slate-500 lg:col-span-2"><span class="mr-auto">当前自定义证书有效期至 {{ certificateExpiry }}；私有 CA 需自行安装到客户端。</span><button v-if="info.server_certificate_download_available" type="button" class="secondary" @click="downloadServerCertificate('der')"><Download :size="14" />服务器证书 (.cer)</button><button v-if="info.server_certificate_download_available" type="button" class="secondary" @click="downloadServerCertificate('pem')">服务器 PEM</button></div></div>
         </div>
       </div>
       <div class="flex justify-end border-t border-slate-100 pt-5 dark:border-slate-700"><button type="button" class="primary" :disabled="saving" @click="save"><LoaderCircle v-if="saving" :size="15" class="animate-spin" /><Save v-else :size="15" />{{ saving ? '保存并应用中...' : '保存并应用' }}</button></div>

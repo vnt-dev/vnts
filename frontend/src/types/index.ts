@@ -114,6 +114,7 @@ export interface Ikev2ServiceInfo {
   certificate_managed: boolean
   certificate_not_after: number | null
   ca_download_available: boolean
+  server_certificate_download_available: boolean
   runtime_error: string | null
 }
 

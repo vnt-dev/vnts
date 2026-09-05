@@ -18,7 +18,7 @@ IKEv2 客户端从对应网络的地址池获取虚拟 IP，并可跨互联服�
 
 系统设置可编辑服务开关、UDP 500/4500 监听、服务器地址、远程ID、DNS 和证书路径；网络详情的设备列表负责管理 IKEv2 设备及凭据。保存全局设置后会自动启动、停止或热加载 IKEv2 服务；每个 IKEv2 设备的操作栏提供 CA 下载和 Windows、macOS/iOS、Android、strongSwan 接入步骤。
 
-客户端只支持 EAP-MSCHAPv2 用户名/密码认证：连接地址使用 `server_address`，服务器身份使用 `remote_id`，用户名和密码来自对应 IKEv2 设备的接入说明，并在系统中信任签发 IKE 证书的 CA。Windows 原生客户端需把 IKE/ESP 加密算法配置为 `GCMAES256`、DH 组配置为 Group14。
+客户端只支持 EAP-MSCHAPv2 用户名/密码认证：连接地址使用 `server_address`，服务器身份使用 `remote_id`，用户名和密码来自对应 IKEv2 设备的接入说明，并在系统中信任签发 IKE 证书的 CA。Android 必须在 VPN 配置的“IPSec CA 证书”中明确选择该 CA，不能选择“不验证服务器”；其原生客户端默认发送空的 outer EAP Identity，服务端会在后续 MSCHAPv2 Response 中按用户名选择设备凭据。Windows 原生客户端需把 IKE/ESP 加密算法配置为 `GCMAES256`、DH 组配置为 Group14。
 
 
 ## Web 管理端（前端）

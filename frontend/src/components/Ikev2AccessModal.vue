@@ -66,6 +66,14 @@ async function downloadCa() {
     toast.error(error instanceof ApiError ? error.message : '下载 CA 证书失败')
   }
 }
+
+async function downloadServerCertificate() {
+  try {
+    await settingsApi.downloadIkev2ServerCertificate('der')
+  } catch (error) {
+    toast.error(error instanceof ApiError ? error.message : '下载服务器证书失败')
+  }
+}
 </script>
 
 <template>
@@ -111,9 +119,12 @@ async function downloadCa() {
         </div>
       </div>
 
-      <div v-if="info.service.ca_download_available" class="flex items-center justify-between gap-3 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
-        <span class="text-slate-600 dark:text-slate-300">连接前请安装并信任 VNT IKEv2 CA 证书。</span>
-        <button type="button" class="secondary" @click="downloadCa"><Download :size="14" />下载 CA</button>
+      <div v-if="info.service.ca_download_available || info.service.server_certificate_download_available" class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+        <span class="min-w-56 flex-1 text-slate-600 dark:text-slate-300">正常连接应安装并信任 VNT IKEv2 CA；服务器证书下载用于诊断或需要直接信任叶证书的客户端。</span>
+        <div class="flex flex-wrap gap-2">
+          <button v-if="info.service.ca_download_available" type="button" class="secondary" @click="downloadCa"><Download :size="14" />下载 CA</button>
+          <button v-if="info.service.server_certificate_download_available" type="button" class="secondary" @click="downloadServerCertificate"><Download :size="14" />下载服务器证书</button>
+        </div>
       </div>
 
       <div class="flex gap-1 overflow-x-auto rounded-lg bg-slate-100 p-1 dark:bg-slate-900">
@@ -132,7 +143,8 @@ async function downloadCa() {
         </template>
         <template v-else-if="platform === 'android'">
           <h4>Android</h4>
-          <ol><li>安装 CA 证书。</li><li>新增类型为“IKEv2/IPSec MSCHAPv2”的 VPN。</li><li>服务器地址填写 <code>{{ serverAddress }}</code>。</li><li>IPSec 标识符填写 <code>{{ remoteIdentity }}</code>。</li><li>填写上方用户名和密码。</li></ol>
+          <ol><li>把下载的 CA 安装为“VPN 和应用的 CA 证书”。</li><li>新增类型为“IKEv2/IPSec MSCHAPv2”的 VPN。</li><li>服务器地址填写 <code>{{ serverAddress }}</code>。</li><li>IPSec 标识符填写用户名（设备 ID）<code>{{ info.username }}</code>。</li><li>“IPSec CA 证书”明确选择刚安装的 VNT IKEv2 CA，不要选择“不验证服务器”。</li><li>填写上方用户名和密码。</li></ol>
+          <p v-if="serverAddress !== remoteIdentity" class="text-amber-600 dark:text-amber-300">Android 原生客户端会以服务器地址作为远程ID；当前服务器地址与远程ID不同，可能无法通过服务器身份验证。</p>
         </template>
         <template v-else>
           <h4>strongSwan</h4><p>安装并信任 CA 后，按本机 swanctl 目录保存以下配置：</p><pre>{{ strongSwanConfig }}</pre>
