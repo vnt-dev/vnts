@@ -105,8 +105,8 @@ export interface Ikev2ServiceInfo {
   runtime_active: boolean
   ike_bind: string
   natt_bind: string
+  server_address: string
   remote_id: string
-  public_ip: string | null
   dns: string[]
   cert: string | null
   key: string | null
@@ -121,8 +121,8 @@ export interface UpdateIkev2ServicePayload {
   enabled: boolean
   ike_bind: string
   natt_bind: string
+  server_address: string
   remote_id: string
-  public_ip?: string
   dns: string[]
   cert?: string
   key?: string

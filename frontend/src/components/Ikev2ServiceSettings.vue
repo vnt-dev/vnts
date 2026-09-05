@@ -16,8 +16,8 @@ const form = reactive({
   enabled: false,
   ikeBind: '0.0.0.0:500',
   nattBind: '0.0.0.0:4500',
+  serverAddress: '',
   remoteId: '',
-  publicIp: '',
   dns: '',
   cert: '',
   key: '',
@@ -44,8 +44,8 @@ function applyInfo(value: Ikev2ServiceInfo) {
   form.enabled = value.enabled
   form.ikeBind = value.ike_bind
   form.nattBind = value.natt_bind
+  form.serverAddress = value.server_address
   form.remoteId = value.remote_id
-  form.publicIp = value.public_ip ?? ''
   form.dns = value.dns.join(', ')
   form.cert = value.cert ?? ''
   form.key = value.key ?? ''
@@ -67,12 +67,16 @@ async function load() {
 }
 
 function useCurrentHost() {
-  if (window.location.hostname) form.remoteId = window.location.hostname
+  if (window.location.hostname) form.serverAddress = window.location.hostname
 }
 
 function validate() {
+  if (form.enabled && !form.serverAddress.trim()) {
+    toast.error('启用服务前必须填写服务器地址')
+    return false
+  }
   if (form.enabled && !form.remoteId.trim()) {
-    toast.error('启用服务前必须填写 Remote ID')
+    toast.error('启用服务前必须填写远程ID')
     return false
   }
   if (!autoCertificate.value && (!form.cert.trim() || !form.key.trim())) {
@@ -88,8 +92,8 @@ async function save() {
     enabled: form.enabled,
     ike_bind: form.ikeBind.trim(),
     natt_bind: form.nattBind.trim(),
+    server_address: form.serverAddress.trim(),
     remote_id: form.remoteId.trim(),
-    public_ip: form.publicIp.trim() || undefined,
     dns: form.dns.split(/[,，\s]+/).map((value) => value.trim()).filter(Boolean),
     cert: autoCertificate.value ? undefined : form.cert.trim(),
     key: autoCertificate.value ? undefined : form.key.trim(),
@@ -130,18 +134,18 @@ onMounted(load)
     <div v-if="loading" class="flex justify-center py-20"><LoaderCircle :size="28" class="animate-spin text-cyan-500" /></div>
     <div v-else-if="info" class="space-y-5 p-5 sm:p-6">
       <p v-if="saveError || info.runtime_error" class="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600 dark:bg-red-500/10 dark:text-red-300">{{ saveError || info.runtime_error }}</p>
-      <div class="rounded-lg bg-amber-50 px-3.5 py-3 text-sm leading-6 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">修改监听地址、Remote ID 或证书会断开现有 IKEv2 会话并要求客户端重连。保存失败时自动恢复原配置和服务。</div>
+      <div class="rounded-lg bg-amber-50 px-3.5 py-3 text-sm leading-6 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">修改监听地址、远程ID或证书会断开现有 IKEv2 会话并要求客户端重连。保存失败时自动恢复原配置和服务。</div>
       <div v-if="usesNonstandardPorts" class="rounded-lg border border-orange-300 bg-orange-50 px-3.5 py-3 text-sm font-medium leading-6 text-orange-700 dark:border-orange-500/40 dark:bg-orange-500/10 dark:text-orange-300">当前使用了非标准 IKEv2 端口。Windows、macOS、iOS、Android 等系统内置客户端通常不能指定非 UDP 500/4500 端口，可能无法连接；除非使用明确支持自定义端口的客户端，否则建议保持默认端口。</div>
       <div class="grid gap-5 lg:grid-cols-2">
         <div><label class="label">IKE 监听地址</label><input v-model="form.ikeBind" class="field" placeholder="0.0.0.0:500" /><p class="hint">初始协商监听地址，通常保持 0.0.0.0:500；防火墙需放行 UDP 500。</p></div>
         <div><label class="label">NAT-T 监听地址</label><input v-model="form.nattBind" class="field" placeholder="0.0.0.0:4500" /><p class="hint">NAT-T/ESP 数据监听地址，通常保持 0.0.0.0:4500；需放行 UDP 4500。</p></div>
-        <div><label class="label">Remote ID</label><div class="mt-1.5 flex gap-2"><input v-model="form.remoteId" class="field mt-0" placeholder="vpn.example.com 或 203.0.113.10" /><button type="button" class="secondary" @click="useCurrentHost">当前地址</button></div><p class="hint">客户端验证的服务器身份，填写实际可访问的域名或 IPv4。</p></div>
-        <div><label class="label">公网 IP（可选）</label><input v-model="form.publicIp" class="field" placeholder="203.0.113.10" /><p class="hint">服务器位于 NAT 后时填写公网 IPv4；公网直连通常留空。</p></div>
+        <div><label class="label">服务器地址</label><div class="mt-1.5 flex gap-2"><input v-model="form.serverAddress" class="field mt-0" placeholder="vpn.example.com 或 203.0.113.10" :required="form.enabled" /><button type="button" class="secondary" @click="useCurrentHost">当前地址</button></div><p class="hint">必填；客户端建立 VPN 连接时填写的单个域名或 IP 地址，仅用于生成接入步骤。</p></div>
+        <div><label class="label">远程ID</label><input v-model="form.remoteId" class="field" placeholder="vpn.example.com 或 203.0.113.10" :required="form.enabled" /><p class="hint">客户端验证的 IKEv2 服务器身份，必须匹配服务器证书 SAN。</p></div>
         <div class="lg:col-span-2"><label class="label">客户端 DNS（可选）</label><input v-model="form.dns" class="field" placeholder="1.1.1.1, 8.8.8.8" /><p class="hint">下发给 VPN 客户端的 IPv4 DNS，多个值用逗号或空格分隔。</p></div>
         <div class="lg:col-span-2 rounded-lg border border-slate-200 p-4 dark:border-slate-700">
-          <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><div class="label">服务器证书</div><p class="hint mt-1">推荐自动管理：生成本地 CA，并签发匹配 Remote ID 的 RSA-2048 证书。</p></div><label class="flex items-center gap-2 text-sm"><input v-model="autoCertificate" type="checkbox" class="accent-cyan-600" />自动生成和续签</label></div>
+          <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><div class="label">服务器证书</div><p class="hint mt-1">推荐自动管理：生成本地 CA，并签发匹配远程ID的 RSA-2048 证书。</p></div><label class="flex items-center gap-2 text-sm"><input v-model="autoCertificate" type="checkbox" class="accent-cyan-600" />自动生成和续签</label></div>
           <div v-if="autoCertificate" class="mt-3 flex flex-wrap items-center gap-2 rounded-lg bg-cyan-50 px-3 py-2 text-xs text-cyan-700 dark:bg-cyan-500/10 dark:text-cyan-300"><CheckCircle2 :size="15" />cert/key 留空时自动生成<span v-if="info.certificate_managed">；有效期至 {{ certificateExpiry }}</span><button v-if="info.ca_download_available" type="button" class="ml-auto secondary" @click="downloadCa('der')"><Download :size="14" />下载 CA (.cer)</button><button v-if="info.ca_download_available" type="button" class="secondary" @click="downloadCa('pem')">PEM</button></div>
-          <div v-else class="mt-3 grid gap-4 lg:grid-cols-2"><div><label class="label">cert 证书链路径</label><input v-model="form.cert" class="field" placeholder="/etc/vnts/ikev2-cert.pem" /><p class="hint">PEM 证书链，首张证书 SAN 必须匹配 Remote ID。</p></div><div><label class="label">key 私钥路径</label><input v-model="form.key" class="field" placeholder="/etc/vnts/ikev2-key.pem" /><p class="hint">匹配证书的 RSA 或 ECDSA P-256 PKCS#8 私钥路径。</p></div><p v-if="info.certificate_configured && !info.certificate_managed" class="text-xs text-slate-500 lg:col-span-2">当前自定义证书有效期至 {{ certificateExpiry }}；私有 CA 需自行安装到客户端。</p></div>
+          <div v-else class="mt-3 grid gap-4 lg:grid-cols-2"><div><label class="label">cert 证书链路径</label><input v-model="form.cert" class="field" placeholder="/etc/vnts/ikev2-cert.pem" /><p class="hint">PEM 证书链，首张证书 SAN 必须匹配远程ID。</p></div><div><label class="label">key 私钥路径</label><input v-model="form.key" class="field" placeholder="/etc/vnts/ikev2-key.pem" /><p class="hint">匹配证书的 RSA 或 ECDSA P-256 PKCS#8 私钥路径。</p></div><p v-if="info.certificate_configured && !info.certificate_managed" class="text-xs text-slate-500 lg:col-span-2">当前自定义证书有效期至 {{ certificateExpiry }}；私有 CA 需自行安装到客户端。</p></div>
         </div>
       </div>
       <div class="flex justify-end border-t border-slate-100 pt-5 dark:border-slate-700"><button type="button" class="primary" :disabled="saving" @click="save"><LoaderCircle v-if="saving" :size="15" class="animate-spin" /><Save v-else :size="15" />{{ saving ? '保存并应用中...' : '保存并应用' }}</button></div>

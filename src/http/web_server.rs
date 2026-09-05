@@ -182,8 +182,8 @@ struct Ikev2ServiceInfo {
     runtime_active: bool,
     ike_bind: String,
     natt_bind: String,
+    server_address: String,
     remote_id: String,
-    public_ip: Option<String>,
     dns: Vec<String>,
     cert: Option<String>,
     key: Option<String>,
@@ -199,8 +199,8 @@ struct UpdateIkev2ServiceRequest {
     enabled: bool,
     ike_bind: String,
     natt_bind: String,
+    server_address: String,
     remote_id: String,
-    public_ip: Option<String>,
     #[serde(default)]
     dns: Vec<String>,
     cert: Option<String>,
@@ -229,8 +229,8 @@ fn ikev2_service_info(
         runtime_active,
         ike_bind: config.ike_bind.to_string(),
         natt_bind: config.natt_bind.to_string(),
+        server_address: config.server_address.clone(),
         remote_id: config.remote_id.clone(),
-        public_ip: config.public_ip.map(|ip| ip.to_string()),
         dns: config.dns.iter().map(ToString::to_string).collect(),
         cert: config
             .cert
@@ -318,7 +318,7 @@ async fn update_ikev2_settings(
     let (candidate, certificate) =
         match persist_and_apply_ikev2(&state, previous.as_ref(), candidate, None).await {
             Ok(result) => result,
-            Err(error) => return ApiResponse::<()>::err(error.to_string()).into_response(),
+            Err(error) => return ApiResponse::<()>::err(format!("{error:?}")).into_response(),
         };
     let mut info = ikev2_service_info(
         true,
@@ -340,18 +340,15 @@ fn merge_ikev2_service(request: UpdateIkev2ServiceRequest) -> anyhow::Result<Ike
         .filter(|value| !value.trim().is_empty())
         .map(|value| value.trim().parse::<Ipv4Addr>())
         .collect::<Result<Vec<_>, _>>()?;
-    let public_ip = optional_text(request.public_ip)
-        .map(|value| value.parse::<Ipv4Addr>().map(std::net::IpAddr::V4))
-        .transpose()?;
     Ok(Ikev2Config {
         enabled: request.enabled,
         ike_bind: request.ike_bind.trim().parse()?,
         natt_bind: request.natt_bind.trim().parse()?,
+        server_address: request.server_address.trim().to_string(),
         remote_id: request.remote_id.trim().to_string(),
         cert: optional_text(request.cert).map(PathBuf::from),
         key: optional_text(request.key).map(PathBuf::from),
         dns,
-        public_ip,
     })
 }
 
@@ -363,7 +360,6 @@ fn base_config_changed(old: &Ikev2Config, new: &Ikev2Config) -> bool {
         || old.cert != new.cert
         || old.key != new.key
         || old.dns != new.dns
-        || old.public_ip != new.public_ip
 }
 
 async fn apply_ikev2_runtime(
@@ -372,6 +368,9 @@ async fn apply_ikev2_runtime(
     config: &Ikev2Config,
     changed_network: Option<&str>,
 ) -> anyhow::Result<()> {
+    if changed_network.is_none() && previous.is_some_and(|old| !base_config_changed(old, config)) {
+        return Ok(());
+    }
     let existing = state.control_service.get_ikev2_manager();
     if !config.enabled {
         if let Some(old) = state.control_service.replace_ikev2_manager(None) {
@@ -1430,7 +1429,7 @@ mod tests {
             .unwrap()
             .port();
         let body = format!(
-            r#"{{"enabled":true,"ike_bind":"127.0.0.1:{occupied_port}","natt_bind":"127.0.0.1:{natt_port}","remote_id":"vpn.example.com","dns":[]}}"#
+            r#"{{"enabled":true,"ike_bind":"127.0.0.1:{occupied_port}","natt_bind":"127.0.0.1:{natt_port}","server_address":"127.0.0.1","remote_id":"vpn.example.com","dns":[]}}"#
         );
         let response = app
             .clone()

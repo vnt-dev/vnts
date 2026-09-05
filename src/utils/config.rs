@@ -36,12 +36,13 @@ pub struct Ikev2Config {
     pub enabled: bool,
     pub ike_bind: SocketAddr,
     pub natt_bind: SocketAddr,
+    #[serde(default)]
+    pub server_address: String,
     pub remote_id: String,
     pub cert: Option<PathBuf>,
     pub key: Option<PathBuf>,
     #[serde(default)]
     pub dns: Vec<Ipv4Addr>,
-    pub public_ip: Option<std::net::IpAddr>,
 }
 
 impl Default for Ikev2Config {
@@ -50,11 +51,11 @@ impl Default for Ikev2Config {
             enabled: false,
             ike_bind: "0.0.0.0:500".parse().expect("valid IKE bind default"),
             natt_bind: "0.0.0.0:4500".parse().expect("valid NAT-T bind default"),
+            server_address: String::new(),
             remote_id: String::new(),
             cert: None,
             key: None,
             dns: Vec::new(),
-            public_ip: None,
         }
     }
 }
@@ -126,6 +127,7 @@ impl Ikev2Config {
             anyhow::bail!("ikev2.ike_bind and ikev2.natt_bind must be different");
         }
         if self.enabled {
+            validate_ikev2_server_address(&self.server_address)?;
             validate_ikev2_remote_id(&self.remote_id)?;
         }
         if self.cert.is_some() != self.key.is_some() {
@@ -137,6 +139,16 @@ impl Ikev2Config {
     }
 }
 
+fn validate_ikev2_server_address(server_address: &str) -> anyhow::Result<()> {
+    if server_address.trim().is_empty() {
+        anyhow::bail!("ikev2.server_address cannot be empty");
+    }
+    if server_address.trim() != server_address {
+        anyhow::bail!("ikev2.server_address cannot contain surrounding whitespace");
+    }
+    validate_ikev2_host(server_address, "ikev2.server_address")
+}
+
 fn validate_ikev2_remote_id(remote_id: &str) -> anyhow::Result<()> {
     if remote_id.trim().is_empty() {
         anyhow::bail!("ikev2.remote_id cannot be empty");
@@ -144,15 +156,23 @@ fn validate_ikev2_remote_id(remote_id: &str) -> anyhow::Result<()> {
     if remote_id.trim() != remote_id {
         anyhow::bail!("ikev2.remote_id cannot contain surrounding whitespace");
     }
-    if remote_id.parse::<Ipv4Addr>().is_ok() {
+    if remote_id.parse::<std::net::IpAddr>().is_ok() {
+        return if remote_id.parse::<Ipv4Addr>().is_ok() {
+            Ok(())
+        } else {
+            anyhow::bail!("ikev2.remote_id only supports a domain name or IPv4 address")
+        };
+    }
+    validate_ikev2_host(remote_id, "ikev2.remote_id")
+}
+
+fn validate_ikev2_host(value: &str, field: &str) -> anyhow::Result<()> {
+    if value.parse::<std::net::IpAddr>().is_ok() {
         return Ok(());
     }
-    if remote_id.parse::<std::net::IpAddr>().is_ok() {
-        anyhow::bail!("ikev2.remote_id only supports a domain name or IPv4 address");
-    }
-    if remote_id.len() > 253
-        || !remote_id.is_ascii()
-        || remote_id.split('.').any(|label| {
+    if value.len() > 253
+        || !value.is_ascii()
+        || value.split('.').any(|label| {
             label.is_empty()
                 || label.len() > 63
                 || label.starts_with('-')
@@ -162,7 +182,7 @@ fn validate_ikev2_remote_id(remote_id: &str) -> anyhow::Result<()> {
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         })
     {
-        anyhow::bail!("ikev2.remote_id must be a valid domain name or IPv4 address");
+        anyhow::bail!("{field} must be a valid domain name or IP address");
     }
     Ok(())
 }
@@ -227,6 +247,11 @@ pub fn update_ikev2_config(path: &Path, config: &Ikev2Config) -> anyhow::Result<
         "natt_bind",
         Value::from(config.natt_bind.to_string()),
     );
+    insert_value(
+        table,
+        "server_address",
+        Value::from(config.server_address.clone()),
+    );
     insert_value(table, "remote_id", Value::from(config.remote_id.clone()));
     match &config.cert {
         Some(path) => {
@@ -252,14 +277,7 @@ pub fn update_ikev2_config(path: &Path, config: &Ikev2Config) -> anyhow::Result<
             table.remove("key");
         }
     }
-    match config.public_ip {
-        Some(ip) => {
-            insert_value(table, "public_ip", Value::from(ip.to_string()));
-        }
-        None => {
-            table.remove("public_ip");
-        }
-    }
+    table.remove("public_ip");
     let mut dns = Array::new();
     for address in &config.dns {
         dns.push(address.to_string());
@@ -349,8 +367,8 @@ key = "key.pem"
 # enabled = true
 # ike_bind = "0.0.0.0:500"
 # natt_bind = "0.0.0.0:4500"
+# server_address = "vpn.example.com" # 客户端实际连接地址
 # remote_id = "vpn.example.com"
-# public_ip = "203.0.113.10" # 可选；数据面始终使用 UDP/4500 NAT-T
 # cert = "ikev2-cert.pem"
 # key = "ikev2-key.pem"
 # dns = []
@@ -404,6 +422,7 @@ remote_id = ""
 
         let mut identity = Ikev2Config {
             enabled: true,
+            server_address: "vpn.example.com".to_string(),
             remote_id: "192.0.2.1".to_string(),
             ..Ikev2Config::default()
         };
@@ -413,6 +432,16 @@ remote_id = ""
         identity.remote_id = "2001:db8::1".to_string();
         assert!(identity.validate().is_err());
         identity.remote_id = "not a host".to_string();
+        assert!(identity.validate().is_err());
+
+        identity.remote_id = "vpn.example.com".to_string();
+        identity.server_address.clear();
+        assert!(identity.validate().is_err());
+        identity.server_address = "203.0.113.10".to_string();
+        assert!(identity.validate().is_ok());
+        identity.server_address = "2001:db8::1".to_string();
+        assert!(identity.validate().is_ok());
+        identity.server_address = "https://vpn.example.com".to_string();
         assert!(identity.validate().is_err());
     }
 
@@ -475,6 +504,7 @@ lease_duration = 86400
 enabled = true
 ike_bind = "0.0.0.0:500"
 natt_bind = "0.0.0.0:4500"
+server_address = "vpn.example.com"
 remote_id = "vpn.example.com"
 "#,
         )
@@ -495,13 +525,16 @@ lease_duration = 86400
 enabled = true
 ike_bind = "0.0.0.0:500" # bind comment
 natt_bind = "0.0.0.0:4500"
+server_address = "old-access.example.com"
 remote_id = "old.example.com"
+public_ip = "203.0.113.10"
 future_global_option = "keep"
 "#,
         )
         .unwrap();
 
         let mut config = load_ikev2_config(&path).unwrap().unwrap();
+        config.server_address = "vpn-access.example.com".to_string();
         config.remote_id = "vpn.example.com".to_string();
         update_ikev2_config(&path, &config).unwrap();
 
@@ -509,7 +542,9 @@ future_global_option = "keep"
         assert!(content.contains("# root comment"));
         assert!(content.contains("# bind comment"));
         assert!(content.contains("future_global_option = \"keep\""));
+        assert!(!content.contains("public_ip"));
         let updated = load_ikev2_config(&path).unwrap().unwrap();
+        assert_eq!(updated.server_address, "vpn-access.example.com");
         assert_eq!(updated.remote_id, "vpn.example.com");
     }
 }

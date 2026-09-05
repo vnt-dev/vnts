@@ -21,7 +21,7 @@ const platforms: Array<{ id: 'windows' | 'apple' | 'android' | 'strongswan'; lab
   { id: 'strongswan', label: 'strongSwan' },
 ]
 
-const serverAddress = computed(() => info.value?.service.public_ip || info.value?.service.remote_id || '尚未配置')
+const serverAddress = computed(() => info.value?.service.server_address || '尚未配置')
 const remoteIdentity = computed(() => info.value?.service.remote_id || '尚未配置')
 const windowsCommand = computed(() => `Set-VpnConnectionIPsecConfiguration -ConnectionName "VNT-${props.networkCode}" -EncryptionMethod GCMAES256 -IntegrityCheckMethod SHA256 -DHGroup Group14 -CipherTransformConstants GCMAES256 -AuthenticationTransformConstants GCMAES256 -PfsGroup None -Force`)
 const strongSwanConfig = computed(() => `connections {
@@ -84,7 +84,7 @@ async function downloadCa() {
 
       <div class="grid gap-3 sm:grid-cols-2">
         <div class="rounded-lg border border-slate-200 p-3 dark:border-slate-700">
-          <div class="text-xs text-slate-400">服务器 / Remote ID</div>
+          <div class="text-xs text-slate-400">服务器地址 / 远程ID</div>
           <div class="mt-1 break-all font-mono text-slate-700 dark:text-slate-200">{{ serverAddress }} / {{ remoteIdentity }}</div>
         </div>
         <div class="rounded-lg border border-slate-200 p-3 dark:border-slate-700">
@@ -128,11 +128,11 @@ async function downloadCa() {
         </template>
         <template v-else-if="platform === 'apple'">
           <h4>macOS / iOS</h4>
-          <ol><li>安装 CA 并启用完全信任。</li><li>新增 IKEv2 VPN，服务器填写 <code>{{ serverAddress }}</code>，Remote ID 填写 <code>{{ remoteIdentity }}</code>。</li><li>Local ID 留空，认证方式选择用户名，填写上方凭据。</li></ol>
+          <ol><li>安装 CA 并启用完全信任。</li><li>新增 IKEv2 VPN，服务器填写 <code>{{ serverAddress }}</code>，远程ID填写 <code>{{ remoteIdentity }}</code>。</li><li>本地ID留空，认证方式选择用户名，填写上方凭据。</li></ol>
         </template>
         <template v-else-if="platform === 'android'">
           <h4>Android</h4>
-          <ol><li>安装 CA 证书。</li><li>新增类型为“IKEv2/IPSec MSCHAPv2”的 VPN。</li><li>服务器地址和服务器标识填写 <code>{{ serverAddress }}</code>，并填写上方用户名和密码。</li></ol>
+          <ol><li>安装 CA 证书。</li><li>新增类型为“IKEv2/IPSec MSCHAPv2”的 VPN。</li><li>服务器地址填写 <code>{{ serverAddress }}</code>。</li><li>IPSec 标识符填写 <code>{{ remoteIdentity }}</code>。</li><li>填写上方用户名和密码。</li></ol>
         </template>
         <template v-else>
           <h4>strongSwan</h4><p>安装并信任 CA 后，按本机 swanctl 目录保存以下配置：</p><pre>{{ strongSwanConfig }}</pre>

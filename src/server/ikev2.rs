@@ -482,18 +482,15 @@ impl Engine {
             return self.send_ike(&existing.response, peer, existing.natt).await;
         }
         let local = LocalSecret::generate(&mut self.entropy, NONCE_LEN);
-        let public_ip = self
-            .config
-            .public_ip
-            .unwrap_or_else(|| match self.config.ike_bind.ip() {
-                IpAddr::V4(ip) if !ip.is_unspecified() => IpAddr::V4(ip),
-                IpAddr::V6(ip) if !ip.is_unspecified() => IpAddr::V6(ip),
-                _ => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-            });
+        let local_ip = match self.config.ike_bind.ip() {
+            IpAddr::V4(ip) if !ip.is_unspecified() => IpAddr::V4(ip),
+            IpAddr::V6(ip) if !ip.is_unspecified() => IpAddr::V6(ip),
+            _ => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        };
         // The data plane is deliberately UDP-encapsulated ESP only. Hashing the
         // NAT-T port here makes every standards-compliant initiator float to
         // UDP/4500, including a client that happens to have a public address.
-        let our_addr = SocketAddr::new(public_ip, self.config.natt_bind.port());
+        let our_addr = SocketAddr::new(local_ip, self.config.natt_bind.port());
         let require_cookie = self.half_open.len() >= MAX_HALF_OPEN;
         let peer_cookie = peer.to_string();
         let result = responder_respond_natt(
@@ -1416,7 +1413,7 @@ mod tests {
     use ipnet::Ipv4Net;
     use ryke::{Identification, LocalSecret, default_offer, initiator_complete, initiator_request};
     use std::collections::HashMap;
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::SocketAddr;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -1458,11 +1455,11 @@ mod tests {
             enabled: true,
             ike_bind: SocketAddr::from(([127, 0, 0, 1], ike_port)),
             natt_bind: SocketAddr::from(([127, 0, 0, 1], natt_port)),
+            server_address: "127.0.0.1".to_string(),
             remote_id: "vpn.example.com".to_string(),
             cert: Some(cert_path),
             key: Some(key_path),
             dns: Vec::new(),
-            public_ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
         };
         let control = ControlService::new(
             "10.78.0.0/24".parse::<Ipv4Net>().unwrap(),
