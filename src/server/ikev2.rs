@@ -323,8 +323,7 @@ pub async fn start(config: Ikev2Config, control: ControlService) -> anyhow::Resu
 
 pub(crate) fn validate_runtime_config(config: &Ikev2Config) -> anyhow::Result<()> {
     config.validate()?;
-    let result = load_certificate(config).map(|_| ());
-    result
+    load_certificate(config).map(|_| ())
 }
 
 impl Engine {

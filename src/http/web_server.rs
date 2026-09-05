@@ -1045,7 +1045,7 @@ async fn auth_middleware(
     headers: HeaderMap,
     request: Request<Body>,
     next: Next,
-) -> Result<Response, Response> {
+) -> Response {
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
@@ -1053,7 +1053,7 @@ async fn auth_middleware(
 
     let Some(token) = token else {
         let resp = ApiResponse::<()>::err_code(401, "missing token");
-        return Err((StatusCode::UNAUTHORIZED, Json(resp)).into_response());
+        return (StatusCode::UNAUTHORIZED, Json(resp)).into_response();
     };
 
     let validation = Validation::default();
@@ -1062,10 +1062,10 @@ async fn auth_middleware(
         &DecodingKey::from_secret(state.auth_config.jwt_secret.as_bytes()),
         &validation,
     ) {
-        Ok(_) => Ok(next.run(request).await),
+        Ok(_) => next.run(request).await,
         Err(e) => {
             let resp = ApiResponse::<()>::err_code(401, format!("invalid token: {e}"));
-            Err((StatusCode::UNAUTHORIZED, Json(resp)).into_response())
+            (StatusCode::UNAUTHORIZED, Json(resp)).into_response()
         }
     }
 }
