@@ -11,6 +11,7 @@ export interface LoginResult {
 export type NetworkSource = 'Config' | 'Manual' | 'DeviceRegister' | string
 export type NetworkType = 'Public' | 'Private'
 export type DeviceIpType = 'Dynamic' | 'Static' | 'Fixed'
+export type ClientType = 'VNT' | 'IKEV2'
 
 export interface NetworkInfo {
   network_code: string
@@ -30,6 +31,7 @@ export interface DeviceInfo {
   device_id: string
   device_name: string
   device_version: string
+  client_type: ClientType
   ip: string | null
   current_ip: string | null
   ip_type: DeviceIpType | null
@@ -66,12 +68,15 @@ export interface CreateDevicePayload {
   device_id: string
   ip: string
   ip_type?: DeviceIpType
+  client_type: ClientType
+  ikev2_password?: string
 }
 
 export interface UpdateDevicePayload {
   network_code: string
   ip: string
   ip_type: DeviceIpType
+  ikev2_password?: string
 }
 
 export interface PeerServerInfo {
@@ -84,6 +89,44 @@ export interface PeerServerInfo {
 export interface PeerServersResponse {
   outbound: PeerServerInfo[]
   inbound: PeerServerInfo[]
+}
+
+export interface DeviceIkev2AccessInfo {
+  service: Ikev2ServiceInfo
+  network_code: string
+  network_net: string
+  username: string
+  password: string
+}
+
+export interface Ikev2ServiceInfo {
+  configured: boolean
+  enabled: boolean
+  runtime_active: boolean
+  ike_bind: string
+  natt_bind: string
+  server_address: string
+  remote_id: string
+  dns: string[]
+  cert: string | null
+  key: string | null
+  certificate_configured: boolean
+  certificate_managed: boolean
+  certificate_not_after: number | null
+  ca_download_available: boolean
+  server_certificate_download_available: boolean
+  runtime_error: string | null
+}
+
+export interface UpdateIkev2ServicePayload {
+  enabled: boolean
+  ike_bind: string
+  natt_bind: string
+  server_address: string
+  remote_id: string
+  dns: string[]
+  cert?: string
+  key?: string
 }
 
 export interface NetworkWhitelistSettings {

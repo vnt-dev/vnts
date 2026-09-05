@@ -8,6 +8,17 @@
 1. 支持quic、tcp(tls)和wss协议，会自动生成自签名证书，也可以手动替换
 2. 无参数启动后，会输出配置文件，可以修改配置文件
 3. --conf-example 参数查看配置文件示例
+4. 可选启用内置 IKEv2/IPsec（UDP 500/4500），让系统原生 VPN 客户端以独立设备加入指定 VNT 网络
+
+## IKEv2/IPsec
+
+推荐先在 Web 管理端的“系统设置 → IKEv2/IPsec 基础配置”设置监听、服务器地址、远程ID和证书，再到“网络详情 → 新增设备”创建 IKEv2 类型设备。服务器地址是生成接入步骤时提供给客户端的单个连接地址；远程ID是服务端 IKE 身份并用于匹配证书。每台 IKEv2 客户端使用独立的用户名和密码，用户名同时作为设备 ID。没有 `[ikev2]` 时页面会提供默认监听值；cert/key 留空会自动建立本地 CA，并签发匹配域名或 IPv4 远程ID的 RSA-2048 服务器证书。也可以填写自定义证书链和私钥路径。ESP 数据面统一使用 UDP/4500 NAT-T。
+
+IKEv2 客户端从对应网络的地址池获取虚拟 IP，并可跨互联服务端通信；启用了 `white_list` 时也要包含这些网络编号。普通 VNT 节点必须显式配置 `allow_ikev2 = true` 才会看到并接受 IKEv2 流量。
+
+系统设置可编辑服务开关、UDP 500/4500 监听、服务器地址、远程ID、DNS 和证书路径；网络详情的设备列表负责管理 IKEv2 设备及凭据。保存全局设置后会自动启动、停止或热加载 IKEv2 服务；每个 IKEv2 设备的操作栏提供 CA 下载和 Windows、macOS/iOS、Android、strongSwan 接入步骤。
+
+客户端只支持 EAP-MSCHAPv2 用户名/密码认证：连接地址使用 `server_address`，服务器身份使用 `remote_id`，用户名和密码来自对应 IKEv2 设备的接入说明，并在系统中信任签发 IKE 证书的 CA。Android 必须在 VPN 配置的“IPSec CA 证书”中明确选择该 CA，不能选择“不验证服务器”；其原生客户端默认发送空的 outer EAP Identity，服务端会在后续 MSCHAPv2 Response 中按用户名选择设备凭据。Windows 原生客户端创建 VPN 时可将连接名称填写为 `VNT-IKEv2`。接入说明中的第一条 PowerShell 命令用于配置与服务端匹配的 IKE/ESP 加密算法和 DH 组；第二条命令 `Set-VpnConnection -Name "VNT-IKEv2" -SplitTunneling $true` 用于启用拆分隧道，仅将 VNT 虚拟网段流量送入 VPN，避免 VPN 接管系统默认路由。如果创建 VPN 时使用了其他连接名称，两条命令中的 `VNT-IKEv2` 也必须替换为相同名称。修改后需断开并重新连接 VPN。PPP 适配器显示 `/32` 子网掩码和 `0.0.0.0` 默认网关是点对点连接的正常表现。
 
 
 ## Web 管理端（前端）

@@ -1,7 +1,7 @@
 use crate::protocol::control_message::RegRequestMsg;
 use crate::server::control_server::db;
-use crate::server::control_server::db::DeviceIpType;
 use crate::server::control_server::db::DeviceRecord;
+use crate::server::control_server::db::{ClientType, DeviceIpType};
 use anyhow::bail;
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -87,6 +87,9 @@ pub struct DeviceEntry {
     pub device_id: String,
     pub ip: Option<Ipv4Addr>,
     pub ip_type: DeviceIpType,
+    pub client_type: ClientType,
+    pub ikev2_password: Option<String>,
+    pub allow_ikev2: bool,
     pub random_id: u64,
     pub device_name: String,
     pub device_version: String,
@@ -122,6 +125,9 @@ impl DeviceEntry {
             device_id: record.device_id,
             ip,
             ip_type: record.ip_type,
+            client_type: record.client_type,
+            ikev2_password: record.ikev2_password,
+            allow_ikev2: false,
             random_id: 0,
             device_name: record.device_name,
             device_version: record.device_version,
@@ -143,6 +149,8 @@ impl DeviceEntry {
             network_code: network_code.to_string(),
             ip: self.ip.map(|ip| ip.to_string()),
             ip_type: self.ip_type,
+            client_type: self.client_type,
+            ikev2_password: self.ikev2_password.clone(),
             device_name: self.device_name.clone(),
             device_version: self.device_version.clone(),
             last_connect_time: system_time_to_i64(self.last_connect_time),
@@ -183,6 +191,28 @@ impl NetworkState {
 
     pub fn sender_map(&self) -> &DashMap<Ipv4Addr, Sender<Bytes>> {
         &self.sender_map
+    }
+
+    pub fn first_available_ip_excluding(
+        &self,
+        excluded: &std::collections::HashSet<Ipv4Addr>,
+    ) -> anyhow::Result<Ipv4Addr> {
+        let guard = self.lease_state.lock();
+        let start = u32::from(self.net.network())
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("Invalid network address"))?;
+        let end = u32::from(self.net.broadcast());
+        for raw in start..end {
+            let ip = Ipv4Addr::from(raw);
+            if ip != self.gateway
+                && !excluded.contains(&ip)
+                && !guard.device_ip_map.contains_key(&ip)
+                && !guard.active_ip_map.contains_key(&ip)
+            {
+                return Ok(ip);
+            }
+        }
+        bail!("IP exhaustion");
     }
 
     pub fn record_tx_traffic(&self, ip: Ipv4Addr, bytes: usize) {
@@ -318,11 +348,31 @@ impl NetworkState {
         self.lease_state.lock().device_map.contains_key(device_id)
     }
 
+    pub fn ikev2_credentials(&self) -> Vec<(String, String)> {
+        self.lease_state
+            .lock()
+            .device_map
+            .values()
+            .filter_map(|entry| {
+                (entry.client_type == ClientType::Ikev2)
+                    .then(|| {
+                        entry
+                            .ikev2_password
+                            .as_ref()
+                            .map(|password| (entry.device_id.clone(), password.clone()))
+                    })
+                    .flatten()
+            })
+            .collect()
+    }
+
     pub fn upsert_device_config(
         &self,
         device_id: &str,
         ip: Ipv4Addr,
         ip_type: DeviceIpType,
+        client_type: ClientType,
+        ikev2_password: Option<String>,
     ) -> anyhow::Result<Option<DeviceEntry>> {
         let mut guard = self.lease_state.lock();
         guard.validate_ip_available(ip, Some(device_id))?;
@@ -355,6 +405,10 @@ impl NetworkState {
         if let Some(entry) = guard.device_map.get_mut(device_id) {
             entry.ip = Some(ip);
             entry.ip_type = ip_type;
+            entry.client_type = client_type;
+            if ikev2_password.is_some() {
+                entry.ikev2_password = ikev2_password;
+            }
             entry.data_version = data_version;
         } else {
             guard.device_map.insert(
@@ -363,6 +417,9 @@ impl NetworkState {
                     device_id: device_id.to_string(),
                     ip: Some(ip),
                     ip_type,
+                    client_type,
+                    ikev2_password,
+                    allow_ikev2: false,
                     random_id: 0,
                     device_name: device_id.to_string(),
                     device_version: String::new(),
@@ -489,15 +546,21 @@ impl NetworkState {
     }
 
     /// 返回 (分配的IP, 旧IP, DeviceEntry克隆)
-    pub fn allocate_ip_and_get_entry(
+    pub fn allocate_ip_and_get_entry_as(
         &self,
         reg_req: RegRequestMsg,
         random_id: u64,
         sender: Sender<Bytes>,
+        client_type: ClientType,
     ) -> anyhow::Result<(Ipv4Addr, Option<Ipv4Addr>, Option<DeviceEntry>)> {
         let mut guard = self.lease_state.lock();
-        let (ip, old_ip) =
-            guard.allocate_ip(&self.net, self.gateway, reg_req.clone(), random_id)?;
+        let (ip, old_ip) = guard.allocate_ip_as(
+            &self.net,
+            self.gateway,
+            reg_req.clone(),
+            random_id,
+            client_type,
+        )?;
 
         if let Some(old_ip) = old_ip {
             self.sender_map.remove(&old_ip);
@@ -531,6 +594,16 @@ impl NetworkState {
         }
 
         Ok((ip, old_ip, entry))
+    }
+
+    #[cfg(test)]
+    pub fn allocate_ip_and_get_entry(
+        &self,
+        reg_req: RegRequestMsg,
+        random_id: u64,
+        sender: Sender<Bytes>,
+    ) -> anyhow::Result<(Ipv4Addr, Option<Ipv4Addr>, Option<DeviceEntry>)> {
+        self.allocate_ip_and_get_entry_as(reg_req, random_id, sender, ClientType::Vnt)
     }
 
     pub fn collect_expired_devices(&self) -> Vec<String> {
@@ -596,6 +669,7 @@ impl NetworkState {
                 },
                 tx_bytes: entry.traffic_stats.get_tx(),
                 rx_bytes: entry.traffic_stats.get_rx(),
+                client_type: entry.client_type,
             });
         }
         list
@@ -605,6 +679,7 @@ impl NetworkState {
         &self,
         exclude_ip: Ipv4Addr,
         data_version: u64,
+        allow_ikev2: bool,
     ) -> Option<crate::protocol::control_message::ClientSimpleInfoList> {
         use crate::protocol::control_message::ClientSimpleInfo;
 
@@ -616,10 +691,18 @@ impl NetworkState {
             let list = guard
                 .device_map
                 .values()
-                .filter(|v| v.ip.is_some() && v.ip != Some(exclude_ip))
+                .filter(|v| {
+                    v.ip.is_some()
+                        && v.ip != Some(exclude_ip)
+                        && (allow_ikev2 || v.client_type != ClientType::Ikev2)
+                })
                 .map(|v| ClientSimpleInfo {
                     ip: v.ip.unwrap(),
                     online: v.is_connected,
+                    client_type: match v.client_type {
+                        ClientType::Vnt => crate::protocol::control_message::ClientType::Vnt,
+                        ClientType::Ikev2 => crate::protocol::control_message::ClientType::Ikev2,
+                    },
                 })
                 .collect();
             return Some(crate::protocol::control_message::ClientSimpleInfoList {
@@ -632,10 +715,19 @@ impl NetworkState {
         let list = guard
             .device_map
             .values()
-            .filter(|v| v.data_version > data_version && v.ip.is_some() && v.ip != Some(exclude_ip))
+            .filter(|v| {
+                v.data_version > data_version
+                    && v.ip.is_some()
+                    && v.ip != Some(exclude_ip)
+                    && (allow_ikev2 || v.client_type != ClientType::Ikev2)
+            })
             .map(|v| ClientSimpleInfo {
                 ip: v.ip.unwrap(),
                 online: v.is_connected,
+                client_type: match v.client_type {
+                    ClientType::Vnt => crate::protocol::control_message::ClientType::Vnt,
+                    ClientType::Ikev2 => crate::protocol::control_message::ClientType::Ikev2,
+                },
             })
             .collect();
         Some(crate::protocol::control_message::ClientSimpleInfoList {
@@ -644,6 +736,37 @@ impl NetworkState {
             is_all: false,
             time: 0,
         })
+    }
+
+    pub fn full_client_simple_list(
+        &self,
+        exclude_ip: Ipv4Addr,
+        allow_ikev2: bool,
+    ) -> crate::protocol::control_message::ClientSimpleInfoList {
+        let guard = self.lease_state.lock();
+        let list = guard
+            .device_map
+            .values()
+            .filter(|entry| {
+                entry.ip.is_some()
+                    && entry.ip != Some(exclude_ip)
+                    && (allow_ikev2 || entry.client_type != ClientType::Ikev2)
+            })
+            .map(|entry| crate::protocol::control_message::ClientSimpleInfo {
+                ip: entry.ip.unwrap(),
+                online: entry.is_connected,
+                client_type: match entry.client_type {
+                    ClientType::Vnt => crate::protocol::control_message::ClientType::Vnt,
+                    ClientType::Ikev2 => crate::protocol::control_message::ClientType::Ikev2,
+                },
+            })
+            .collect();
+        crate::protocol::control_message::ClientSimpleInfoList {
+            data_version: guard.data_version,
+            list,
+            is_all: true,
+            time: 0,
+        }
     }
 
     pub fn client_info_list(
@@ -672,6 +795,10 @@ impl NetworkState {
                 online: entry.is_connected,
                 last_connected_time: last_connect_time.unix_timestamp(),
                 id: entry.device_id.clone(),
+                client_type: match entry.client_type {
+                    ClientType::Vnt => crate::protocol::rpc_message::ClientType::Vnt as i32,
+                    ClientType::Ikev2 => crate::protocol::rpc_message::ClientType::Ikev2 as i32,
+                },
             });
         }
         list
@@ -791,12 +918,13 @@ impl NetworkStateInner {
         }
     }
 
-    fn allocate_ip(
+    fn allocate_ip_as(
         &mut self,
         net: &Ipv4Net,
         gateway: Ipv4Addr,
         reg_req: RegRequestMsg,
         random_id: u64,
+        client_type: ClientType,
     ) -> anyhow::Result<(Ipv4Addr, Option<Ipv4Addr>)> {
         let advertised_subnets = reg_req.advertised_subnets.clone();
         let subnet_advertisement_active =
@@ -838,6 +966,8 @@ impl NetworkStateInner {
             self.data_version += 1;
             device_entry.data_version = self.data_version;
             device_entry.key_sign = reg_req.key_sign.clone();
+            device_entry.client_type = client_type;
+            device_entry.allow_ikev2 = reg_req.allow_ikev2;
             device_entry.device_name = reg_req.name.clone();
             device_entry.device_version = reg_req.version.clone();
             device_entry.advertised_subnets = advertised_subnets.clone();
@@ -902,6 +1032,8 @@ impl NetworkStateInner {
                     entry.disconnect_time = None;
                     entry.data_version = self.data_version;
                     entry.key_sign = reg_req.key_sign;
+                    entry.client_type = client_type;
+                    entry.allow_ikev2 = reg_req.allow_ikev2;
                     entry.latency_ms = None;
                     entry.advertised_subnets = advertised_subnets.clone();
                     entry.subnet_advertisement_active = subnet_advertisement_active;
@@ -911,6 +1043,9 @@ impl NetworkStateInner {
                         device_id: reg_req.device_id,
                         ip: Some(ip),
                         ip_type: DeviceIpType::Dynamic,
+                        client_type,
+                        ikev2_password: None,
+                        allow_ikev2: reg_req.allow_ikev2,
                         random_id,
                         device_name: reg_req.name,
                         device_version: reg_req.version,
@@ -949,6 +1084,8 @@ impl NetworkStateInner {
             entry.disconnect_time = None;
             entry.data_version = self.data_version;
             entry.key_sign = reg_req.key_sign;
+            entry.client_type = client_type;
+            entry.allow_ikev2 = reg_req.allow_ikev2;
             entry.latency_ms = None;
             entry.advertised_subnets = advertised_subnets.clone();
             entry.subnet_advertisement_active = subnet_advertisement_active;
@@ -958,6 +1095,9 @@ impl NetworkStateInner {
                 device_id: reg_req.device_id,
                 ip: Some(ip),
                 ip_type: DeviceIpType::Dynamic,
+                client_type,
+                ikev2_password: None,
+                allow_ikev2: reg_req.allow_ikev2,
                 random_id,
                 device_name: reg_req.name,
                 device_version: reg_req.version,
@@ -974,6 +1114,17 @@ impl NetworkStateInner {
         };
         self.add_device(entry);
         Ok((ip, old))
+    }
+
+    #[cfg(test)]
+    fn allocate_ip(
+        &mut self,
+        net: &Ipv4Net,
+        gateway: Ipv4Addr,
+        reg_req: RegRequestMsg,
+        random_id: u64,
+    ) -> anyhow::Result<(Ipv4Addr, Option<Ipv4Addr>)> {
+        self.allocate_ip_as(net, gateway, reg_req, random_id, ClientType::Vnt)
     }
 
     fn find_available_ip(&self, net: &Ipv4Net, gateway: Ipv4Addr) -> anyhow::Result<Ipv4Addr> {
@@ -1156,6 +1307,7 @@ mod tests {
             server_id: 0,
             registration_mode: RegistrationMode::Normal,
             advertised_subnets: Vec::new(),
+            allow_ikev2: false,
         }
     }
 

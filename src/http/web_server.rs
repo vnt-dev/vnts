@@ -1,7 +1,11 @@
 use crate::ControlService;
-use crate::server::control_server::db::{DeviceIpType, NetworkType};
+use crate::server::control_server::db::{ClientType, DeviceIpType, NetworkType};
 use crate::server::control_server::service::{DeviceInfoVO, NetworkInfoVO};
-use crate::utils::config::{update_white_list as persist_white_list, validate_network_code};
+use crate::utils::config::{
+    Ikev2Config, load_ikev2_config, update_ikev2_config as persist_ikev2_config,
+    update_white_list as persist_white_list, validate_network_code,
+};
+use anyhow::Context;
 use axum::{
     Json, Router,
     body::Body,
@@ -169,6 +173,560 @@ async fn update_network_whitelist(
         .control_service
         .replace_white_list(network_codes.iter().cloned().collect::<HashSet<_>>());
     ApiResponse::ok(NetworkWhitelistSettings { network_codes }).into_response()
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct Ikev2ServiceInfo {
+    configured: bool,
+    enabled: bool,
+    runtime_active: bool,
+    ike_bind: String,
+    natt_bind: String,
+    server_address: String,
+    remote_id: String,
+    dns: Vec<String>,
+    cert: Option<String>,
+    key: Option<String>,
+    certificate_configured: bool,
+    certificate_managed: bool,
+    certificate_not_after: Option<u64>,
+    ca_download_available: bool,
+    server_certificate_download_available: bool,
+    runtime_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct UpdateIkev2ServiceRequest {
+    enabled: bool,
+    ike_bind: String,
+    natt_bind: String,
+    server_address: String,
+    remote_id: String,
+    #[serde(default)]
+    dns: Vec<String>,
+    cert: Option<String>,
+    key: Option<String>,
+}
+
+fn optional_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn ikev2_service_info(
+    configured: bool,
+    config: &Ikev2Config,
+    runtime_active: bool,
+    runtime_error: Option<String>,
+    config_path: &StdPath,
+) -> Ikev2ServiceInfo {
+    let ca_path = crate::utils::ikev2_cert::managed_ca_path(config_path);
+    let certificate_managed =
+        crate::utils::ikev2_cert::is_managed_certificate(config, config_path) && ca_path.exists();
+    Ikev2ServiceInfo {
+        configured,
+        enabled: config.enabled,
+        runtime_active,
+        ike_bind: config.ike_bind.to_string(),
+        natt_bind: config.natt_bind.to_string(),
+        server_address: config.server_address.clone(),
+        remote_id: config.remote_id.clone(),
+        dns: config.dns.iter().map(ToString::to_string).collect(),
+        cert: config
+            .cert
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
+        key: config
+            .key
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
+        certificate_configured: config.cert.is_some() && config.key.is_some(),
+        certificate_managed,
+        certificate_not_after: config.cert.as_ref().and_then(|path| {
+            let bytes = std::fs::read(path).ok()?;
+            let leaf = rustls_pemfile::certs(&mut std::io::Cursor::new(bytes))
+                .next()?
+                .ok()?;
+            ryke::ikev2::sign::cert_validity(leaf.as_ref())
+                .ok()
+                .map(|(_, expiry)| expiry)
+        }),
+        ca_download_available: certificate_managed,
+        server_certificate_download_available: config.cert.as_ref().is_some_and(|path| {
+            std::fs::read(path).is_ok_and(|pem| {
+                rustls_pemfile::certs(&mut std::io::Cursor::new(pem))
+                    .next()
+                    .is_some_and(|certificate| certificate.is_ok())
+            })
+        }),
+        runtime_error,
+    }
+}
+
+async fn network_net(state: &AppState, network_code: &str) -> Option<String> {
+    state
+        .control_service
+        .get_network_info()
+        .await
+        .into_iter()
+        .find(|network| network.network_code == network_code)
+        .map(|network| network.net.to_string())
+}
+
+async fn get_ikev2_settings(State(state): State<AppState>) -> Response {
+    let _guard = state.config_update_lock.lock().await;
+    let config_path = state.config_path.as_ref();
+    let configured = match load_ikev2_config(config_path) {
+        Ok(config) => config,
+        Err(error) => {
+            return ApiResponse::<()>::err(format!("读取 IKEv2 配置失败: {error}")).into_response();
+        }
+    };
+    let config = configured.clone().unwrap_or_default();
+    ApiResponse::ok(ikev2_service_info(
+        configured.is_some(),
+        &config,
+        state.control_service.get_ikev2_manager().is_some(),
+        state.control_service.get_ikev2_runtime_error(),
+        config_path,
+    ))
+    .into_response()
+}
+
+async fn update_ikev2_settings(
+    State(state): State<AppState>,
+    Json(body): Json<UpdateIkev2ServiceRequest>,
+) -> Response {
+    let _guard = state.config_update_lock.lock().await;
+    let config_path = state.config_path.as_ref();
+    let previous = match load_ikev2_config(config_path) {
+        Ok(config) => config,
+        Err(error) => {
+            log::error!("读取 IKEv2 配置失败: {error:#}");
+            return ApiResponse::<()>::err(format!("读取 IKEv2 配置失败: {error}")).into_response();
+        }
+    };
+    let mut candidate = match merge_ikev2_service(body) {
+        Ok(config) => config,
+        Err(error) => {
+            log::error!("IKEv2 配置格式错误: {error:#}");
+            return ApiResponse::<()>::err(format!("基础配置格式错误: {error}")).into_response();
+        }
+    };
+    if !candidate.enabled
+        && candidate.cert.is_none()
+        && previous.as_ref().is_some_and(|config| {
+            crate::utils::ikev2_cert::is_managed_certificate(config, config_path)
+        })
+    {
+        candidate.cert = previous.as_ref().and_then(|config| config.cert.clone());
+        candidate.key = previous.as_ref().and_then(|config| config.key.clone());
+    }
+    let (candidate, certificate) =
+        match persist_and_apply_ikev2(&state, previous.as_ref(), candidate, None).await {
+            Ok(result) => result,
+            Err(error) => return ApiResponse::<()>::err(format!("{error:?}")).into_response(),
+        };
+    let mut info = ikev2_service_info(
+        true,
+        &candidate,
+        state.control_service.get_ikev2_manager().is_some(),
+        None,
+        config_path,
+    );
+    info.certificate_managed = certificate.managed;
+    info.ca_download_available = certificate.ca_path.is_some();
+    info.certificate_not_after = certificate.not_after;
+    ApiResponse::ok(info).into_response()
+}
+
+fn merge_ikev2_service(request: UpdateIkev2ServiceRequest) -> anyhow::Result<Ikev2Config> {
+    let dns = request
+        .dns
+        .into_iter()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().parse::<Ipv4Addr>())
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Ikev2Config {
+        enabled: request.enabled,
+        ike_bind: request.ike_bind.trim().parse()?,
+        natt_bind: request.natt_bind.trim().parse()?,
+        server_address: request.server_address.trim().to_string(),
+        remote_id: request.remote_id.trim().to_string(),
+        cert: optional_text(request.cert).map(PathBuf::from),
+        key: optional_text(request.key).map(PathBuf::from),
+        dns,
+    })
+}
+
+fn base_config_changed(old: &Ikev2Config, new: &Ikev2Config) -> bool {
+    old.enabled != new.enabled
+        || old.ike_bind != new.ike_bind
+        || old.natt_bind != new.natt_bind
+        || old.remote_id != new.remote_id
+        || old.cert != new.cert
+        || old.key != new.key
+        || old.dns != new.dns
+}
+
+async fn apply_ikev2_runtime(
+    state: &AppState,
+    previous: Option<&Ikev2Config>,
+    config: &Ikev2Config,
+    changed_network: Option<&str>,
+) -> anyhow::Result<()> {
+    if changed_network.is_none() && previous.is_some_and(|old| !base_config_changed(old, config)) {
+        return Ok(());
+    }
+    let existing = state.control_service.get_ikev2_manager();
+    if !config.enabled {
+        if let Some(old) = state.control_service.replace_ikev2_manager(None) {
+            old.shutdown().await;
+        }
+        return Ok(());
+    }
+    if let Some(existing) = existing {
+        let bind_changed = previous.is_some_and(|old| {
+            old.ike_bind != config.ike_bind || old.natt_bind != config.natt_bind
+        });
+        if bind_changed {
+            let old = state.control_service.replace_ikev2_manager(None);
+            if let Some(old) = &old {
+                old.shutdown().await;
+                tokio::task::yield_now().await;
+            }
+            match crate::server::ikev2::start(config.clone(), state.control_service.clone()).await {
+                Ok(replacement) => state.control_service.set_ikev2_manager(replacement),
+                Err(error) => {
+                    if let Some(previous) = previous
+                        && let Ok(restored) = crate::server::ikev2::start(
+                            previous.clone(),
+                            state.control_service.clone(),
+                        )
+                        .await
+                    {
+                        state.control_service.set_ikev2_manager(restored);
+                    }
+                    return Err(error);
+                }
+            }
+        } else {
+            let changed_network = previous
+                .filter(|old| !base_config_changed(old, config))
+                .and_then(|_| changed_network.map(str::to_string));
+            if let Err(error) = existing
+                .reload_network_config(config.clone(), changed_network)
+                .await
+            {
+                state.control_service.replace_ikev2_manager(None);
+                if let Some(previous) = previous
+                    && previous.enabled
+                    && let Ok(restored) =
+                        crate::server::ikev2::start(previous.clone(), state.control_service.clone())
+                            .await
+                {
+                    state.control_service.set_ikev2_manager(restored);
+                }
+                return Err(error);
+            }
+        }
+    } else {
+        let manager =
+            crate::server::ikev2::start(config.clone(), state.control_service.clone()).await?;
+        state.control_service.set_ikev2_manager(manager);
+    }
+    Ok(())
+}
+
+fn restore_certificate_backup(
+    backup: &mut Option<crate::utils::ikev2_cert::ManagedCertificateBackup>,
+) {
+    if let Some(backup) = backup.take()
+        && let Err(error) = backup.restore()
+    {
+        log::error!("IKEv2 证书回滚失败: {error:#}");
+    }
+}
+
+async fn persist_and_apply_ikev2(
+    state: &AppState,
+    previous: Option<&Ikev2Config>,
+    mut candidate: Ikev2Config,
+    changed_network: Option<&str>,
+) -> anyhow::Result<(Ikev2Config, crate::utils::ikev2_cert::CertificateInfo)> {
+    let config_path = state.config_path.as_ref();
+    let previous_text = std::fs::read_to_string(config_path).context("读取配置文件失败")?;
+    let mut certificate_backup = Some(
+        crate::utils::ikev2_cert::backup_managed_certificate_files(config_path)
+            .context("备份 IKEv2 证书失败")?,
+    );
+    let certificate =
+        match crate::utils::ikev2_cert::prepare_certificate(&mut candidate, config_path) {
+            Ok(certificate) => certificate,
+            Err(error) => {
+                log::error!(
+                    "准备 IKEv2 证书失败: enabled={}, remote_id={:?}, error={error:#}",
+                    candidate.enabled,
+                    candidate.remote_id
+                );
+                restore_certificate_backup(&mut certificate_backup);
+                return Err(error).context("准备 IKEv2 证书失败");
+            }
+        };
+    if let Err(error) = crate::server::ikev2::validate_runtime_config(&candidate) {
+        log::error!(
+            "IKEv2 配置校验失败: enabled={}, ike_bind={}, natt_bind={}, remote_id={:?}, error={error:#}",
+            candidate.enabled,
+            candidate.ike_bind,
+            candidate.natt_bind,
+            candidate.remote_id
+        );
+        restore_certificate_backup(&mut certificate_backup);
+        return Err(error).context("IKEv2 配置无效");
+    }
+    if let Err(error) = persist_ikev2_config(config_path, &candidate) {
+        log::error!(
+            "保存 IKEv2 配置失败: enabled={}, ike_bind={}, natt_bind={}, remote_id={:?}, error={error:#}",
+            candidate.enabled,
+            candidate.ike_bind,
+            candidate.natt_bind,
+            candidate.remote_id
+        );
+        restore_certificate_backup(&mut certificate_backup);
+        return Err(error).context("保存 IKEv2 配置失败");
+    }
+    if let Err(error) = apply_ikev2_runtime(state, previous, &candidate, changed_network).await {
+        log::error!(
+            "IKEv2 服务启动或应用配置失败: enabled={}, ike_bind={}, natt_bind={}, remote_id={:?}, error={error:#}",
+            candidate.enabled,
+            candidate.ike_bind,
+            candidate.natt_bind,
+            candidate.remote_id
+        );
+        if let Err(rollback_error) =
+            crate::utils::config::persist_config_text(config_path, previous_text)
+        {
+            log::error!("IKEv2 配置回滚失败: {rollback_error:#}");
+        }
+        restore_certificate_backup(&mut certificate_backup);
+        state
+            .control_service
+            .set_ikev2_runtime_error(Some(error.to_string()));
+        return Err(error).context("应用 IKEv2 配置失败，已保留旧服务");
+    }
+    state.control_service.set_ikev2_runtime_error(None);
+    Ok((candidate, certificate))
+}
+
+fn no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    response
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct Ikev2AccessInfo {
+    service: Ikev2ServiceInfo,
+    network_code: String,
+    network_net: String,
+    username: String,
+    password: String,
+}
+
+async fn get_device_ikev2_access(
+    State(state): State<AppState>,
+    Path((network_code, device_id)): Path<(String, String)>,
+) -> Response {
+    let Some(network_net) = network_net(&state, &network_code).await else {
+        return no_store(
+            ApiResponse::<()>::err(format!("网络编号 '{network_code}' 不存在")).into_response(),
+        );
+    };
+    let device = match state
+        .control_service
+        .get_device_record(&network_code, &device_id)
+        .await
+    {
+        Ok(Some(device)) if device.client_type == ClientType::Ikev2 => device,
+        Ok(_) => {
+            return no_store(
+                ApiResponse::<()>::err(format!("IKEv2 设备 '{device_id}' 不存在")).into_response(),
+            );
+        }
+        Err(error) => return no_store(ApiResponse::<()>::err(error.to_string()).into_response()),
+    };
+    let Some(password) = device.ikev2_password else {
+        return no_store(ApiResponse::<()>::err("IKEv2 设备未配置密码").into_response());
+    };
+    let _guard = state.config_update_lock.lock().await;
+    let configured = match load_ikev2_config(state.config_path.as_ref()) {
+        Ok(config) => config,
+        Err(error) => {
+            return no_store(
+                ApiResponse::<()>::err(format!("读取 IKEv2 配置失败: {error}")).into_response(),
+            );
+        }
+    };
+    let config = configured.clone().unwrap_or_default();
+    no_store(
+        ApiResponse::ok(Ikev2AccessInfo {
+            service: ikev2_service_info(
+                configured.is_some(),
+                &config,
+                state.control_service.get_ikev2_manager().is_some(),
+                state.control_service.get_ikev2_runtime_error(),
+                state.config_path.as_ref(),
+            ),
+            network_code,
+            network_net,
+            username: device_id,
+            password,
+        })
+        .into_response(),
+    )
+}
+
+#[derive(Deserialize)]
+struct CertificateDownloadQuery {
+    #[serde(default = "default_certificate_format")]
+    format: String,
+}
+
+fn default_certificate_format() -> String {
+    "der".to_string()
+}
+
+async fn download_ikev2_ca(
+    State(state): State<AppState>,
+    Query(query): Query<CertificateDownloadQuery>,
+) -> Response {
+    let _guard = state.config_update_lock.lock().await;
+    match load_ikev2_config(state.config_path.as_ref()) {
+        Ok(Some(config))
+            if crate::utils::ikev2_cert::is_managed_certificate(
+                &config,
+                state.config_path.as_ref(),
+            ) => {}
+        Ok(_) => {
+            return no_store(
+                ApiResponse::<()>::err("当前未使用自动管理的 IKEv2 证书").into_response(),
+            );
+        }
+        Err(error) => {
+            return no_store(
+                ApiResponse::<()>::err(format!("读取 IKEv2 配置失败: {error}")).into_response(),
+            );
+        }
+    }
+    let path = crate::utils::ikev2_cert::managed_ca_path(state.config_path.as_ref());
+    let pem = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return no_store(
+                ApiResponse::<()>::err("尚未生成可下载的 IKEv2 CA 证书").into_response(),
+            );
+        }
+    };
+    let (body, content_type, filename) = if query.format.eq_ignore_ascii_case("pem") {
+        (pem, "application/x-pem-file", "vnt-ikev2-ca.pem")
+    } else {
+        let der = match rustls_pemfile::certs(&mut std::io::Cursor::new(pem))
+            .next()
+            .transpose()
+        {
+            Ok(Some(cert)) => cert.as_ref().to_vec(),
+            _ => {
+                return no_store(
+                    ApiResponse::<()>::err("自动生成的 IKEv2 CA 证书无效").into_response(),
+                );
+            }
+        };
+        (der, "application/pkix-cert", "vnt-ikev2-ca.cer")
+    };
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (
+                header::CONTENT_DISPOSITION,
+                &format!("attachment; filename=\"{filename}\""),
+            ),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+fn first_pem_certificate(pem: &[u8]) -> Option<Vec<u8>> {
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+    const END: &str = "-----END CERTIFICATE-----";
+    let text = std::str::from_utf8(pem).ok()?;
+    let start = text.find(BEGIN)?;
+    let end = start + text[start..].find(END)? + END.len();
+    let mut certificate = text.as_bytes()[start..end].to_vec();
+    certificate.push(b'\n');
+    Some(certificate)
+}
+
+async fn download_ikev2_server_certificate(
+    State(state): State<AppState>,
+    Query(query): Query<CertificateDownloadQuery>,
+) -> Response {
+    let _guard = state.config_update_lock.lock().await;
+    let config = match load_ikev2_config(state.config_path.as_ref()) {
+        Ok(Some(config)) => config,
+        Ok(None) => {
+            return no_store(ApiResponse::<()>::err("尚未配置 IKEv2 服务器证书").into_response());
+        }
+        Err(error) => {
+            return no_store(
+                ApiResponse::<()>::err(format!("读取 IKEv2 配置失败: {error}")).into_response(),
+            );
+        }
+    };
+    let Some(path) = config.cert else {
+        return no_store(ApiResponse::<()>::err("尚未配置 IKEv2 服务器证书").into_response());
+    };
+    let pem = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return no_store(
+                ApiResponse::<()>::err(format!("读取 IKEv2 服务器证书失败: {error}"))
+                    .into_response(),
+            );
+        }
+    };
+    let der = match rustls_pemfile::certs(&mut std::io::Cursor::new(&pem))
+        .next()
+        .transpose()
+    {
+        Ok(Some(cert)) => cert.as_ref().to_vec(),
+        _ => {
+            return no_store(ApiResponse::<()>::err("IKEv2 服务器证书无效").into_response());
+        }
+    };
+    let (body, content_type, filename) = if query.format.eq_ignore_ascii_case("pem") {
+        let Some(leaf_pem) = first_pem_certificate(&pem) else {
+            return no_store(ApiResponse::<()>::err("IKEv2 服务器证书 PEM 无效").into_response());
+        };
+        (leaf_pem, "application/x-pem-file", "vnt-ikev2-server.pem")
+    } else {
+        (der, "application/pkix-cert", "vnt-ikev2-server.cer")
+    };
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (
+                header::CONTENT_DISPOSITION,
+                &format!("attachment; filename=\"{filename}\""),
+            ),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -384,6 +942,9 @@ struct CreateDeviceRequest {
     device_id: String,
     ip: String,
     ip_type: Option<DeviceIpType>,
+    #[serde(default)]
+    client_type: ClientType,
+    ikev2_password: Option<String>,
 }
 
 async fn create_device(
@@ -396,11 +957,13 @@ async fn create_device(
     };
     match state
         .control_service
-        .add_device(
+        .add_device_typed(
             &body.network_code,
             &body.device_id,
             ip,
             body.ip_type.unwrap_or(DeviceIpType::Dynamic),
+            body.client_type,
+            body.ikev2_password,
         )
         .await
     {
@@ -414,6 +977,7 @@ struct UpdateDeviceRequest {
     network_code: String,
     ip: String,
     ip_type: DeviceIpType,
+    ikev2_password: Option<String>,
 }
 
 async fn update_device(
@@ -427,7 +991,13 @@ async fn update_device(
     };
     match state
         .control_service
-        .update_device(&body.network_code, &device_id, ip, body.ip_type)
+        .update_device_with_password(
+            &body.network_code,
+            &device_id,
+            ip,
+            body.ip_type,
+            body.ikev2_password,
+        )
         .await
     {
         Ok(()) => ApiResponse::<()>::ok_msg("更新成功").into_response(),
@@ -475,7 +1045,7 @@ async fn auth_middleware(
     headers: HeaderMap,
     request: Request<Body>,
     next: Next,
-) -> Result<Response, Response> {
+) -> Response {
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
@@ -483,7 +1053,7 @@ async fn auth_middleware(
 
     let Some(token) = token else {
         let resp = ApiResponse::<()>::err_code(401, "missing token");
-        return Err((StatusCode::UNAUTHORIZED, Json(resp)).into_response());
+        return (StatusCode::UNAUTHORIZED, Json(resp)).into_response();
     };
 
     let validation = Validation::default();
@@ -492,10 +1062,10 @@ async fn auth_middleware(
         &DecodingKey::from_secret(state.auth_config.jwt_secret.as_bytes()),
         &validation,
     ) {
-        Ok(_) => Ok(next.run(request).await),
+        Ok(_) => next.run(request).await,
         Err(e) => {
             let resp = ApiResponse::<()>::err_code(401, format!("invalid token: {e}"));
-            Err((StatusCode::UNAUTHORIZED, Json(resp)).into_response())
+            (StatusCode::UNAUTHORIZED, Json(resp)).into_response()
         }
     }
 }
@@ -518,14 +1088,24 @@ async fn static_handler(uri: Uri) -> impl IntoResponse {
     {
         log::debug!("Serving file from local filesystem: {:?}", canonical_path);
         let mime = from_path(&canonical_path).first_or_octet_stream();
-        return ([(header::CONTENT_TYPE, mime.as_ref())], content).into_response();
+        return (
+            [
+                (header::CONTENT_TYPE, mime.as_ref()),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+            content,
+        )
+            .into_response();
     }
 
     if let Some(content) = Assets::get(&path) {
         log::debug!("Serving file from embedded assets: {}", path);
         let mime = from_path(&path).first_or_octet_stream();
         return (
-            [(header::CONTENT_TYPE, mime.as_ref())],
+            [
+                (header::CONTENT_TYPE, mime.as_ref()),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
             Body::from(content.data),
         )
             .into_response();
@@ -596,6 +1176,15 @@ fn build_app(app_state: AppState) -> Router {
         .route("/networks", post(create_network))
         .route("/networks/{network_code}", put(update_network))
         .route("/networks/{network_code}", delete(delete_network))
+        .route(
+            "/networks/{network_code}/devices/{device_id}/ikev2-access",
+            get(get_device_ikev2_access),
+        )
+        .route("/ikev2/ca-certificate", get(download_ikev2_ca))
+        .route(
+            "/ikev2/server-certificate",
+            get(download_ikev2_server_certificate),
+        )
         .route("/devices", get(list_devices))
         .route("/devices", post(create_device))
         .route("/devices", delete(delete_device))
@@ -606,6 +1195,10 @@ fn build_app(app_state: AppState) -> Router {
         .route(
             "/settings/network-whitelist",
             get(get_network_whitelist).put(update_network_whitelist),
+        )
+        .route(
+            "/settings/ikev2",
+            get(get_ikev2_settings).put(update_ikev2_settings),
         )
         .route_layer(middleware::from_fn_with_state(
             app_state.clone(),
@@ -625,8 +1218,10 @@ mod tests {
     use super::{
         AppState, AuthConfig, Claims, build_app, normalize_network_codes, safe_static_path,
     };
+    use crate::server::control_server::db::{ClientType, DeviceIpType};
     use crate::server::control_server::service::ControlService;
-    use axum::body::Body;
+    use crate::utils::config::{Ikev2Config, update_ikev2_config};
+    use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header};
     use jsonwebtoken::{EncodingKey, Header};
     use std::collections::{HashMap, HashSet};
@@ -736,6 +1331,7 @@ mod tests {
         assert_eq!(get_response.status(), StatusCode::OK);
 
         let put_response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("PUT")
@@ -781,6 +1377,292 @@ mod tests {
         assert_eq!(
             control_service.get_white_list(),
             vec!["alpha".to_string(), "zeta".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn ikev2_access_is_device_scoped_no_store_and_hidden_from_device_list() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "network = \"10.26.0.0/24\"\nlease_duration = 86400\n",
+        )
+        .unwrap();
+        let control_service = ControlService::new(
+            "10.26.0.0/24".parse().unwrap(),
+            HashMap::from([("alpha".to_string(), "10.60.0.0/24".parse().unwrap())]),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        control_service
+            .add_device_typed(
+                "alpha",
+                "alice",
+                "10.60.0.8".parse().unwrap(),
+                DeviceIpType::Fixed,
+                ClientType::Ikev2,
+                Some("private-password".to_string()),
+            )
+            .await
+            .unwrap();
+        let jwt_secret = "ike-access-test".to_string();
+        let app = build_app(AppState {
+            control_service,
+            auth_config: AuthConfig {
+                username: "admin".to_string(),
+                password: "admin".to_string(),
+                jwt_secret: jwt_secret.clone(),
+            },
+            config_path: Arc::new(config_path),
+            config_update_lock: Arc::new(tokio::sync::Mutex::new(())),
+        });
+        let token = jsonwebtoken::encode(
+            &Header::default(),
+            &Claims {
+                sub: "admin".to_string(),
+                exp: (time::OffsetDateTime::now_utc() + time::Duration::minutes(5))
+                    .unix_timestamp(),
+            },
+            &EncodingKey::from_secret(jwt_secret.as_bytes()),
+        )
+        .unwrap();
+        let authorization = format!("Bearer {token}");
+
+        let list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/devices?code=alpha")
+                    .header(header::AUTHORIZATION, &authorization)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let list_body = to_bytes(list.into_body(), usize::MAX).await.unwrap();
+        assert!(
+            !String::from_utf8(list_body.to_vec())
+                .unwrap()
+                .contains("private-password")
+        );
+
+        let access = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/networks/alpha/devices/alice/ikev2-access")
+                    .header(header::AUTHORIZATION, authorization)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            access.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let access_body = to_bytes(access.into_body(), usize::MAX).await.unwrap();
+        let access_body = String::from_utf8(access_body.to_vec()).unwrap();
+        assert!(access_body.contains("private-password"));
+        assert!(access_body.contains("\"username\":\"alice\""));
+    }
+
+    #[tokio::test]
+    async fn ikev2_server_certificate_download_returns_only_the_leaf() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "network = \"10.26.0.0/24\"\nlease_duration = 86400\n",
+        )
+        .unwrap();
+        let mut ikev2 = Ikev2Config {
+            enabled: true,
+            server_address: "192.0.2.10".to_string(),
+            remote_id: "192.0.2.10".to_string(),
+            ..Ikev2Config::default()
+        };
+        crate::utils::ikev2_cert::prepare_certificate(&mut ikev2, &config_path).unwrap();
+        update_ikev2_config(&config_path, &ikev2).unwrap();
+        let certificate_path = ikev2.cert.as_ref().unwrap();
+        let certificate_file = std::fs::read(certificate_path).unwrap();
+        let expected_der = rustls_pemfile::certs(&mut std::io::Cursor::new(&certificate_file))
+            .next()
+            .unwrap()
+            .unwrap()
+            .as_ref()
+            .to_vec();
+
+        let control_service = ControlService::new(
+            "10.26.0.0/24".parse().unwrap(),
+            HashMap::new(),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        let jwt_secret = "ike-server-cert-download".to_string();
+        let app = build_app(AppState {
+            control_service,
+            auth_config: AuthConfig {
+                username: "admin".to_string(),
+                password: "admin".to_string(),
+                jwt_secret: jwt_secret.clone(),
+            },
+            config_path: Arc::new(config_path),
+            config_update_lock: Arc::new(tokio::sync::Mutex::new(())),
+        });
+        let token = jsonwebtoken::encode(
+            &Header::default(),
+            &Claims {
+                sub: "admin".to_string(),
+                exp: (time::OffsetDateTime::now_utc() + time::Duration::minutes(5))
+                    .unix_timestamp(),
+            },
+            &EncodingKey::from_secret(jwt_secret.as_bytes()),
+        )
+        .unwrap();
+        let authorization = format!("Bearer {token}");
+
+        let der_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/ikev2/server-certificate?format=der")
+                    .header(header::AUTHORIZATION, &authorization)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(der_response.status(), StatusCode::OK);
+        assert_eq!(
+            der_response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/pkix-cert"
+        );
+        assert_eq!(
+            der_response
+                .headers()
+                .get(header::CONTENT_DISPOSITION)
+                .unwrap(),
+            "attachment; filename=\"vnt-ikev2-server.cer\""
+        );
+        assert_eq!(
+            to_bytes(der_response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .as_ref(),
+            expected_der
+        );
+
+        let pem_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/ikev2/server-certificate?format=pem")
+                    .header(header::AUTHORIZATION, authorization)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pem_response.status(), StatusCode::OK);
+        let pem = to_bytes(pem_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let pem = std::str::from_utf8(&pem).unwrap();
+        assert_eq!(pem.matches("-----BEGIN CERTIFICATE-----").count(), 1);
+        assert_eq!(pem.matches("-----END CERTIFICATE-----").count(), 1);
+        let downloaded_der = rustls_pemfile::certs(&mut std::io::Cursor::new(pem.as_bytes()))
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(downloaded_der.as_ref(), expected_der);
+    }
+
+    #[tokio::test]
+    async fn ikev2_start_failure_rolls_back_config_and_generated_certificates() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let original = "network = \"10.26.0.0/24\"\nlease_duration = 86400\n";
+        std::fs::write(&config_path, original).unwrap();
+        let control_service = ControlService::new(
+            "10.26.0.0/24".parse().unwrap(),
+            HashMap::from([("alpha".to_string(), "10.62.0.0/24".parse().unwrap())]),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        let jwt_secret = "ike-rollback".to_string();
+        let app = build_app(AppState {
+            control_service: control_service.clone(),
+            auth_config: AuthConfig {
+                username: "admin".to_string(),
+                password: "admin".to_string(),
+                jwt_secret: jwt_secret.clone(),
+            },
+            config_path: Arc::new(config_path.clone()),
+            config_update_lock: Arc::new(tokio::sync::Mutex::new(())),
+        });
+        let token = jsonwebtoken::encode(
+            &Header::default(),
+            &Claims {
+                sub: "admin".to_string(),
+                exp: (time::OffsetDateTime::now_utc() + time::Duration::minutes(5))
+                    .unix_timestamp(),
+            },
+            &EncodingKey::from_secret(jwt_secret.as_bytes()),
+        )
+        .unwrap();
+        let occupied = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let occupied_port = occupied.local_addr().unwrap().port();
+        let natt_port = std::net::UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let body = format!(
+            r#"{{"enabled":true,"ike_bind":"127.0.0.1:{occupied_port}","natt_bind":"127.0.0.1:{natt_port}","server_address":"127.0.0.1","remote_id":"vpn.example.com","dns":[]}}"#
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/settings/ikev2")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let response_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let response_body = String::from_utf8(response_body.to_vec()).unwrap();
+        assert!(response_body.contains("应用 IKEv2 配置失败"));
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), original);
+        assert!(!config_path.with_file_name("ikev2-cert.pem").exists());
+        assert!(!config_path.with_file_name("ikev2-key.pem").exists());
+        assert!(!config_path.with_file_name("ikev2-ca.pem").exists());
+        assert!(control_service.get_ikev2_manager().is_none());
+
+        let status = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings/ikev2")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status_body = to_bytes(status.into_body(), usize::MAX).await.unwrap();
+        assert!(
+            String::from_utf8(status_body.to_vec())
+                .unwrap()
+                .contains("\"runtime_error\":")
         );
     }
 }

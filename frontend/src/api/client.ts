@@ -70,3 +70,21 @@ export async function fetchSilent<T>(path: string): Promise<T | null> {
     return null
   }
 }
+
+export async function downloadFile(path: string, filename: string): Promise<void> {
+  const res = await fetch(`${API_BASE}${path}`, { headers: authHeaders() })
+  if (res.status === 401) {
+    await handle401()
+    throw new ApiError(401, '登录已过期，请重新登录')
+  }
+  if (!res.ok) {
+    const json = (await res.json().catch(() => null)) as ApiResponse<unknown> | null
+    throw new ApiError(json?.code ?? res.status, json?.msg ?? '下载失败')
+  }
+  const url = URL.createObjectURL(await res.blob())
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  anchor.click()
+  URL.revokeObjectURL(url)
+}

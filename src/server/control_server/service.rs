@@ -1,11 +1,14 @@
 use crate::protocol::control_message::{RegRequestMsg, RegistrationMode};
 use crate::server::control_server::db;
-use crate::server::control_server::db::{DeviceIpType, NetworkRecord, NetworkSource, NetworkType};
+use crate::server::control_server::db::{
+    ClientType, DeviceIpType, NetworkRecord, NetworkSource, NetworkType,
+};
 use crate::server::network_state_provider::{
     NetworkState, NetworkStateProvider, i64_to_system_time,
 };
 use anyhow::{Context, bail};
 use bytes::Bytes;
+use bytes::BytesMut;
 use dashmap::DashMap;
 use ipnet::Ipv4Net;
 use parking_lot::RwLock;
@@ -33,6 +36,12 @@ pub struct NetworkConfig {
     pub lease_duration: Duration,
     pub source: NetworkSource,
     pub network_type: NetworkType,
+}
+
+#[derive(Clone, Copy)]
+enum DeviceMutation {
+    Create(ClientType),
+    Update,
 }
 
 fn validate_gateway(net: Ipv4Net, gateway: Ipv4Addr) -> anyhow::Result<()> {
@@ -78,7 +87,10 @@ pub struct ControlService {
     network_state_provider: NetworkStateProvider,
     network_init_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     device_mutation_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    ikev2_device_mutation_lock: Arc<tokio::sync::Mutex<()>>,
     peer_manager: Arc<RwLock<Option<Arc<crate::server::peer_server::PeerServerManager>>>>,
+    ikev2_manager: Arc<RwLock<Option<crate::server::ikev2::Ikev2Handle>>>,
+    ikev2_runtime_error: Arc<RwLock<Option<String>>>,
 }
 
 impl ControlService {
@@ -105,7 +117,10 @@ impl ControlService {
             network_state_provider: NetworkStateProvider::new(network_states),
             network_init_locks: Arc::new(DashMap::new()),
             device_mutation_locks: Arc::new(DashMap::new()),
+            ikev2_device_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             peer_manager: Arc::new(RwLock::new(None)),
+            ikev2_manager: Arc::new(RwLock::new(None)),
+            ikev2_runtime_error: Arc::new(RwLock::new(None)),
         };
 
         let cleanup_interval = Duration::from_secs(30 * 60);
@@ -228,9 +243,19 @@ impl ControlService {
         reg_req: RegRequestMsg,
         sender: Sender<Bytes>,
     ) -> anyhow::Result<Session> {
+        self.register_inner(reg_req, sender, ClientType::Vnt).await
+    }
+
+    async fn register_inner(
+        &self,
+        reg_req: RegRequestMsg,
+        sender: Sender<Bytes>,
+        client_type: ClientType,
+    ) -> anyhow::Result<Session> {
         reg_req.check()?;
         let network_code = reg_req.network_code.clone();
         let registration_mode = reg_req.registration_mode;
+        let allow_ikev2 = reg_req.allow_ikev2;
         if !self.network_code_allowed(&network_code) {
             bail!("network_code '{}' is not in white_list", network_code);
         }
@@ -255,7 +280,21 @@ impl ControlService {
             .get_or_create_network_state(reg_req.network_code.clone(), config)
             .await;
 
-        if config.network_type == NetworkType::Private && !state.has_device(&reg_req.device_id) {
+        let existing = state.get_device_entry(&reg_req.device_id);
+        if existing
+            .as_ref()
+            .is_some_and(|entry| entry.client_type != client_type)
+        {
+            bail!("设备 ID '{}' 已被其他设备类型占用", reg_req.device_id);
+        }
+        if client_type == ClientType::Ikev2 && existing.is_none() {
+            bail!("IKEv2 设备 '{}' 未由管理员预先创建", reg_req.device_id);
+        }
+
+        if config.network_type == NetworkType::Private
+            && client_type == ClientType::Vnt
+            && !state.has_device(&reg_req.device_id)
+        {
             bail!("私有网络仅允许已添加的设备连接");
         }
 
@@ -264,7 +303,7 @@ impl ControlService {
             let device_id = reg_req.device_id.clone();
 
             let (ip, _old_ip, entry) =
-                match state.allocate_ip_and_get_entry(reg_req, random_id, sender) {
+                match state.allocate_ip_and_get_entry_as(reg_req, random_id, sender, client_type) {
                     Ok(rs) => rs,
                     Err(e) => {
                         log::warn!("network_code={network_code},device_id={device_id},e={e:?}");
@@ -283,6 +322,7 @@ impl ControlService {
                         RegistrationMode::Normal => RegistrationStatus::Confirmed,
                         RegistrationMode::PreRegister => RegistrationStatus::PendingConfirmation,
                     },
+                    allow_ikev2,
                 },
                 entry,
             )
@@ -318,6 +358,43 @@ impl ControlService {
         }
 
         Ok(session)
+    }
+
+    pub async fn register_ikev2(
+        &self,
+        network_code: String,
+        device_id: String,
+        device_name: String,
+        sender: Sender<Bytes>,
+    ) -> anyhow::Result<Session> {
+        let config = self.network_config(&network_code, None)?;
+        let state = self
+            .get_or_create_network_state(network_code.clone(), config)
+            .await;
+        let remote_ips = self
+            .get_peer_manager()
+            .map(|manager| manager.remote_online_ips(&network_code))
+            .unwrap_or_default();
+        let requested_ip = state
+            .configured_ip(&device_id)
+            .filter(|ip| !remote_ips.contains(ip))
+            .or_else(|| state.first_available_ip_excluding(&remote_ips).ok())
+            .context("IKEv2 address pool is exhausted")?;
+        let request = RegRequestMsg {
+            network_code: network_code.clone(),
+            device_id,
+            ip: Some(requested_ip),
+            name: device_name,
+            version: "IKEv2".to_string(),
+            key_sign: None,
+            ip_variable: false,
+            server_id: 0,
+            registration_mode: RegistrationMode::Normal,
+            advertised_subnets: Vec::new(),
+            allow_ikev2: true,
+        };
+        self.register_inner(request, sender, ClientType::Ikev2)
+            .await
     }
 
     fn network_config(
@@ -486,7 +563,13 @@ impl ControlService {
                     .as_millis() as u64;
 
                 for entry in state.sender_map().iter() {
-                    let _ip = *entry.key();
+                    let ip = *entry.key();
+                    if state
+                        .get_device_entry_by_ip(ip)
+                        .is_some_and(|device| device.client_type == ClientType::Ikev2)
+                    {
+                        continue;
+                    }
                     let sender = entry.value().clone();
 
                     let mut buf = BytesMut::zeroed(HEAD_LENGTH + 8);
@@ -669,7 +752,8 @@ impl ControlService {
         device_id: &str,
         ip: Ipv4Addr,
         ip_type: DeviceIpType,
-        create: bool,
+        ikev2_password: Option<String>,
+        mutation: DeviceMutation,
     ) -> anyhow::Result<()> {
         if device_id.is_empty()
             || device_id.trim() != device_id
@@ -677,6 +761,7 @@ impl ControlService {
         {
             bail!("无效的设备 ID");
         }
+        let _ikev2_guard = self.ikev2_device_mutation_lock.lock().await;
         let mutation_lock = self
             .device_mutation_locks
             .entry(network_code.to_string())
@@ -695,14 +780,59 @@ impl ControlService {
             .get_or_create_network_state(network_code.to_string(), config)
             .await;
 
-        if create && state.has_device(device_id) {
+        if matches!(mutation, DeviceMutation::Create(_)) && state.has_device(device_id) {
             bail!("设备 ID '{}' 已存在", device_id);
         }
-        if !create && !state.has_device(device_id) {
+        if matches!(mutation, DeviceMutation::Update) && !state.has_device(device_id) {
             bail!("设备 ID '{}' 不存在", device_id);
         }
 
-        let previous = state.upsert_device_config(device_id, ip, ip_type)?;
+        let existing = state.get_device_entry(device_id);
+        let client_type = match mutation {
+            DeviceMutation::Create(client_type) => client_type,
+            DeviceMutation::Update => existing
+                .as_ref()
+                .map(|entry| entry.client_type)
+                .context("设备不存在")?,
+        };
+        let password = match client_type {
+            ClientType::Vnt => {
+                if ikev2_password.is_some() {
+                    bail!("VNT 设备不能配置 IKEv2 密码");
+                }
+                None
+            }
+            ClientType::Ikev2 => {
+                if device_id.len() > 48 {
+                    bail!("IKEv2 用户名长度必须为 1..=48 字节");
+                }
+                let password = ikev2_password.or_else(|| {
+                    existing
+                        .as_ref()
+                        .and_then(|entry| entry.ikev2_password.clone())
+                });
+                if password.as_ref().is_none_or(String::is_empty) {
+                    bail!("IKEv2 密码不能为空");
+                }
+                if matches!(mutation, DeviceMutation::Create(_))
+                    && self.ikev2_username_exists(device_id).await?
+                {
+                    bail!("IKEv2 用户名 '{}' 已存在", device_id);
+                }
+                password
+            }
+        };
+
+        if matches!(mutation, DeviceMutation::Update)
+            && existing
+                .as_ref()
+                .is_some_and(|entry| entry.client_type == ClientType::Ikev2)
+            && let Some(manager) = self.get_ikev2_manager()
+        {
+            manager.disconnect_device(network_code, device_id).await;
+        }
+
+        let previous = state.upsert_device_config(device_id, ip, ip_type, client_type, password)?;
         let record = state
             .get_device_entry(device_id)
             .ok_or_else(|| anyhow::anyhow!("设备状态更新失败"))?
@@ -711,9 +841,33 @@ impl ControlService {
             state.restore_device_config(device_id, previous);
             return Err(error);
         }
+        if client_type == ClientType::Ikev2 {
+            self.refresh_ikev2_credentials().await;
+        }
         Ok(())
     }
 
+    pub async fn add_device_typed(
+        &self,
+        network_code: &str,
+        device_id: &str,
+        ip: Ipv4Addr,
+        ip_type: DeviceIpType,
+        client_type: ClientType,
+        ikev2_password: Option<String>,
+    ) -> anyhow::Result<()> {
+        self.upsert_device(
+            network_code,
+            device_id,
+            ip,
+            ip_type,
+            ikev2_password,
+            DeviceMutation::Create(client_type),
+        )
+        .await
+    }
+
+    #[cfg(test)]
     pub async fn add_device(
         &self,
         network_code: &str,
@@ -721,10 +875,30 @@ impl ControlService {
         ip: Ipv4Addr,
         ip_type: DeviceIpType,
     ) -> anyhow::Result<()> {
-        self.upsert_device(network_code, device_id, ip, ip_type, true)
+        self.add_device_typed(network_code, device_id, ip, ip_type, ClientType::Vnt, None)
             .await
     }
 
+    pub async fn update_device_with_password(
+        &self,
+        network_code: &str,
+        device_id: &str,
+        ip: Ipv4Addr,
+        ip_type: DeviceIpType,
+        ikev2_password: Option<String>,
+    ) -> anyhow::Result<()> {
+        self.upsert_device(
+            network_code,
+            device_id,
+            ip,
+            ip_type,
+            ikev2_password,
+            DeviceMutation::Update,
+        )
+        .await
+    }
+
+    #[cfg(test)]
     pub async fn update_device(
         &self,
         network_code: &str,
@@ -732,8 +906,71 @@ impl ControlService {
         ip: Ipv4Addr,
         ip_type: DeviceIpType,
     ) -> anyhow::Result<()> {
-        self.upsert_device(network_code, device_id, ip, ip_type, false)
+        self.update_device_with_password(network_code, device_id, ip, ip_type, None)
             .await
+    }
+
+    async fn ikev2_username_exists(&self, username: &str) -> anyhow::Result<bool> {
+        if db::load_all_ikev2_devices()
+            .await?
+            .iter()
+            .any(|device| device.device_id == username)
+        {
+            return Ok(true);
+        }
+        Ok(self.network_state_provider.iter().any(|network| {
+            network
+                .value()
+                .get_device_entry(username)
+                .is_some_and(|device| device.client_type == ClientType::Ikev2)
+        }))
+    }
+
+    pub async fn ikev2_credentials(&self) -> anyhow::Result<HashMap<String, (String, String)>> {
+        let mut credentials = HashMap::new();
+        for device in db::load_all_ikev2_devices().await? {
+            if let Some(password) = device.ikev2_password {
+                credentials.insert(device.device_id, (device.network_code, password));
+            }
+        }
+        for network in self.network_state_provider.iter() {
+            let network_code = network.key().clone();
+            for (username, password) in network.value().ikev2_credentials() {
+                credentials.insert(username, (network_code.clone(), password));
+            }
+        }
+        Ok(credentials)
+    }
+
+    async fn refresh_ikev2_credentials(&self) {
+        let Some(manager) = self.get_ikev2_manager() else {
+            return;
+        };
+        match self.ikev2_credentials().await {
+            Ok(credentials) => {
+                if let Err(error) = manager.reload_credentials(credentials).await {
+                    log::error!("刷新 IKEv2 设备凭据失败: {error:#}");
+                    self.set_ikev2_runtime_error(Some(error.to_string()));
+                }
+            }
+            Err(error) => {
+                log::error!("读取 IKEv2 设备凭据失败: {error:#}");
+                self.set_ikev2_runtime_error(Some(error.to_string()));
+            }
+        }
+    }
+
+    pub async fn get_device_record(
+        &self,
+        network_code: &str,
+        device_id: &str,
+    ) -> anyhow::Result<Option<db::DeviceRecord>> {
+        if let Some(state) = self.network_state_provider.get(network_code)
+            && let Some(entry) = state.get_device_entry(device_id)
+        {
+            return Ok(Some(entry.to_record(network_code)));
+        }
+        db::get_device(network_code, device_id).await
     }
 
     pub async fn fast_register(
@@ -758,6 +995,14 @@ impl ControlService {
     }
 
     pub async fn delete_device(&self, network_code: &str, device_id: &str) -> anyhow::Result<()> {
+        let _ikev2_guard = self.ikev2_device_mutation_lock.lock().await;
+        let was_ikev2 = self
+            .get_device_record(network_code, device_id)
+            .await?
+            .is_some_and(|device| device.client_type == ClientType::Ikev2);
+        if let Some(manager) = self.get_ikev2_manager() {
+            manager.disconnect_device(network_code, device_id).await;
+        }
         let mutation_lock = self
             .device_mutation_locks
             .entry(network_code.to_string())
@@ -772,6 +1017,10 @@ impl ControlService {
         }
 
         db::delete_device(network_code, device_id).await?;
+
+        if was_ikev2 {
+            self.refresh_ikev2_credentials().await;
+        }
 
         Ok(())
     }
@@ -795,12 +1044,110 @@ impl ControlService {
             .map(|config| config.network_type)
     }
 
+    pub fn client_type(&self, network_code: &str, ip: Ipv4Addr) -> Option<ClientType> {
+        if let Some(state) = self.get_network_state(network_code)
+            && let Some(device) = state.get_device_entry_by_ip(ip)
+            && device.is_connected
+        {
+            return Some(device.client_type);
+        }
+        self.get_peer_manager()
+            .and_then(|manager| manager.remote_client_type(network_code, ip))
+    }
+
+    pub async fn forward_ikev2_packet(
+        &self,
+        network_code: &str,
+        source: Ipv4Addr,
+        destination: Ipv4Addr,
+        payload: &[u8],
+    ) -> anyhow::Result<bool> {
+        use crate::protocol::ip_packet_protocol::{HEAD_LENGTH, MsgType, NetPacket};
+        use pnet_packet::ipv4::Ipv4Packet;
+
+        let Some(ipv4) = Ipv4Packet::new(payload) else {
+            return Ok(false);
+        };
+        let header_length = ipv4.get_header_length() as usize * 4;
+        if ipv4.get_version() != 4
+            || header_length < Ipv4Packet::minimum_packet_size()
+            || ipv4.get_total_length() as usize != payload.len()
+            || ipv4.get_source() != source
+            || ipv4.get_destination() != destination
+        {
+            return Ok(false);
+        }
+        let Some(destination_type) = self.client_type(network_code, destination) else {
+            return Ok(false);
+        };
+        if destination_type == ClientType::Vnt {
+            let local_device = self
+                .get_network_state(network_code)
+                .and_then(|state| state.get_device_entry_by_ip(destination));
+            if local_device.is_some_and(|device| !device.allow_ikev2) {
+                return Ok(false);
+            }
+        }
+
+        let mut bytes = BytesMut::zeroed(HEAD_LENGTH + payload.len());
+        let mut packet = NetPacket::new(&mut bytes)?;
+        packet.set_msg_type(MsgType::Ikev2Relay);
+        packet.set_gateway_flag(true);
+        packet.set_ttl(5);
+        packet.set_src_id(source.into());
+        packet.set_dest_id(destination.into());
+        packet.set_payload(payload)?;
+        let data = bytes.freeze();
+
+        if let Some(state) = self.get_network_state(network_code) {
+            state.record_tx_traffic(source, payload.len());
+        }
+
+        if let Some(peer_manager) = self.get_peer_manager()
+            && peer_manager
+                .forward_with_best_route(network_code, destination, data.clone())
+                .await
+        {
+            return Ok(true);
+        }
+        if let Some(state) = self.get_network_state(network_code)
+            && let Some(sender) = state.sender_map().get(&destination)
+        {
+            state.record_rx_traffic(destination, payload.len());
+            return Ok(sender.try_send(data).is_ok());
+        }
+        Ok(false)
+    }
+
     pub fn set_peer_manager(&self, manager: Arc<crate::server::peer_server::PeerServerManager>) {
         *self.peer_manager.write() = Some(manager);
     }
 
     pub fn get_peer_manager(&self) -> Option<Arc<crate::server::peer_server::PeerServerManager>> {
         self.peer_manager.read().clone()
+    }
+
+    pub fn set_ikev2_manager(&self, manager: crate::server::ikev2::Ikev2Handle) {
+        *self.ikev2_manager.write() = Some(manager);
+    }
+
+    pub fn get_ikev2_manager(&self) -> Option<crate::server::ikev2::Ikev2Handle> {
+        self.ikev2_manager.read().clone()
+    }
+
+    pub fn replace_ikev2_manager(
+        &self,
+        manager: Option<crate::server::ikev2::Ikev2Handle>,
+    ) -> Option<crate::server::ikev2::Ikev2Handle> {
+        std::mem::replace(&mut *self.ikev2_manager.write(), manager)
+    }
+
+    pub fn set_ikev2_runtime_error(&self, error: Option<String>) {
+        *self.ikev2_runtime_error.write() = error;
+    }
+
+    pub fn get_ikev2_runtime_error(&self) -> Option<String> {
+        self.ikev2_runtime_error.read().clone()
     }
 
     pub fn subnet_snapshot(
@@ -911,6 +1258,7 @@ impl ControlService {
                                 advertised_subnets: Vec::new(),
                                 tx_bytes: r.tx_bytes as u64,
                                 rx_bytes: r.rx_bytes as u64,
+                                client_type: r.client_type,
                             }
                         })
                         .collect()
@@ -925,7 +1273,7 @@ impl ControlService {
         if let Some(peer_manager) = self.peer_manager.read().as_ref() {
             let remote_devices = peer_manager.get_remote_devices(network_code);
 
-            for (ip, server_addr, latency_ms, advertised_subnets) in remote_devices {
+            for (ip, server_addr, latency_ms, advertised_subnets, client_type) in remote_devices {
                 devices.push(DeviceInfoVO {
                     device_id: format!("remote-{}", ip),
                     device_name: format!("Remote Device ({})", ip),
@@ -941,6 +1289,7 @@ impl ControlService {
                     advertised_subnets,
                     tx_bytes: 0,
                     rx_bytes: 0,
+                    client_type,
                 });
             }
         }
@@ -956,6 +1305,7 @@ pub struct Session {
     pub random_id: u64,
     pub network_state: Arc<NetworkState>,
     pub registration_status: RegistrationStatus,
+    pub allow_ikev2: bool,
 }
 
 impl Drop for Session {
@@ -1006,6 +1356,7 @@ pub struct DeviceInfoVO {
     pub advertised_subnets: Vec<Ipv4Net>,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
+    pub client_type: ClientType,
 }
 
 #[derive(Serialize)]
@@ -1031,7 +1382,7 @@ mod tests {
         ControlService, NetworkConfig, first_usable_ip, network_counts, network_from_gateway,
     };
     use crate::protocol::control_message::{RegRequestMsg, RegistrationMode};
-    use crate::server::control_server::db::{DeviceIpType, NetworkSource, NetworkType};
+    use crate::server::control_server::db::{ClientType, DeviceIpType, NetworkSource, NetworkType};
     use ipnet::Ipv4Net;
     use std::collections::{HashMap, HashSet};
     use std::net::Ipv4Addr;
@@ -1050,6 +1401,7 @@ mod tests {
             server_id: 0,
             registration_mode: RegistrationMode::Normal,
             advertised_subnets: Vec::new(),
+            allow_ikev2: false,
         }
     }
 
@@ -1338,7 +1690,7 @@ mod tests {
         // 模拟 B 已经同步到修改前的设备列表版本。
         let before = session_b
             .network_state
-            .changed_client_simple_list(session_b.ip, u64::MAX)
+            .changed_client_simple_list(session_b.ip, u64::MAX, false)
             .unwrap();
         assert!(before.is_all, "客户端版本高于服务端时必须全量恢复");
         let b_version = before.data_version;
@@ -1357,7 +1709,7 @@ mod tests {
 
         let update = session_b
             .network_state
-            .changed_client_simple_list(session_b.ip, b_version)
+            .changed_client_simple_list(session_b.ip, b_version, false)
             .expect("B 的版本落后时应收到完整设备列表");
         assert!(update.data_version > b_version);
         assert!(update.is_all);
@@ -1368,7 +1720,7 @@ mod tests {
         assert!(
             session_b
                 .network_state
-                .changed_client_simple_list(session_b.ip, migration_version)
+                .changed_client_simple_list(session_b.ip, migration_version, false)
                 .is_none(),
             "已经同步到迁移版本时不应重复下发"
         );
@@ -1381,7 +1733,7 @@ mod tests {
             .unwrap();
         let incremental = session_b
             .network_state
-            .changed_client_simple_list(session_b.ip, migration_version)
+            .changed_client_simple_list(session_b.ip, migration_version, false)
             .expect("新增设备后应有增量列表");
         assert!(!incremental.is_all);
         assert_eq!(incremental.list.len(), 1);
@@ -1390,7 +1742,7 @@ mod tests {
         // 一直停留在迁移前版本的客户端，即使服务端后来还有普通变化，仍必须全量。
         let stale_update = session_b
             .network_state
-            .changed_client_simple_list(session_b.ip, b_version)
+            .changed_client_simple_list(session_b.ip, b_version, false)
             .expect("未越过迁移屏障的客户端仍应收到全量列表");
         assert!(stale_update.is_all);
         assert!(stale_update.list.iter().any(|device| device.ip == new_ip));
@@ -1656,5 +2008,178 @@ mod tests {
         let client_list = state.client_info_list(session_c.ip);
         let dev = client_list.iter().find(|d| d.id == "device-a").unwrap();
         assert_eq!(dev.version, "2.0.5", "RPC 客户端列表应显示新版本");
+    }
+
+    #[tokio::test]
+    async fn ikev2_devices_are_precreated_unique_and_protected_from_vnt_registration() {
+        let service = ControlService::new(
+            "10.92.0.0/24".parse().unwrap(),
+            HashMap::from([
+                ("ike-a".to_string(), "10.92.0.0/24".parse().unwrap()),
+                ("ike-b".to_string(), "10.93.0.0/24".parse().unwrap()),
+            ]),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            service
+                .add_device_typed(
+                    "ike-a",
+                    "missing-password",
+                    "10.92.0.8".parse().unwrap(),
+                    DeviceIpType::Fixed,
+                    ClientType::Ikev2,
+                    None,
+                )
+                .await
+                .is_err()
+        );
+        service
+            .add_device_typed(
+                "ike-a",
+                "alice",
+                "10.92.0.8".parse().unwrap(),
+                DeviceIpType::Fixed,
+                ClientType::Ikev2,
+                Some("old-password".to_string()),
+            )
+            .await
+            .unwrap();
+        assert!(
+            service
+                .add_device_typed(
+                    "ike-b",
+                    "alice",
+                    "10.93.0.8".parse().unwrap(),
+                    DeviceIpType::Fixed,
+                    ClientType::Ikev2,
+                    Some("other-password".to_string()),
+                )
+                .await
+                .is_err()
+        );
+
+        let (sender, _) = mpsc::channel(8);
+        assert!(
+            service
+                .register(registration("ike-a", "alice"), sender)
+                .await
+                .is_err()
+        );
+        let (sender, _) = mpsc::channel(8);
+        assert!(
+            service
+                .register_ikev2(
+                    "ike-a".to_string(),
+                    "unknown".to_string(),
+                    "unknown".to_string(),
+                    sender,
+                )
+                .await
+                .is_err()
+        );
+
+        service
+            .update_device_with_password(
+                "ike-a",
+                "alice",
+                "10.92.0.9".parse().unwrap(),
+                DeviceIpType::Static,
+                Some("new-password".to_string()),
+            )
+            .await
+            .unwrap();
+        let record = service
+            .get_device_record("ike-a", "alice")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.client_type, ClientType::Ikev2);
+        assert_eq!(record.ikev2_password.as_deref(), Some("new-password"));
+        assert_eq!(
+            service.ikev2_credentials().await.unwrap().get("alice"),
+            Some(&("ike-a".to_string(), "new-password".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn ikev2_clients_are_visible_only_to_opted_in_vnt_sessions() {
+        let service = ControlService::new(
+            "10.91.0.0/24".parse().unwrap(),
+            HashMap::new(),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        let (vnt_sender, mut vnt_receiver) = mpsc::channel(8);
+        let vnt = service
+            .register(registration("ike-access", "vnt-a"), vnt_sender)
+            .await
+            .unwrap();
+        service
+            .add_device_typed(
+                "ike-access",
+                "phone",
+                "10.91.0.8".parse().unwrap(),
+                DeviceIpType::Fixed,
+                ClientType::Ikev2,
+                Some("password".to_string()),
+            )
+            .await
+            .unwrap();
+        let (ike_sender, mut ike_receiver) = mpsc::channel(8);
+        let ike = service
+            .register_ikev2(
+                "ike-access".to_string(),
+                "phone".to_string(),
+                "phone".to_string(),
+                ike_sender,
+            )
+            .await
+            .unwrap();
+
+        let hidden = vnt.network_state.full_client_simple_list(vnt.ip, false);
+        assert!(!hidden.list.iter().any(|client| client.ip == ike.ip));
+        let visible = vnt.network_state.full_client_simple_list(vnt.ip, true);
+        assert!(visible.list.iter().any(|client| {
+            client.ip == ike.ip
+                && client.client_type == crate::protocol::control_message::ClientType::Ikev2
+        }));
+
+        service.ping_local_clients().await;
+        let ping = vnt_receiver
+            .try_recv()
+            .expect("VNT clients should receive server pings");
+        let ping = crate::protocol::ip_packet_protocol::NetPacket::new(ping)
+            .expect("server ping should be a valid packet");
+        assert_eq!(
+            ping.msg_type().unwrap(),
+            crate::protocol::ip_packet_protocol::MsgType::Ping
+        );
+        assert!(ping.is_gateway());
+        assert!(ike_receiver.try_recv().is_err());
+
+        let packet = test_ipv4(ike.ip, vnt.ip);
+        assert!(
+            !service
+                .forward_ikev2_packet("ike-access", ike.ip, vnt.ip, &packet)
+                .await
+                .unwrap()
+        );
+    }
+
+    fn test_ipv4(source: Ipv4Addr, destination: Ipv4Addr) -> Vec<u8> {
+        let mut packet = vec![0u8; 20];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&20u16.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 1;
+        packet[12..16].copy_from_slice(&source.octets());
+        packet[16..20].copy_from_slice(&destination.octets());
+        packet
     }
 }

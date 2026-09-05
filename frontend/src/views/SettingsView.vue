@@ -4,6 +4,7 @@ import { computed, onMounted, ref } from 'vue'
 import { ApiError } from '@/api/client'
 import { networkApi, settingsApi } from '@/api/modules'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
+import Ikev2ServiceSettings from '@/components/Ikev2ServiceSettings.vue'
 import { useToast } from '@/composables/useToast'
 
 const toast = useToast()
@@ -246,6 +247,8 @@ onMounted(loadSettings)
         </div>
       </div>
     </div>
+
+    <Ikev2ServiceSettings />
 
     <ConfirmDialog
       :open="confirmClearOpen"

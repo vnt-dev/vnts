@@ -2,6 +2,11 @@ syntax = "proto3";
 
 package protocol.server_message;
 
+enum ClientType {
+  VNT = 0;
+  IKEV2 = 1;
+}
+
 
 // 服务端之间的消息
 message ServerMessage {
@@ -42,6 +47,7 @@ message ClientLatencyInfo {
   fixed32 ip = 1;
   uint32 latency_ms = 2; // 客户端到本服务器的延迟（毫秒），目前用默认值
   repeated ServerIpv4Subnet advertised_subnets = 3;
+  ClientType client_type = 4;
 }
 
 message ServerIpv4Subnet {
