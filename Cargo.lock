@@ -2487,6 +2487,7 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 [[package]]
 name = "ryke"
 version = "0.3.0"
+source = "git+https://github.com/vnt-dev/ryke.git#8807100b872098720874b41382f3ea8ece5eda97"
 dependencies = [
  "aes",
  "aes-gcm",

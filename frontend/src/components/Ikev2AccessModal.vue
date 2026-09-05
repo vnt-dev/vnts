@@ -23,7 +23,8 @@ const platforms: Array<{ id: 'windows' | 'apple' | 'android' | 'strongswan'; lab
 
 const serverAddress = computed(() => info.value?.service.server_address || '尚未配置')
 const remoteIdentity = computed(() => info.value?.service.remote_id || '尚未配置')
-const windowsCommand = computed(() => `Set-VpnConnectionIPsecConfiguration -ConnectionName "VNT-${props.networkCode}" -EncryptionMethod GCMAES256 -IntegrityCheckMethod SHA256 -DHGroup Group14 -CipherTransformConstants GCMAES256 -AuthenticationTransformConstants GCMAES256 -PfsGroup None -Force`)
+const windowsIpsecCommand = `Set-VpnConnectionIPsecConfiguration -ConnectionName "VNT-IKEv2" -EncryptionMethod GCMAES256 -IntegrityCheckMethod SHA256 -DHGroup Group14 -CipherTransformConstants GCMAES256 -AuthenticationTransformConstants GCMAES256 -PfsGroup None -Force`
+const windowsSplitTunnelCommand = `Set-VpnConnection -Name "VNT-IKEv2" -SplitTunneling $true`
 const strongSwanConfig = computed(() => `connections {
   vnt-${props.networkCode} {
     remote_addrs = ${serverAddress.value}
@@ -134,8 +135,20 @@ async function downloadServerCertificate() {
       <div class="guide">
         <template v-if="platform === 'windows'">
           <h4>Windows 11</h4>
-          <ol><li>安装并信任 CA 证书。</li><li>添加 VPN，类型选择 IKEv2，服务器填写 <code>{{ serverAddress }}</code>。</li><li>登录信息选择“用户名和密码”，填写上方凭据。</li><li>在管理员 PowerShell 中执行：</li></ol>
-          <pre>{{ windowsCommand }}</pre>
+          <ol>
+            <li>安装并信任 CA 证书。</li>
+            <li>添加 VPN，将连接名称填写为 <code>VNT-IKEv2</code>，类型选择 IKEv2，服务器填写 <code>{{ serverAddress }}</code>。</li>
+            <li>登录信息选择“用户名和密码”，填写上方凭据。</li>
+            <li>
+              在管理员 PowerShell 中执行以下命令，配置与服务端匹配的 IKEv2/IPsec 加密算法和 DH 组。如果使用了其他连接名称，请将命令中的 <code>VNT-IKEv2</code> 替换为相同的名称：
+              <pre>{{ windowsIpsecCommand }}</pre>
+            </li>
+            <li>
+              在管理员 PowerShell 中执行以下命令，启用拆分隧道，仅将 VNT 虚拟网段流量送入 VPN，避免 VPN 接管系统默认路由。如果使用了其他连接名称，请将命令中的 <code>VNT-IKEv2</code> 替换为相同的名称：
+              <pre>{{ windowsSplitTunnelCommand }}</pre>
+            </li>
+          </ol>
+          <p>命令执行后请断开并重新连接 VPN。PPP 适配器显示 <code>255.255.255.255</code> 子网掩码和 <code>0.0.0.0</code> 默认网关属于点对点连接的正常表现。</p>
         </template>
         <template v-else-if="platform === 'apple'">
           <h4>macOS / iOS</h4>

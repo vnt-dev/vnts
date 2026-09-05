@@ -18,7 +18,7 @@ IKEv2 客户端从对应网络的地址池获取虚拟 IP，并可跨互联服�
 
 系统设置可编辑服务开关、UDP 500/4500 监听、服务器地址、远程ID、DNS 和证书路径；网络详情的设备列表负责管理 IKEv2 设备及凭据。保存全局设置后会自动启动、停止或热加载 IKEv2 服务；每个 IKEv2 设备的操作栏提供 CA 下载和 Windows、macOS/iOS、Android、strongSwan 接入步骤。
 
-客户端只支持 EAP-MSCHAPv2 用户名/密码认证：连接地址使用 `server_address`，服务器身份使用 `remote_id`，用户名和密码来自对应 IKEv2 设备的接入说明，并在系统中信任签发 IKE 证书的 CA。Android 必须在 VPN 配置的“IPSec CA 证书”中明确选择该 CA，不能选择“不验证服务器”；其原生客户端默认发送空的 outer EAP Identity，服务端会在后续 MSCHAPv2 Response 中按用户名选择设备凭据。Windows 原生客户端需把 IKE/ESP 加密算法配置为 `GCMAES256`、DH 组配置为 Group14。
+客户端只支持 EAP-MSCHAPv2 用户名/密码认证：连接地址使用 `server_address`，服务器身份使用 `remote_id`，用户名和密码来自对应 IKEv2 设备的接入说明，并在系统中信任签发 IKE 证书的 CA。Android 必须在 VPN 配置的“IPSec CA 证书”中明确选择该 CA，不能选择“不验证服务器”；其原生客户端默认发送空的 outer EAP Identity，服务端会在后续 MSCHAPv2 Response 中按用户名选择设备凭据。Windows 原生客户端创建 VPN 时可将连接名称填写为 `VNT-IKEv2`。接入说明中的第一条 PowerShell 命令用于配置与服务端匹配的 IKE/ESP 加密算法和 DH 组；第二条命令 `Set-VpnConnection -Name "VNT-IKEv2" -SplitTunneling $true` 用于启用拆分隧道，仅将 VNT 虚拟网段流量送入 VPN，避免 VPN 接管系统默认路由。如果创建 VPN 时使用了其他连接名称，两条命令中的 `VNT-IKEv2` 也必须替换为相同名称。修改后需断开并重新连接 VPN。PPP 适配器显示 `/32` 子网掩码和 `0.0.0.0` 默认网关是点对点连接的正常表现。
 
 
 ## Web 管理端（前端）
