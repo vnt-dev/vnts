@@ -11,16 +11,22 @@ use tokio::sync::mpsc::{channel, Sender};
 const TCP_MAX_PACKET_SIZE: usize = (1 << 24) - 1;
 
 pub async fn start(tcp: TcpListener, handler: PacketHandler) {
-    if let Err(e) = accept(tcp, handler).await {
-        log::error!("accept {:?}", e);
-    }
+    accept(tcp, handler).await
 }
 
-async fn accept(tcp: TcpListener, handler: PacketHandler) -> io::Result<()> {
+async fn accept(tcp: TcpListener, handler: PacketHandler) {
     loop {
-        let (stream, addr) = tcp.accept().await?;
-        let _ = stream.set_nodelay(true);
-        tokio::spawn(stream_handle(stream, addr, handler.clone()));
+        match tcp.accept().await {
+            Ok((stream, addr)) => {
+                let _ = stream.set_nodelay(true);
+                tokio::spawn(stream_handle(stream, addr, handler.clone()));
+            }
+            Err(e) => {
+                // accept失败不能终止服务(如fd耗尽EMFILE)，停顿后重试
+                log::error!("accept {:?}", e);
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
     }
 }
 
