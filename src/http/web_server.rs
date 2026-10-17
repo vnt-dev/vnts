@@ -405,6 +405,7 @@ async fn get_device_wireguard_access(
         return no_store(ApiResponse::<()>::err("WireGuard 设备未配置 IP").into_response());
     };
     let wireguard_input_routes = device.wireguard_input_routes.clone();
+    let wireguard_dns = device.wireguard_dns.clone();
     let (Some(private_key), Some(public_key)) =
         (device.wireguard_private_key, device.wireguard_public_key)
     else {
@@ -438,8 +439,20 @@ async fn get_device_wireguard_access(
             allowed_ips.push(subnet);
         }
     }
+    let dns_line = if wireguard_dns.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nDNS = {}",
+            wireguard_dns
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
     let config_text = format!(
-        "[Interface]\nPrivateKey = {private_key}\nAddress = {ip}/{}\n\n[Peer]\nPublicKey = {server_public_key}\nAllowedIPs = {}\nEndpoint = {}\nPersistentKeepalive = {}\n",
+        "[Interface]\nPrivateKey = {private_key}\nAddress = {ip}/{}{dns_line}\n\n[Peer]\nPublicKey = {server_public_key}\nAllowedIPs = {}\nEndpoint = {}\nPersistentKeepalive = {}\n",
         network.netmask,
         allowed_ips.join(", "),
         service_config.endpoint,
@@ -1376,6 +1389,8 @@ async fn create_managed_device(
             None,
             None,
             None,
+            None,
+            None,
         )
         .await
     {
@@ -1616,6 +1631,8 @@ async fn put_managed_device_config(
                 target_ip_type,
                 None,
                 Some(target_device_name.clone()),
+                None,
+                None,
                 None,
                 None,
                 None,
@@ -2173,6 +2190,9 @@ struct CreateDeviceRequest {
     #[serde(default)]
     wireguard_input_routes: Vec<Ikev2InputRoute>,
     #[serde(default)]
+    wireguard_dns: Vec<Ipv4Addr>,
+    wireguard_private_key: Option<String>,
+    #[serde(default)]
     config_toml: String,
     subscription_server: Option<String>,
     current_server: Option<String>,
@@ -2224,6 +2244,8 @@ async fn create_device(
             Some(body.ikev2_input_routes),
             Some(body.wireguard_output_subnets),
             Some(body.wireguard_input_routes),
+            Some(body.wireguard_dns),
+            optional_text(body.wireguard_private_key),
         )
         .await
     {
@@ -2243,6 +2265,8 @@ struct UpdateDeviceRequest {
     ikev2_input_routes: Option<Vec<Ikev2InputRoute>>,
     wireguard_output_subnets: Option<Vec<ipnet::Ipv4Net>>,
     wireguard_input_routes: Option<Vec<Ikev2InputRoute>>,
+    wireguard_dns: Option<Vec<Ipv4Addr>>,
+    wireguard_private_key: Option<String>,
 }
 
 async fn update_device(
@@ -2280,6 +2304,8 @@ async fn update_device(
             body.ikev2_input_routes,
             body.wireguard_output_subnets,
             body.wireguard_input_routes,
+            body.wireguard_dns,
+            optional_text(body.wireguard_private_key),
         )
         .await
     {
@@ -2780,6 +2806,8 @@ mod tests {
                 }]),
                 None,
                 None,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -2890,6 +2918,8 @@ persistent_keepalive = 25
                     subnet: "172.30.0.9/16".parse().unwrap(),
                     target_ip: "10.61.0.20".parse().unwrap(),
                 }]),
+                Some(vec!["1.1.1.1".parse().unwrap(), "8.8.8.8".parse().unwrap()]),
+                None,
             )
             .await
             .unwrap();
@@ -2972,6 +3002,7 @@ persistent_keepalive = 25
         .unwrap();
         assert!(body.contains(&private_key));
         assert!(body.contains("[Interface]\\nPrivateKey"));
+        assert!(body.contains("Address = 10.61.0.8/24\\nDNS = 1.1.1.1, 8.8.8.8\\n\\n[Peer]"));
         assert!(body.contains("AllowedIPs = 10.61.0.0/24, 172.30.0.0/16"));
     }
 

@@ -95,6 +95,8 @@ const deviceForm = ref({
   ikev2_password: '',
   output_subnets: [] as string[],
   input_routes: [] as Ikev2InputRoute[],
+  wireguard_dns: '',
+  wireguard_private_key: '',
   vnt_config: emptyVntClientConfig(),
 })
 const showIkev2Password = ref(false)
@@ -192,6 +194,8 @@ function changeClientType() {
     deviceForm.value.ikev2_password = ''
     deviceForm.value.output_subnets = []
     deviceForm.value.input_routes = []
+    deviceForm.value.wireguard_dns = ''
+    deviceForm.value.wireguard_private_key = ''
     showIkev2Password.value = false
   }
 }
@@ -202,6 +206,10 @@ function addOutputSubnet() {
 
 function addInputRoute() {
   deviceForm.value.input_routes.push({ subnet: '', target_ip: '' })
+}
+
+function parseWireguardDns() {
+  return deviceForm.value.wireguard_dns.split(/[,，\s]+/).map((value) => value.trim()).filter(Boolean)
 }
 
 async function copyCredential(value: string) {
@@ -241,6 +249,8 @@ async function openCreateDevice() {
     ikev2_password: '',
     output_subnets: [],
     input_routes: [],
+    wireguard_dns: '',
+    wireguard_private_key: '',
     vnt_config: emptyVntClientConfig(),
   }
   pendingCreateIpSuggestion.value = suggestedIp === undefined
@@ -305,6 +315,8 @@ async function openEditDevice(group: DeviceGroup) {
     ikev2_password: '',
     output_subnets: [...(device.client_type === 'WIREGUARD' ? device.wireguard_output_subnets : device.ikev2_output_subnets)],
     input_routes: (device.client_type === 'WIREGUARD' ? device.wireguard_input_routes : device.ikev2_input_routes).map((route) => ({ ...route })),
+    wireguard_dns: device.client_type === 'WIREGUARD' ? device.wireguard_dns.join(', ') : '',
+    wireguard_private_key: '',
     vnt_config: emptyVntClientConfig(),
   }
   showIkev2Password.value = false
@@ -391,6 +403,10 @@ async function submitDevice() {
             ? {
                 wireguard_output_subnets: deviceForm.value.output_subnets.map((subnet) => subnet.trim()).filter(Boolean),
                 wireguard_input_routes: deviceForm.value.input_routes.map((route) => ({ subnet: route.subnet.trim(), target_ip: route.target_ip.trim() })),
+                wireguard_dns: parseWireguardDns(),
+                ...(deviceForm.value.wireguard_private_key.trim()
+                  ? { wireguard_private_key: deviceForm.value.wireguard_private_key.trim() }
+                  : {}),
               }
             : {}),
         })
@@ -416,6 +432,10 @@ async function submitDevice() {
           ? {
               wireguard_output_subnets: deviceForm.value.output_subnets.map((subnet) => subnet.trim()).filter(Boolean),
               wireguard_input_routes: deviceForm.value.input_routes.map((route) => ({ subnet: route.subnet.trim(), target_ip: route.target_ip.trim() })),
+              wireguard_dns: parseWireguardDns(),
+              ...(deviceForm.value.wireguard_private_key.trim()
+                ? { wireguard_private_key: deviceForm.value.wireguard_private_key.trim() }
+                : {}),
             }
           : {}),
       }
@@ -925,6 +945,16 @@ async function executeDelete() {
             <input v-model.trim="route.target_ip" type="text" :class="inputClass" placeholder="目标 VNT IP" required />
             <button type="button" class="rounded-lg border border-slate-200 px-3 text-slate-400 hover:text-red-500 dark:border-slate-600" title="删除入口路由" @click="deviceForm.input_routes.splice(index, 1)"><Trash2 :size="15" /></button>
           </div>
+        </div>
+        <div v-if="deviceForm.client_type === 'WIREGUARD'">
+          <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">客户端 DNS <span class="font-normal text-slate-400">（可选）</span></label>
+          <input v-model.trim="deviceForm.wireguard_dns" type="text" :class="inputClass" placeholder="1.1.1.1, 8.8.8.8" />
+          <p class="mt-1.5 text-xs leading-5 text-slate-400 dark:text-slate-500">写入该设备配置文件的 DNS 行；多个 IPv4 地址用逗号或空格分隔，留空则不添加。</p>
+        </div>
+        <div v-if="deviceForm.client_type === 'WIREGUARD'">
+          <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">设备私钥 <span class="font-normal text-slate-400">（可选）</span></label>
+          <input v-model.trim="deviceForm.wireguard_private_key" type="text" :class="inputClass" class="font-mono text-xs" :placeholder="editingDevice ? '留空保留当前私钥' : '留空自动生成'" autocomplete="off" spellcheck="false" />
+          <p class="mt-1.5 text-xs leading-5 text-slate-400 dark:text-slate-500">标准 WireGuard 私钥（base64，44 位）；同一私钥只能绑定一台设备。{{ editingDevice ? '更换后需要重新下载客户端配置。' : '' }}</p>
         </div>
         <div>
           <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">IP 地址</label>

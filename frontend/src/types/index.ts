@@ -51,6 +51,7 @@ export interface DeviceInfo {
   ikev2_input_routes: Ikev2InputRoute[]
   wireguard_output_subnets: string[]
   wireguard_input_routes: Ikev2InputRoute[]
+  wireguard_dns: string[]
   tx_bytes: number
   rx_bytes: number
   /** 前端基于两次轮询差分计算出的瞬时网速 */
@@ -95,6 +96,8 @@ export interface CreateDevicePayload {
   ikev2_input_routes?: Ikev2InputRoute[]
   wireguard_output_subnets?: string[]
   wireguard_input_routes?: Ikev2InputRoute[]
+  wireguard_dns?: string[]
+  wireguard_private_key?: string
 }
 
 export interface UpdateDevicePayload {
@@ -107,6 +110,8 @@ export interface UpdateDevicePayload {
   ikev2_input_routes?: Ikev2InputRoute[]
   wireguard_output_subnets?: string[]
   wireguard_input_routes?: Ikev2InputRoute[]
+  wireguard_dns?: string[]
+  wireguard_private_key?: string
 }
 
 export interface PeerServerInfo {

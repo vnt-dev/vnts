@@ -225,6 +225,7 @@ pub struct DeviceEntry {
     pub advertised_subnets: Vec<Ipv4Net>,
     pub ikev2_input_routes: Vec<Ikev2InputRoute>,
     pub wireguard_input_routes: Vec<Ikev2InputRoute>,
+    pub wireguard_dns: Vec<Ipv4Addr>,
     pub subnet_advertisement_active: bool,
 }
 
@@ -290,6 +291,7 @@ impl DeviceEntry {
             },
             ikev2_input_routes: record.ikev2_input_routes,
             wireguard_input_routes: record.wireguard_input_routes,
+            wireguard_dns: record.wireguard_dns,
             subnet_advertisement_active: false,
         }
     }
@@ -319,6 +321,11 @@ impl DeviceEntry {
             },
             wireguard_input_routes: if self.client_type == ClientType::Wireguard {
                 self.wireguard_input_routes.clone()
+            } else {
+                Vec::new()
+            },
+            wireguard_dns: if self.client_type == ClientType::Wireguard {
+                self.wireguard_dns.clone()
             } else {
                 Vec::new()
             },
@@ -680,6 +687,7 @@ impl NetworkState {
         ikev2_input_routes: Vec<Ikev2InputRoute>,
         wireguard_output_subnets: Vec<Ipv4Net>,
         wireguard_input_routes: Vec<Ikev2InputRoute>,
+        wireguard_dns: Vec<Ipv4Addr>,
     ) -> anyhow::Result<Option<DeviceEntry>> {
         let mut guard = self.lease_state.lock();
         guard.validate_ip_available(ip, Some(device_id))?;
@@ -735,6 +743,7 @@ impl NetworkState {
             };
             entry.ikev2_input_routes = ikev2_input_routes;
             entry.wireguard_input_routes = wireguard_input_routes;
+            entry.wireguard_dns = wireguard_dns;
             entry.data_version = data_version;
         } else {
             guard.device_map.insert(
@@ -767,6 +776,7 @@ impl NetworkState {
                     },
                     ikev2_input_routes,
                     wireguard_input_routes,
+                    wireguard_dns,
                     subnet_advertisement_active: false,
                 },
             );
@@ -1093,6 +1103,11 @@ impl NetworkState {
                 },
                 wireguard_input_routes: if entry.client_type == ClientType::Wireguard {
                     entry.wireguard_input_routes.clone()
+                } else {
+                    Vec::new()
+                },
+                wireguard_dns: if entry.client_type == ClientType::Wireguard {
+                    entry.wireguard_dns.clone()
                 } else {
                     Vec::new()
                 },
@@ -1536,10 +1551,11 @@ impl NetworkStateInner {
                         key_sign: reg_req.key_sign,
                         latency_ms: None,
                         traffic_stats: Arc::new(TrafficStats::new()),
-                        advertised_subnets: advertised_subnets.clone(),
-                        ikev2_input_routes: Vec::new(),
-                        wireguard_input_routes: Vec::new(),
-                        subnet_advertisement_active,
+                advertised_subnets: advertised_subnets.clone(),
+                ikev2_input_routes: Vec::new(),
+                wireguard_input_routes: Vec::new(),
+                wireguard_dns: Vec::new(),
+                subnet_advertisement_active,
                     }
                 };
                 self.add_device(entry);
@@ -1602,6 +1618,7 @@ impl NetworkStateInner {
                 advertised_subnets,
                 ikev2_input_routes: Vec::new(),
                 wireguard_input_routes: Vec::new(),
+                wireguard_dns: Vec::new(),
                 subnet_advertisement_active,
             }
         };

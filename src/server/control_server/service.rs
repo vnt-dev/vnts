@@ -1631,6 +1631,8 @@ impl ControlService {
         ikev2_input_routes: Option<Vec<Ikev2InputRoute>>,
         wireguard_output_subnets: Option<Vec<Ipv4Net>>,
         wireguard_input_routes: Option<Vec<Ikev2InputRoute>>,
+        wireguard_dns: Option<Vec<Ipv4Addr>>,
+        wireguard_private_key: Option<String>,
         mutation: DeviceMutation,
     ) -> anyhow::Result<()> {
         if device_id.is_empty()
@@ -1772,6 +1774,23 @@ impl ControlService {
                 (Vec::new(), Vec::new(), Vec::new(), Vec::new())
             }
         };
+        if wireguard_dns
+            .as_ref()
+            .is_some_and(|value| !value.is_empty())
+            && client_type != ClientType::Wireguard
+        {
+            bail!("只有 WireGuard 设备可以配置 DNS");
+        }
+        if wireguard_private_key
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+            && client_type != ClientType::Wireguard
+        {
+            bail!("只有 WireGuard 设备可以配置 WireGuard 私钥");
+        }
+        let wireguard_dns = wireguard_dns
+            .or_else(|| existing.as_ref().map(|entry| entry.wireguard_dns.clone()))
+            .unwrap_or_default();
         let password = match client_type {
             ClientType::Vnt => {
                 if ikev2_password.is_some() {
@@ -1805,29 +1824,68 @@ impl ControlService {
                 None
             }
         };
-        let (wireguard_private_key, wireguard_public_key) = if client_type == ClientType::Wireguard
-        {
-            match existing.as_ref().and_then(|entry| {
-                Some((
-                    entry.wireguard_private_key.clone()?,
-                    entry.wireguard_public_key.clone()?,
-                ))
-            }) {
-                Some(keys) => (Some(keys.0), Some(keys.1)),
-                None => {
-                    let mut bytes = [0u8; 32];
-                    rand::rng().fill_bytes(&mut bytes);
-                    let secret = boringtun::x25519::StaticSecret::from(bytes);
-                    let public = boringtun::x25519::PublicKey::from(&secret);
-                    (
-                        Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
-                        Some(base64::engine::general_purpose::STANDARD.encode(public.as_bytes())),
-                    )
+        let provided_wireguard_private_key = wireguard_private_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let (wireguard_private_key, wireguard_public_key, wireguard_keys_changed) =
+            if client_type == ClientType::Wireguard {
+                match provided_wireguard_private_key {
+                    Some(private_key) => {
+                        let bytes = crate::server::wireguard::decode_key(private_key)
+                            .map_err(|error| anyhow::anyhow!("无效的 WireGuard 私钥：{error}"))?;
+                        let secret = boringtun::x25519::StaticSecret::from(bytes);
+                        let public = boringtun::x25519::PublicKey::from(&secret);
+                        let public_key =
+                            base64::engine::general_purpose::STANDARD.encode(public.as_bytes());
+                        let unchanged = existing.as_ref().is_some_and(|entry| {
+                            entry.wireguard_private_key.as_deref() == Some(private_key)
+                                && entry.wireguard_public_key.as_deref()
+                                    == Some(public_key.as_str())
+                        });
+                        if !unchanged
+                            && self
+                                .wireguard_public_key_exists(&public_key, network_code, device_id)
+                                .await?
+                        {
+                            bail!("该 WireGuard 私钥已绑定其他设备，不能重复使用");
+                        }
+                        (
+                            Some(private_key.to_string()),
+                            Some(public_key),
+                            !unchanged,
+                        )
+                    }
+                    None => {
+                        match existing.as_ref().and_then(|entry| {
+                            Some((
+                                entry.wireguard_private_key.clone()?,
+                                entry.wireguard_public_key.clone()?,
+                            ))
+                        }) {
+                            Some(keys) => (Some(keys.0), Some(keys.1), false),
+                            None => {
+                                let mut bytes = [0u8; 32];
+                                rand::rng().fill_bytes(&mut bytes);
+                                let secret = boringtun::x25519::StaticSecret::from(bytes);
+                                let public = boringtun::x25519::PublicKey::from(&secret);
+                                (
+                                    Some(
+                                        base64::engine::general_purpose::STANDARD.encode(bytes),
+                                    ),
+                                    Some(
+                                        base64::engine::general_purpose::STANDARD
+                                            .encode(public.as_bytes()),
+                                    ),
+                                    true,
+                                )
+                            }
+                        }
+                    }
                 }
-            }
-        } else {
-            (None, None)
-        };
+            } else {
+                (None, None, false)
+            };
         let device_name = match client_type {
             ClientType::Vnt => device_name
                 .or_else(|| existing.as_ref().map(|entry| entry.device_name.clone()))
@@ -1853,7 +1911,8 @@ impl ControlService {
         }
         if matches!(mutation, DeviceMutation::Update)
             && existing.as_ref().is_some_and(|entry| {
-                entry.client_type == ClientType::Wireguard && entry.ip != Some(ip)
+                entry.client_type == ClientType::Wireguard
+                    && (entry.ip != Some(ip) || wireguard_keys_changed)
             })
             && let Some(manager) = self.get_wireguard_manager()
         {
@@ -1873,6 +1932,7 @@ impl ControlService {
             ikev2_input_routes,
             wireguard_output_subnets,
             wireguard_input_routes,
+            wireguard_dns,
         )?;
         let record = state
             .get_device_entry(device_id)
@@ -1905,6 +1965,8 @@ impl ControlService {
         ikev2_input_routes: Option<Vec<Ikev2InputRoute>>,
         wireguard_output_subnets: Option<Vec<Ipv4Net>>,
         wireguard_input_routes: Option<Vec<Ikev2InputRoute>>,
+        wireguard_dns: Option<Vec<Ipv4Addr>>,
+        wireguard_private_key: Option<String>,
     ) -> anyhow::Result<()> {
         self.upsert_device(
             network_code,
@@ -1917,6 +1979,8 @@ impl ControlService {
             ikev2_input_routes,
             wireguard_output_subnets,
             wireguard_input_routes,
+            wireguard_dns,
+            wireguard_private_key,
             DeviceMutation::Create(client_type),
         )
         .await
@@ -1942,6 +2006,8 @@ impl ControlService {
             None,
             None,
             None,
+            None,
+            None,
         )
         .await
     }
@@ -1959,6 +2025,8 @@ impl ControlService {
         ikev2_input_routes: Option<Vec<Ikev2InputRoute>>,
         wireguard_output_subnets: Option<Vec<Ipv4Net>>,
         wireguard_input_routes: Option<Vec<Ikev2InputRoute>>,
+        wireguard_dns: Option<Vec<Ipv4Addr>>,
+        wireguard_private_key: Option<String>,
     ) -> anyhow::Result<()> {
         self.upsert_device(
             network_code,
@@ -1971,6 +2039,8 @@ impl ControlService {
             ikev2_input_routes,
             wireguard_output_subnets,
             wireguard_input_routes,
+            wireguard_dns,
+            wireguard_private_key,
             DeviceMutation::Update,
         )
         .await
@@ -1995,8 +2065,22 @@ impl ControlService {
             None,
             None,
             None,
+            None,
+            None,
         )
         .await
+    }
+
+    async fn wireguard_public_key_exists(
+        &self,
+        public_key: &str,
+        network_code: &str,
+        device_id: &str,
+    ) -> anyhow::Result<bool> {
+        Ok(self.wireguard_devices().await?.into_iter().any(|device| {
+            device.wireguard_public_key.as_deref() == Some(public_key)
+                && !(device.network_code == network_code && device.device_id == device_id)
+        }))
     }
 
     async fn ikev2_username_exists(&self, username: &str) -> anyhow::Result<bool> {
@@ -2561,6 +2645,7 @@ impl ControlService {
                         ikev2_input_routes: r.ikev2_input_routes,
                         wireguard_output_subnets: r.wireguard_output_subnets,
                         wireguard_input_routes: r.wireguard_input_routes,
+                        wireguard_dns: r.wireguard_dns,
                         tx_bytes: r.tx_bytes as u64,
                         rx_bytes: r.rx_bytes as u64,
                         client_type: r.client_type,
@@ -2603,6 +2688,7 @@ impl ControlService {
                     ikev2_input_routes: Vec::new(),
                     wireguard_output_subnets: Vec::new(),
                     wireguard_input_routes: Vec::new(),
+                    wireguard_dns: Vec::new(),
                     tx_bytes: 0,
                     rx_bytes: 0,
                     client_type,
@@ -2758,6 +2844,7 @@ pub struct DeviceInfoVO {
     pub ikev2_input_routes: Vec<Ikev2InputRoute>,
     pub wireguard_output_subnets: Vec<Ipv4Net>,
     pub wireguard_input_routes: Vec<Ikev2InputRoute>,
+    pub wireguard_dns: Vec<Ipv4Addr>,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
     pub client_type: ClientType,
@@ -3974,6 +4061,8 @@ mod tests {
                     None,
                     None,
                     None,
+                    None,
+                    None,
                 )
                 .await
                 .is_err()
@@ -3985,13 +4074,15 @@ mod tests {
                 "10.92.0.8".parse().unwrap(),
                 DeviceIpType::Fixed,
                 ClientType::Ikev2,
-                Some("old-password".to_string()),
-                Some("Alice Phone".to_string()),
-                None,
-                None,
-                None,
-                None,
-            )
+                    Some("old-password".to_string()),
+                    Some("Alice Phone".to_string()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
             .await
             .unwrap();
         assert!(
@@ -4003,6 +4094,8 @@ mod tests {
                     DeviceIpType::Fixed,
                     ClientType::Ikev2,
                     Some("other-password".to_string()),
+                    None,
+                    None,
                     None,
                     None,
                     None,
@@ -4040,6 +4133,8 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -4064,6 +4159,8 @@ mod tests {
                 DeviceIpType::Static,
                 None,
                 Some("Alice Laptop".to_string()),
+                None,
+                None,
                 None,
                 None,
                 None,
@@ -4116,6 +4213,8 @@ mod tests {
                 Some("Branch router".to_string()),
                 Some(outputs),
                 Some(routes),
+                None,
+                None,
                 None,
                 None,
             )
@@ -4191,6 +4290,8 @@ mod tests {
                     Some(duplicate),
                     None,
                     None,
+                    None,
+                    None,
                 )
                 .await
                 .is_err()
@@ -4206,6 +4307,8 @@ mod tests {
                     None,
                     None,
                     Some(vec!["198.51.100.0/24".parse().unwrap()]),
+                    None,
+                    None,
                     None,
                     None,
                     None,
@@ -4239,6 +4342,8 @@ mod tests {
                 ClientType::Ikev2,
                 Some("password".to_string()),
                 Some("Office Phone".to_string()),
+                None,
+                None,
                 None,
                 None,
                 None,
@@ -4325,9 +4430,23 @@ mod tests {
                         target_ip: "10.97.0.21".parse().unwrap(),
                     },
                 ]),
+                Some(vec!["10.53.53.53".parse().unwrap(), "10.53.53.54".parse().unwrap()]),
+                None,
             )
             .await
             .unwrap();
+        assert_eq!(
+            service
+                .get_device_record("wg-subnets", "router")
+                .await
+                .unwrap()
+                .unwrap()
+                .wireguard_dns,
+            vec![
+                "10.53.53.53".parse::<Ipv4Addr>().unwrap(),
+                "10.53.53.54".parse().unwrap(),
+            ]
+        );
         let (sender, _receiver) = mpsc::channel(8);
         let session = service
             .register_wireguard("wg-subnets".to_string(), "router".to_string(), sender)
@@ -4354,6 +4473,8 @@ mod tests {
                     "172.22.0.0/16".parse().unwrap(),
                 ]),
                 None,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -4363,6 +4484,13 @@ mod tests {
         assert_eq!(
             entry.advertised_subnets,
             vec!["172.22.0.0/16".parse().unwrap()]
+        );
+        assert_eq!(
+            entry.wireguard_dns,
+            vec![
+                "10.53.53.53".parse::<Ipv4Addr>().unwrap(),
+                "10.53.53.54".parse().unwrap(),
+            ]
         );
         assert!(service.address_owned_by("wg-subnets", session.ip, "172.22.1.9".parse().unwrap(),));
         assert_eq!(
@@ -4375,6 +4503,140 @@ mod tests {
                 .wireguard_route_target("wg-subnets", "router", "10.210.99.42".parse().unwrap(),),
             Some("10.97.0.20".parse().unwrap())
         );
+    }
+
+    #[tokio::test]
+    async fn wireguard_user_supplied_private_key_is_validated_and_deduplicated() {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine;
+
+        let service = ControlService::new(
+            "10.98.0.0/24".parse().unwrap(),
+            HashMap::from([("wg-keys".to_string(), "10.98.0.0/24".parse().unwrap())]),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        let private_key = STANDARD.encode([7u8; 32]);
+        let expected_public = STANDARD.encode(
+            boringtun::x25519::PublicKey::from(&boringtun::x25519::StaticSecret::from([7u8; 32]))
+                .as_bytes(),
+        );
+
+        service
+            .add_device_typed(
+                "wg-keys",
+                "owned-key",
+                "10.98.0.8".parse().unwrap(),
+                DeviceIpType::Fixed,
+                ClientType::Wireguard,
+                None,
+                Some("Owned key".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(private_key.clone()),
+            )
+            .await
+            .unwrap();
+        let record = service
+            .get_device_record("wg-keys", "owned-key")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.wireguard_private_key.as_deref(), Some(private_key.as_str()));
+        assert_eq!(
+            record.wireguard_public_key.as_deref(),
+            Some(expected_public.as_str())
+        );
+
+        let error = service
+            .add_device_typed(
+                "wg-keys",
+                "clone",
+                "10.98.0.9".parse().unwrap(),
+                DeviceIpType::Fixed,
+                ClientType::Wireguard,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(private_key.clone()),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("已绑定其他设备"));
+
+        // 同一设备重复提交相同私钥不算重复。
+        service
+            .update_device_with_password(
+                "wg-keys",
+                "owned-key",
+                "10.98.0.8".parse().unwrap(),
+                DeviceIpType::Fixed,
+                None,
+                Some("Owned key 2".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(private_key.clone()),
+            )
+            .await
+            .unwrap();
+
+        // 更换为另一个私钥成功，且旧设备不再占用新公钥。
+        let private_key2 = STANDARD.encode([9u8; 32]);
+        service
+            .update_device_with_password(
+                "wg-keys",
+                "owned-key",
+                "10.98.0.8".parse().unwrap(),
+                DeviceIpType::Fixed,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(private_key2.clone()),
+            )
+            .await
+            .unwrap();
+        let record = service
+            .get_device_record("wg-keys", "owned-key")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.wireguard_private_key.as_deref(), Some(private_key2.as_str()));
+
+        let error = service
+            .add_device_typed(
+                "wg-keys",
+                "bad-key",
+                "10.98.0.10".parse().unwrap(),
+                DeviceIpType::Fixed,
+                ClientType::Wireguard,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("not-a-key".to_string()),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("无效的 WireGuard 私钥"));
     }
 
     #[tokio::test]
@@ -4401,6 +4663,8 @@ mod tests {
                 ClientType::Wireguard,
                 None,
                 Some("WireGuard Phone".to_string()),
+                None,
+                None,
                 None,
                 None,
                 None,

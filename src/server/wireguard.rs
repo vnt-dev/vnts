@@ -615,7 +615,7 @@ enum TunnelAction {
     Ipv4(Vec<u8>),
 }
 
-fn decode_key(value: &str) -> anyhow::Result<[u8; 32]> {
+pub(crate) fn decode_key(value: &str) -> anyhow::Result<[u8; 32]> {
     base64::engine::general_purpose::STANDARD
         .decode(value)
         .context("WireGuard 密钥不是有效的 base64")?
@@ -766,6 +766,8 @@ mod tests {
                 None,
                 Some(vec!["192.168.50.0/24".parse().unwrap()]),
                 None,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -830,6 +832,8 @@ mod tests {
                 None,
                 None,
                 Some(vec!["192.168.51.0/24".parse().unwrap()]),
+                None,
+                None,
                 None,
             )
             .await
