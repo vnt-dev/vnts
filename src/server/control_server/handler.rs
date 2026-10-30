@@ -129,6 +129,7 @@ impl ControlHandler {
             subscription: None,
             server_instance_id: self.control_service.server_instance_id(),
             multi_link_supported: true,
+            application_channel_supported: true,
         };
         let vec = ResponseMessage::Reg(reg_msg_response).encode();
         sender.send(Bytes::from(vec)).await?;
@@ -259,7 +260,10 @@ impl ControlHandler {
                     return Ok(());
                 }
                 let data_version = u64::from_be_bytes(packet.payload()[8..].try_into()?);
-                if (session.allow_ikev2 || session.allow_wireguard)
+                if (session.allow_ikev2
+                    || session.allow_wireguard
+                    || session.network_state.group_type()
+                        == crate::server::control_server::db::GroupType::RemoteDesktop)
                     && let Some(peer_manager) = self.control_service.get_peer_manager()
                 {
                     let mut list = session.network_state.full_client_simple_list(
@@ -279,7 +283,11 @@ impl ControlHandler {
                             && session.allow_ikev2)
                             || (client_type
                                 == crate::server::control_server::db::ClientType::Wireguard
-                                && session.allow_wireguard))
+                                && session.allow_wireguard)
+                            || (client_type
+                                == crate::server::control_server::db::ClientType::RemoteDesktop
+                                && session.network_state.group_type()
+                                    == crate::server::control_server::db::GroupType::RemoteDesktop))
                             && seen.insert(ip)
                         {
                             list.list
@@ -290,6 +298,7 @@ impl ControlHandler {
                                     crate::server::control_server::db::ClientType::Wireguard => {
                                         crate::protocol::control_message::ClientType::Wireguard
                                     }
+                                    crate::server::control_server::db::ClientType::RemoteDesktop => crate::protocol::control_message::ClientType::RemoteDesktop,
                                     _ => crate::protocol::control_message::ClientType::Ikev2,
                                 },
                             });
@@ -344,7 +353,7 @@ impl ControlHandler {
                 }
             }
             MsgType::RpcReq => {
-                Self::handle_rpc(session, &sender, &packet)?;
+                self.handle_rpc(session, &sender, &packet)?;
             }
             MsgType::SubnetSyncReq => {
                 let request = SubnetSyncRequest::from_slice(packet.payload())?;
@@ -451,7 +460,50 @@ impl ControlHandler {
 
         session.network_state.record_tx_traffic(src, packet_len);
 
+        if session
+            .network_state
+            .get_device_entry(&session.device_id)
+            .is_some_and(|entry| {
+                entry.client_type == crate::server::control_server::db::ClientType::RemoteDesktop
+            })
+            && !matches!(
+                msg_type,
+                MsgType::Application
+                    | MsgType::Ping
+                    | MsgType::Pong
+                    | MsgType::PunchStart1
+                    | MsgType::PunchStart2
+                    | MsgType::PunchReq
+                    | MsgType::PunchRes
+            )
+        {
+            return Ok(());
+        }
         match msg_type {
+            MsgType::Application => {
+                if src != session.ip
+                    || self
+                        .control_service
+                        .client_type(&session.network_code, dest)
+                        != Some(crate::server::control_server::db::ClientType::RemoteDesktop)
+                    || !packet.decr_ttl()
+                {
+                    return Ok(());
+                }
+                let data = buf.freeze();
+                let forwarded = if let Some(manager) = self.control_service.get_peer_manager() {
+                    manager
+                        .forward_with_best_route(&session.network_code, dest, data.clone())
+                        .await
+                } else {
+                    false
+                };
+                if !forwarded && let Some(sender) = session.network_state.sender_map().get(&dest) {
+                    session.network_state.record_rx_traffic(dest, data.len());
+                    _ = sender.try_send(data);
+                }
+            }
+
             MsgType::Ikev2Relay => {
                 if !session.allow_ikev2
                     || src != session.ip
@@ -646,6 +698,7 @@ impl ControlHandler {
         Ok(())
     }
     fn handle_rpc<B: AsRef<[u8]>>(
+        &self,
         session: &Session,
         sender: &Sender<Bytes>,
         packet: &NetPacket<B>,
@@ -654,11 +707,28 @@ impl ControlHandler {
         let Some(RpcReqPayload::ClientListReq(_)) = req.rpc_req_payload else {
             return Ok(());
         };
-        let list = session.network_state.client_info_list(
+        let mut list = session.network_state.client_info_list(
             session.ip,
             session.allow_ikev2,
             session.allow_wireguard,
         );
+        if let Some(manager) = self.control_service.get_peer_manager() {
+            for device in manager.remote_client_infos(&session.network_code) {
+                if !session.network_state.group_type().accepts(
+                    crate::server::control_server::db::ClientType::from_i32(device.client_type),
+                ) || device.ip == u32::from(session.ip)
+                {
+                    continue;
+                }
+                if let Some(local) = list.iter_mut().find(|d| d.id == device.id) {
+                    if !local.online && device.online {
+                        *local = device;
+                    }
+                } else {
+                    list.push(device);
+                }
+            }
+        }
         let response = RpcMessageResponse {
             id: req.id,
             rpc_res_payload: Some(RpcResPayload::ClientListRes(ClientListResponse { list })),

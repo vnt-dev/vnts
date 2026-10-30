@@ -19,6 +19,7 @@ pub use proto::{ClientType, RegistrationMode, SubscriptionConfigApplyStatus};
 
 #[derive(Debug, Clone)]
 pub struct RegRequestMsg {
+    pub client_type: ClientType,
     pub network_code: String,
     pub device_id: String,
     pub ip: Option<Ipv4Addr>,
@@ -93,6 +94,8 @@ impl RegRequestMsg {
         advertised_subnets.sort_by_key(|net| (u32::from(net.network()), net.prefix_len()));
         advertised_subnets.dedup();
         Ok(Self {
+            client_type: ClientType::try_from(msg.client_type)
+                .map_err(|_| anyhow!("unknown client type"))?,
             network_code: msg.network_code,
             device_id: msg.device_id,
             ip: msg.ip.map(|ip| ip.into()),
@@ -111,6 +114,7 @@ impl RegRequestMsg {
     }
     pub fn to(self) -> proto::RegRequestMsg {
         proto::RegRequestMsg {
+            client_type: self.client_type as i32,
             network_code: self.network_code,
             device_id: self.device_id,
             ip: self.ip.map(|ip| ip.into()),
@@ -143,6 +147,7 @@ pub struct RegResponseMsg {
     pub subscription: Option<SubscriptionServerProof>,
     pub server_instance_id: Vec<u8>,
     pub multi_link_supported: bool,
+    pub application_channel_supported: bool,
 }
 impl RegResponseMsg {
     pub fn to(self) -> proto::RegResponseMsg {
@@ -156,6 +161,7 @@ impl RegResponseMsg {
             subscription: self.subscription.map(SubscriptionServerProof::to),
             server_instance_id: self.server_instance_id,
             multi_link_supported: self.multi_link_supported,
+            application_channel_supported: self.application_channel_supported,
         }
     }
 }

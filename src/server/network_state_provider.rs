@@ -287,7 +287,7 @@ impl DeviceEntry {
             advertised_subnets: match record.client_type {
                 ClientType::Ikev2 => record.ikev2_output_subnets,
                 ClientType::Wireguard => record.wireguard_output_subnets,
-                ClientType::Vnt => Vec::new(),
+                ClientType::Vnt | ClientType::RemoteDesktop => Vec::new(),
             },
             ikev2_input_routes: record.ikev2_input_routes,
             wireguard_input_routes: record.wireguard_input_routes,
@@ -341,6 +341,7 @@ impl DeviceEntry {
 }
 
 pub struct NetworkState {
+    group_type: std::sync::atomic::AtomicU8,
     time: Mutex<Instant>,
     network_code: String,
     gateway: Ipv4Addr,
@@ -362,6 +363,16 @@ struct NetworkStateInner {
 }
 
 impl NetworkState {
+    pub fn group_type(&self) -> super::control_server::db::GroupType {
+        super::control_server::db::GroupType::from_i32(
+            self.group_type.load(std::sync::atomic::Ordering::Acquire) as i32,
+        )
+    }
+    pub fn set_group_type(&self, kind: super::control_server::db::GroupType) {
+        self.group_type
+            .store(kind as u8, std::sync::atomic::Ordering::Release);
+    }
+
     pub fn gateway(&self) -> Ipv4Addr {
         self.gateway
     }
@@ -603,10 +614,13 @@ impl NetworkState {
         allow_wireguard: bool,
     ) -> Option<DeviceRecord> {
         let mut guard = self.lease_state.lock();
-        let valid = guard
-            .device_map
-            .get(device_id)
-            .is_some_and(|entry| entry.is_connected && entry.client_type == ClientType::Vnt);
+        let valid = guard.device_map.get(device_id).is_some_and(|entry| {
+            entry.is_connected
+                && matches!(
+                    entry.client_type,
+                    ClientType::Vnt | ClientType::RemoteDesktop
+                )
+        });
         if !valid {
             return None;
         }
@@ -739,7 +753,7 @@ impl NetworkState {
             entry.advertised_subnets = match client_type {
                 ClientType::Ikev2 => ikev2_output_subnets,
                 ClientType::Wireguard => wireguard_output_subnets,
-                ClientType::Vnt => Vec::new(),
+                ClientType::Vnt | ClientType::RemoteDesktop => Vec::new(),
             };
             entry.ikev2_input_routes = ikev2_input_routes;
             entry.wireguard_input_routes = wireguard_input_routes;
@@ -772,7 +786,7 @@ impl NetworkState {
                     advertised_subnets: match client_type {
                         ClientType::Ikev2 => ikev2_output_subnets,
                         ClientType::Wireguard => wireguard_output_subnets,
-                        ClientType::Vnt => Vec::new(),
+                        ClientType::Vnt | ClientType::RemoteDesktop => Vec::new(),
                     },
                     ikev2_input_routes,
                     wireguard_input_routes,
@@ -1155,6 +1169,9 @@ impl NetworkState {
                     online: v.is_connected,
                     client_type: match v.client_type {
                         ClientType::Vnt => crate::protocol::control_message::ClientType::Vnt,
+                        ClientType::RemoteDesktop => {
+                            crate::protocol::control_message::ClientType::RemoteDesktop
+                        }
                         ClientType::Ikev2 => crate::protocol::control_message::ClientType::Ikev2,
                         ClientType::Wireguard => {
                             crate::protocol::control_message::ClientType::Wireguard
@@ -1184,6 +1201,9 @@ impl NetworkState {
                 online: v.is_connected,
                 client_type: match v.client_type {
                     ClientType::Vnt => crate::protocol::control_message::ClientType::Vnt,
+                    ClientType::RemoteDesktop => {
+                        crate::protocol::control_message::ClientType::RemoteDesktop
+                    }
                     ClientType::Ikev2 => crate::protocol::control_message::ClientType::Ikev2,
                     ClientType::Wireguard => {
                         crate::protocol::control_message::ClientType::Wireguard
@@ -1220,6 +1240,9 @@ impl NetworkState {
                 online: entry.is_connected,
                 client_type: match entry.client_type {
                     ClientType::Vnt => crate::protocol::control_message::ClientType::Vnt,
+                    ClientType::RemoteDesktop => {
+                        crate::protocol::control_message::ClientType::RemoteDesktop
+                    }
                     ClientType::Ikev2 => crate::protocol::control_message::ClientType::Ikev2,
                     ClientType::Wireguard => {
                         crate::protocol::control_message::ClientType::Wireguard
@@ -1274,6 +1297,9 @@ impl NetworkState {
                 id: entry.device_id.clone(),
                 client_type: match entry.client_type {
                     ClientType::Vnt => crate::protocol::rpc_message::ClientType::Vnt as i32,
+                    ClientType::RemoteDesktop => {
+                        crate::protocol::rpc_message::ClientType::RemoteDesktop as i32
+                    }
                     ClientType::Ikev2 => crate::protocol::rpc_message::ClientType::Ikev2 as i32,
                     ClientType::Wireguard => {
                         crate::protocol::rpc_message::ClientType::Wireguard as i32
@@ -1449,7 +1475,7 @@ impl NetworkStateInner {
             device_entry.client_type = client_type;
             device_entry.allow_ikev2 = reg_req.allow_ikev2;
             device_entry.allow_wireguard = reg_req.allow_wireguard;
-            if client_type == ClientType::Vnt {
+            if matches!(client_type, ClientType::Vnt | ClientType::RemoteDesktop) {
                 device_entry.runtime_device_name = Some(reg_req.name.clone());
             } else {
                 device_entry.device_name = reg_req.name.clone();
@@ -1510,7 +1536,7 @@ impl NetworkStateInner {
                 let entry = if let Some(mut entry) = existing_entry.clone() {
                     entry.ip = Some(ip);
                     entry.random_id = random_id;
-                    if client_type == ClientType::Vnt {
+                    if matches!(client_type, ClientType::Vnt | ClientType::RemoteDesktop) {
                         entry.runtime_device_name = Some(reg_req.name);
                     } else {
                         entry.device_name = reg_req.name;
@@ -1540,8 +1566,11 @@ impl NetworkStateInner {
                         allow_ikev2: reg_req.allow_ikev2,
                         allow_wireguard: reg_req.allow_wireguard,
                         random_id,
-                        runtime_device_name: (client_type == ClientType::Vnt)
-                            .then(|| reg_req.name.clone()),
+                        runtime_device_name: (matches!(
+                            client_type,
+                            ClientType::Vnt | ClientType::RemoteDesktop
+                        ))
+                        .then(|| reg_req.name.clone()),
                         device_name: reg_req.name,
                         device_version: reg_req.version,
                         is_connected: true,
@@ -1551,11 +1580,11 @@ impl NetworkStateInner {
                         key_sign: reg_req.key_sign,
                         latency_ms: None,
                         traffic_stats: Arc::new(TrafficStats::new()),
-                advertised_subnets: advertised_subnets.clone(),
-                ikev2_input_routes: Vec::new(),
-                wireguard_input_routes: Vec::new(),
-                wireguard_dns: Vec::new(),
-                subnet_advertisement_active,
+                        advertised_subnets: advertised_subnets.clone(),
+                        ikev2_input_routes: Vec::new(),
+                        wireguard_input_routes: Vec::new(),
+                        wireguard_dns: Vec::new(),
+                        subnet_advertisement_active,
                     }
                 };
                 self.add_device(entry);
@@ -1575,7 +1604,7 @@ impl NetworkStateInner {
             }
             entry.ip = Some(ip);
             entry.random_id = random_id;
-            if client_type == ClientType::Vnt {
+            if matches!(client_type, ClientType::Vnt | ClientType::RemoteDesktop) {
                 entry.runtime_device_name = Some(reg_req.name);
             } else {
                 entry.device_name = reg_req.name;
@@ -1605,7 +1634,11 @@ impl NetworkStateInner {
                 allow_ikev2: reg_req.allow_ikev2,
                 allow_wireguard: reg_req.allow_wireguard,
                 random_id,
-                runtime_device_name: (client_type == ClientType::Vnt).then(|| reg_req.name.clone()),
+                runtime_device_name: (matches!(
+                    client_type,
+                    ClientType::Vnt | ClientType::RemoteDesktop
+                ))
+                .then(|| reg_req.name.clone()),
                 device_name: reg_req.name,
                 device_version: reg_req.version,
                 is_connected: true,
@@ -1727,6 +1760,7 @@ impl NetworkState {
         let initial_inner_state =
             Self::build_initial_inner_state(&network_code, net, gateway).await;
         Self {
+            group_type: Default::default(),
             time: Mutex::new(Instant::now()),
             network_code,
             gateway,
@@ -1848,6 +1882,7 @@ mod tests {
 
     fn request(ip: Ipv4Addr, ip_variable: bool) -> RegRequestMsg {
         RegRequestMsg {
+            client_type: crate::protocol::control_message::ClientType::Vnt,
             network_code: "test-net".to_string(),
             device_id: format!("device-{ip}"),
             ip: Some(ip),
@@ -1877,6 +1912,7 @@ mod tests {
 
     fn outer_state() -> NetworkState {
         NetworkState {
+            group_type: Default::default(),
             time: Mutex::new(Instant::now()),
             network_code: "test-net".to_string(),
             gateway: Ipv4Addr::new(10, 26, 0, 1),

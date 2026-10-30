@@ -9,9 +9,10 @@ export interface LoginResult {
 }
 
 export type NetworkSource = 'Config' | 'Manual' | 'DeviceRegister' | string
+export type GroupType = 'Network' | 'RemoteDesktop'
 export type NetworkType = 'Public' | 'Private'
 export type DeviceIpType = 'Dynamic' | 'Static' | 'Fixed'
-export type ClientType = 'VNT' | 'IKEV2' | 'WIREGUARD'
+export type ClientType = 'VNT' | 'IKEV2' | 'WIREGUARD' | 'REMOTE_DESKTOP'
 
 export interface Ikev2InputRoute {
   subnet: string
@@ -25,6 +26,7 @@ export interface NetworkInfo {
   net: string
   lease_duration: number
   source: NetworkSource
+  group_type: GroupType
   network_type: NetworkType
   all_count: number
   online_count: number
@@ -74,6 +76,7 @@ export interface CreateNetworkPayload {
   gateway: string
   netmask: number
   lease_duration?: number
+  group_type?: GroupType
   network_type?: NetworkType
 }
 
@@ -81,6 +84,7 @@ export interface UpdateNetworkPayload {
   gateway: string
   netmask: number
   lease_duration: number
+  group_type?: GroupType
   network_type?: NetworkType
 }
 
@@ -273,5 +277,5 @@ export interface CreateManagedDevicePayload {
   config_toml: string
   subscription_server: string
   traffic_servers_override: string[]
-  client_type?: 'VNT'
+  client_type?: 'VNT' | 'REMOTE_DESKTOP'
 }

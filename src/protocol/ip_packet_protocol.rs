@@ -105,6 +105,7 @@ pub enum MsgType {
     RpcRes = 15,
 
     Quic = 17,
+    Application = 33,
 
     FastReg = 22,
     SubnetSyncReq = 23,
@@ -147,6 +148,7 @@ impl TryFrom<u8> for MsgType {
             15 => MsgType::RpcRes,
 
             17 => MsgType::Quic,
+            33 => MsgType::Application,
 
             22 => MsgType::FastReg,
             23 => MsgType::SubnetSyncReq,

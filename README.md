@@ -57,3 +57,24 @@ VITE_API_TARGET=http://localhost:自定义端口 pnpm dev
 cd frontend
 pnpm build        # 类型检查 + 构建，产物写入 ../static/
 ```
+
+
+## 远程连接组
+
+网络新增 `group_type`，值为 `Network`（组网设备组，旧记录及省略字段时的默认值）或 `RemoteDesktop`（远程连接组）。原有 `network_type` 的 `Public` / `Private` 继续控制未知设备能否加入，两者相互独立。
+
+远程桌面使用独立的 `REMOTE_DESKTOP` 客户端类型，只能进入远程连接组；普通 VNT、IKEv2、WireGuard 只能进入组网设备组。远程客户端首次使用不存在的编号注册时，在现有白名单限制下自动建立公开远程连接组。私有组需要预先添加远程桌面设备，支持设备订阅签发和在线配置更新。已有设备的组禁止切换用途。
+
+网络创建 / 更新及列表 API 新增 `group_type` 字段；设备列表和服务器互联同步包含远程桌面客户端类型。数据库会自动添加独立的 `group_type` 列，保留原有公开 / 私有设置。多台互联服务端应同时升级并保持同编号组的用途一致。
+
+预配置组可在 `custom_nets` 中指定地址，并用 `group_types` 指定用途：
+
+```toml
+[custom_nets]
+remote-office = "10.30.0.0/24"
+
+[group_types]
+remote-office = "RemoteDesktop"
+```
+
+持久化开启且数据库已有记录时，沿用现有数据库设置。通道只转发专用 VNT 应用包，客户端不创建虚拟网卡，音视频和可靠控制 / 文件流经同一核心路由体系传输。

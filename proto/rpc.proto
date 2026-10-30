@@ -6,6 +6,7 @@ enum ClientType {
   VNT = 0;
   IKEV2 = 1;
   WIREGUARD = 2;
+  REMOTE_DESKTOP = 3;
 }
 
 message RpcMessageRequest{

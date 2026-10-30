@@ -61,7 +61,7 @@ const onlineRatio = computed(() =>
         <Globe :size="13" class="shrink-0 text-slate-400 dark:text-slate-500" />
         类型
         <span class="font-medium" :class="network.network_type === 'Private' ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'">
-          {{ network.network_type === 'Private' ? '私有' : '公开' }}
+          {{ network.network_type === 'Private' ? '私有' : '公开' }} · {{ network.group_type === 'RemoteDesktop' ? '远程连接组' : '组网设备组' }}
         </span>
       </div>
       <div class="flex items-center gap-1.5">

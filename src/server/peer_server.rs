@@ -129,6 +129,7 @@ pub struct IpRouteInfo {
     pub client_latency_ms: u32,
     pub advertised_subnets: Vec<ipnet::Ipv4Net>,
     pub client_type: crate::server::control_server::db::ClientType,
+    pub identity: Option<crate::protocol::rpc_message::ClientInfo>,
 }
 
 impl IpRouteInfo {
@@ -148,6 +149,25 @@ pub struct PeerServerManager {
 }
 
 impl PeerServerManager {
+    pub fn remote_client_infos(
+        &self,
+        network_code: &str,
+    ) -> Vec<crate::protocol::rpc_message::ClientInfo> {
+        self.ip_to_routes
+            .get(network_code)
+            .map(|ips| {
+                ips.iter()
+                    .filter_map(|routes| {
+                        routes
+                            .value()
+                            .iter()
+                            .find(|route| route.peer_info.is_connected())
+                            .and_then(|r| r.identity.clone())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
     pub fn new(token: String, network_state_provider: NetworkStateProvider) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(token.as_bytes());
@@ -535,6 +555,23 @@ impl PeerServerManager {
             use crate::protocol::ip_packet_protocol::NetPacket;
             if let Ok(packet) = NetPacket::new(forward.data) {
                 let dest = Ipv4Addr::from(packet.dest_id());
+                if packet.msg_type().ok()
+                    == Some(crate::protocol::ip_packet_protocol::MsgType::Application)
+                {
+                    let source = Ipv4Addr::from(packet.src_id());
+                    if state.group_type()
+                        != crate::server::control_server::db::GroupType::RemoteDesktop
+                        || self.remote_client_type(&forward.network_code, source)
+                            != Some(crate::server::control_server::db::ClientType::RemoteDesktop)
+                        || state.get_device_entry_by_ip(dest).is_none_or(|d| {
+                            d.client_type
+                                != crate::server::control_server::db::ClientType::RemoteDesktop
+                        })
+                    {
+                        return;
+                    }
+                }
+
                 if matches!(
                     packet.msg_type().ok(),
                     Some(crate::protocol::ip_packet_protocol::MsgType::Ikev2Relay)
@@ -667,6 +704,13 @@ impl PeerServerManager {
 
             let mut synced_ips = std::collections::HashSet::new();
 
+            if self
+                .network_state_provider
+                .get(&net_info.network_code)
+                .is_some_and(|state| state.group_type() as u32 != net_info.group_type)
+            {
+                continue;
+            }
             for client in net_info.clients {
                 let ip = Ipv4Addr::from(client.ip);
                 synced_ips.insert(ip);
@@ -674,6 +718,9 @@ impl PeerServerManager {
                 let client_type = match client.client_type() {
                     crate::protocol::server_message::ClientType::Ikev2 => {
                         crate::server::control_server::db::ClientType::Ikev2
+                    }
+                    crate::protocol::server_message::ClientType::RemoteDesktop => {
+                        crate::server::control_server::db::ClientType::RemoteDesktop
                     }
                     crate::protocol::server_message::ClientType::Vnt => {
                         crate::server::control_server::db::ClientType::Vnt
@@ -696,6 +743,18 @@ impl PeerServerManager {
                     client_latency_ms: client.latency_ms,
                     advertised_subnets,
                     client_type,
+                    identity: (!client.device_id.is_empty()).then_some({
+                        crate::protocol::rpc_message::ClientInfo {
+                            id: client.device_id,
+                            name: client.name,
+                            version: client.version,
+                            key_sign: client.key_sign,
+                            ip: client.ip,
+                            online: true,
+                            last_connected_time: 0,
+                            client_type: client_type as i32,
+                        }
+                    }),
                 };
 
                 ip_map
@@ -708,6 +767,7 @@ impl PeerServerManager {
                             existing.client_latency_ms = client.latency_ms;
                             existing.advertised_subnets = route_info.advertised_subnets.clone();
                             existing.client_type = route_info.client_type;
+                            existing.identity = route_info.identity.clone();
                         } else {
                             routes.push(route_info.clone());
                         }
@@ -785,20 +845,32 @@ impl PeerServerManager {
         let mut networks = Vec::new();
 
         for network_code in network_codes {
-            let clients = if let Some(state) =
-                self.network_state_provider.get_network_state(&network_code)
-            {
-                let clients: Vec<ClientLatencyInfo> = state
-                    .sender_map()
-                    .iter()
-                    .map(|entry| {
-                        let ip = *entry.key();
-                        let latency_ms = state
-                            .get_device_entry_by_ip(ip)
-                            .and_then(|device| device.latency_ms)
-                            .unwrap_or(DEFAULT_CLIENT_LATENCY_MS);
+            let clients =
+                if let Some(state) = self.network_state_provider.get_network_state(&network_code) {
+                    let clients: Vec<ClientLatencyInfo> = state
+                        .sender_map()
+                        .iter()
+                        .map(|entry| {
+                            let ip = *entry.key();
+                            let latency_ms = state
+                                .get_device_entry_by_ip(ip)
+                                .and_then(|device| device.latency_ms)
+                                .unwrap_or(DEFAULT_CLIENT_LATENCY_MS);
 
-                        ClientLatencyInfo {
+                            ClientLatencyInfo {
+                            device_id: state
+                                .get_device_entry_by_ip(ip)
+                                .map(|d| d.device_id)
+                                .unwrap_or_default(),
+                            name: state
+                                .get_device_entry_by_ip(ip)
+                                .map(|d| d.runtime_device_name.unwrap_or(d.device_name))
+                                .unwrap_or_default(),
+                            version: state
+                                .get_device_entry_by_ip(ip)
+                                .map(|d| d.device_version)
+                                .unwrap_or_default(),
+                            key_sign: state.get_device_entry_by_ip(ip).and_then(|d| d.key_sign),
                             ip: u32::from(ip),
                             latency_ms,
                             advertised_subnets: state
@@ -816,6 +888,12 @@ impl PeerServerManager {
                                 .get_device_entry_by_ip(ip)
                                 .map(|device| device.client_type)
                             {
+                                Some(
+                                    crate::server::control_server::db::ClientType::RemoteDesktop,
+                                ) => {
+                                    crate::protocol::server_message::ClientType::RemoteDesktop
+                                        as i32
+                                }
                                 Some(crate::server::control_server::db::ClientType::Ikev2) => {
                                     crate::protocol::server_message::ClientType::Ikev2 as i32
                                 }
@@ -825,13 +903,18 @@ impl PeerServerManager {
                                 _ => crate::protocol::server_message::ClientType::Vnt as i32,
                             },
                         }
-                    })
-                    .collect();
-                clients
-            } else {
-                Vec::new()
-            };
+                        })
+                        .collect();
+                    clients
+                } else {
+                    Vec::new()
+                };
             networks.push(NetworkInfo {
+                group_type: self
+                    .network_state_provider
+                    .get(&network_code)
+                    .map(|s| s.group_type() as u32)
+                    .unwrap_or(0),
                 network_code,
                 clients,
             });
@@ -1409,12 +1492,14 @@ mod tests {
             ip,
             vec![
                 IpRouteInfo {
+                    identity: None,
                     peer_info: removed_peer.clone(),
                     client_latency_ms: 10,
                     advertised_subnets: Vec::new(),
                     client_type: crate::server::control_server::db::ClientType::Vnt,
                 },
                 IpRouteInfo {
+                    identity: None,
                     peer_info: retained_peer.clone(),
                     client_latency_ms: 20,
                     advertised_subnets: Vec::new(),
@@ -1440,6 +1525,7 @@ mod tests {
         routes.insert(
             Ipv4Addr::new(10, 0, 0, 2),
             vec![IpRouteInfo {
+                identity: None,
                 peer_info: removed_peer.clone(),
                 client_latency_ms: 10,
                 advertised_subnets: Vec::new(),
@@ -1467,6 +1553,7 @@ mod tests {
         state
             .allocate_ip_and_get_entry(
                 RegRequestMsg {
+                    client_type: crate::protocol::control_message::ClientType::Vnt,
                     network_code: "net-a".to_string(),
                     device_id: "device-a".to_string(),
                     ip: Some(target_ip),
@@ -1573,8 +1660,13 @@ mod tests {
                 &mut network_codes,
                 crate::protocol::server_message::ServerClientInfoResponse {
                     networks: vec![crate::protocol::server_message::NetworkInfo {
+                        group_type: 0,
                         network_code: "ike-peer".to_string(),
                         clients: vec![crate::protocol::server_message::ClientLatencyInfo {
+                            device_id: String::new(),
+                            name: String::new(),
+                            version: String::new(),
+                            key_sign: None,
                             ip: ip.into(),
                             latency_ms: 10,
                             advertised_subnets: Vec::new(),
@@ -1589,6 +1681,58 @@ mod tests {
         assert_eq!(
             route[0].client_type,
             crate::server::control_server::db::ClientType::Ikev2
+        );
+    }
+    #[tokio::test]
+    async fn remote_peer_inventory_preserves_identity_and_group_purpose() {
+        let manager = manager();
+        let state = Arc::new(
+            NetworkState::new_from_db(
+                "remote-peer".into(),
+                "10.234.29.0/24".parse().unwrap(),
+                "10.234.29.1".parse().unwrap(),
+                Duration::from_secs(3600),
+            )
+            .await,
+        );
+        state.set_group_type(crate::server::control_server::db::GroupType::RemoteDesktop);
+        manager
+            .network_state_provider
+            .insert("remote-peer".into(), state);
+        let peer = Arc::new(PeerServerInfo::new("127.0.0.1:40001".into(), true));
+        peer.inner.write().connected = true;
+        let mut networks = std::collections::HashSet::new();
+        let snapshot = |kind| crate::protocol::server_message::ServerClientInfoResponse {
+            networks: vec![crate::protocol::server_message::NetworkInfo {
+                group_type: kind,
+                network_code: "remote-peer".into(),
+                clients: vec![crate::protocol::server_message::ClientLatencyInfo {
+                    device_id: "remote-host".into(),
+                    name: "Remote Host".into(),
+                    version: "test".into(),
+                    key_sign: Some("key-sign".into()),
+                    ip: u32::from(Ipv4Addr::new(10, 234, 29, 3)),
+                    latency_ms: 10,
+                    advertised_subnets: Vec::new(),
+                    client_type: crate::protocol::server_message::ClientType::RemoteDesktop as i32,
+                }],
+            }],
+        };
+        manager
+            .handle_client_info_response(&peer, &mut networks, snapshot(0))
+            .await;
+        assert!(manager.remote_client_infos("remote-peer").is_empty());
+        manager
+            .handle_client_info_response(&peer, &mut networks, snapshot(1))
+            .await;
+        let devices = manager.remote_client_infos("remote-peer");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].id, "remote-host");
+        assert_eq!(devices[0].name, "Remote Host");
+        assert_eq!(devices[0].client_type, 3);
+        assert_eq!(
+            manager.remote_client_type("remote-peer", "10.234.29.3".parse().unwrap()),
+            Some(crate::server::control_server::db::ClientType::RemoteDesktop)
         );
     }
 }

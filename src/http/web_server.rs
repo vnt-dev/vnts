@@ -5,7 +5,7 @@ use crate::managed_config::{
     resolve_cert_mode, validate_managed_advanced_config,
 };
 use crate::server::control_server::db::{
-    self, ClientType, DeviceIpType, Ikev2InputRoute, ManagedConfigRecord, NetworkType,
+    self, ClientType, DeviceIpType, GroupType, Ikev2InputRoute, ManagedConfigRecord, NetworkType,
 };
 use crate::server::control_server::service::{
     DeviceInfoVO, NetworkInfoVO, SubscriptionLiveState, SubscriptionPushStatus,
@@ -1382,7 +1382,13 @@ async fn create_managed_device(
             &body.device_id,
             ip,
             ip_type,
-            ClientType::Vnt,
+            if state.control_service.get_group_type(&body.network_code)
+                == Some(GroupType::RemoteDesktop)
+            {
+                ClientType::RemoteDesktop
+            } else {
+                ClientType::Vnt
+            },
             None,
             Some(body.device_name.clone()),
             None,
@@ -1456,7 +1462,14 @@ async fn get_managed_device_config(
                 .get_device_record(&network_code, &device_id)
                 .await
             {
-                Ok(Some(value)) if value.client_type == ClientType::Vnt => value,
+                Ok(Some(value))
+                    if matches!(
+                        value.client_type,
+                        ClientType::Vnt | ClientType::RemoteDesktop
+                    ) =>
+                {
+                    value
+                }
                 Ok(Some(_)) => {
                     return ApiResponse::<()>::err("只有 VNT 设备支持客户端配置").into_response();
                 }
@@ -1505,7 +1518,14 @@ async fn put_managed_device_config(
         .get_device_record(&network_code, &device_id)
         .await
     {
-        Ok(Some(device)) if device.client_type == ClientType::Vnt => device,
+        Ok(Some(device))
+            if matches!(
+                device.client_type,
+                ClientType::Vnt | ClientType::RemoteDesktop
+            ) =>
+        {
+            device
+        }
         Ok(Some(_)) => {
             return ApiResponse::<()>::err("只有 VNT 设备支持客户端配置").into_response();
         }
@@ -1770,7 +1790,14 @@ async fn issue_missing_subscription(
         .get_device_record(&network_code, &device_id)
         .await
     {
-        Ok(Some(value)) if value.client_type == ClientType::Vnt => value,
+        Ok(Some(value))
+            if matches!(
+                value.client_type,
+                ClientType::Vnt | ClientType::RemoteDesktop
+            ) =>
+        {
+            value
+        }
         Ok(Some(_)) => return ApiResponse::<()>::err("只有 VNT 设备支持订阅链接").into_response(),
         Ok(None) => return ApiResponse::<()>::err_code(404, "设备不存在").into_response(),
         Err(error) => return ApiResponse::<()>::err(error.to_string()).into_response(),
@@ -1916,7 +1943,14 @@ async fn get_subscription(
                 .get_device_record(&network_code, &device_id)
                 .await
             {
-                Ok(Some(device)) if device.client_type == ClientType::Vnt => device,
+                Ok(Some(device))
+                    if matches!(
+                        device.client_type,
+                        ClientType::Vnt | ClientType::RemoteDesktop
+                    ) =>
+                {
+                    device
+                }
                 Ok(Some(_)) => {
                     return ApiResponse::<()>::err("只有 VNT 设备支持订阅链接").into_response();
                 }
@@ -2058,6 +2092,7 @@ struct CreateNetworkRequest {
     netmask: u8,
     lease_duration: Option<u64>,
     network_type: Option<NetworkType>,
+    group_type: Option<GroupType>,
 }
 
 async fn create_network(
@@ -2079,12 +2114,13 @@ async fn create_network(
 
     match state
         .control_service
-        .add_network(
+        .add_network_group(
             body.network_code,
             gateway,
             body.netmask,
             lease_duration,
             body.network_type.unwrap_or(NetworkType::Public),
+            body.group_type.unwrap_or_default(),
         )
         .await
     {
@@ -2099,6 +2135,7 @@ struct UpdateNetworkRequest {
     netmask: u8,
     lease_duration: u64,
     network_type: Option<NetworkType>,
+    group_type: Option<GroupType>,
 }
 
 async fn update_network(
@@ -2127,12 +2164,18 @@ async fn update_network(
 
     match state
         .control_service
-        .update_network(
+        .update_network_group(
             &network_code,
             gateway,
             body.netmask,
             lease_duration,
             network_type,
+            body.group_type.unwrap_or_else(|| {
+                state
+                    .control_service
+                    .get_group_type(&network_code)
+                    .unwrap_or_default()
+            }),
         )
         .await
     {
@@ -2209,8 +2252,15 @@ async fn create_device(
         Err(_) => return ApiResponse::<()>::err("无效的 IP 地址").into_response(),
     };
     let client_type = body.client_type;
+    if state
+        .control_service
+        .get_group_type(&body.network_code)
+        .is_some_and(|kind| !kind.accepts(client_type))
+    {
+        return ApiResponse::<()>::err("客户端类型与组用途不匹配").into_response();
+    }
     let ip_type = body.ip_type.unwrap_or(DeviceIpType::Dynamic);
-    if client_type == ClientType::Vnt {
+    if matches!(client_type, ClientType::Vnt | ClientType::RemoteDesktop) {
         let device_name = body.device_name.unwrap_or_else(|| body.device_id.clone());
         return create_managed_device(
             State(state),
@@ -2279,7 +2329,12 @@ async fn update_device(
         .get_device_record(&body.network_code, &device_id)
         .await
     {
-        Ok(Some(device)) if device.client_type == ClientType::Vnt => {
+        Ok(Some(device))
+            if matches!(
+                device.client_type,
+                ClientType::Vnt | ClientType::RemoteDesktop
+            ) =>
+        {
             return ApiResponse::<()>::err("VNT 设备的名称和 IP 由客户端配置接口统一更新")
                 .into_response();
         }

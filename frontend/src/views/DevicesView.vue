@@ -43,6 +43,7 @@ const toast = useToast()
 const networkCode = computed(() => (route.params.code as string | undefined) ?? '')
 const monitor = useDeviceMonitor()
 const { devices, mergedDevices, loading, search } = monitor
+function isManagedClient(type: ClientType | undefined) { return type === 'VNT' || type === 'REMOTE_DESKTOP' }
 const currentNetwork = ref<NetworkInfo | null>(null)
 
 async function loadCurrentNetwork(code: string) {
@@ -245,7 +246,7 @@ async function openCreateDevice() {
     device_name: '',
     ip: suggestedIp ?? '',
     ip_type: 'Dynamic',
-    client_type: 'VNT',
+    client_type: currentNetwork.value?.group_type === 'RemoteDesktop' ? 'REMOTE_DESKTOP' : 'VNT',
     ikev2_password: '',
     output_subnets: [],
     input_routes: [],
@@ -269,14 +270,14 @@ function localDevice(group: DeviceGroup) {
 
 function onlineVntSyncState(group: DeviceGroup): 'available' | 'unavailable' | null {
   const device = localDevice(group)
-  if (device?.client_type !== 'VNT' || device.status !== 'Online') return null
+  if (!isManagedClient(device?.client_type) || device.status !== 'Online') return null
   return device.subscription_online ? 'available' : 'unavailable'
 }
 
 function subscriptionOnlyOnline(group: DeviceGroup) {
   const device = localDevice(group)
   return (
-    device?.client_type === 'VNT' &&
+    isManagedClient(device?.client_type) &&
     device.managed &&
     !device.relay_online &&
     device.subscription_online
@@ -323,7 +324,7 @@ async function openEditDevice(group: DeviceGroup) {
   vntAdvancedToml.value = ''
   vntAdvancedError.value = ''
   showDeviceModal.value = true
-  if (device.client_type === 'VNT') {
+  if (isManagedClient(device.client_type)) {
     try {
       const managed = await managedDeviceApi.get(networkCode.value, device.device_id)
       deviceForm.value.vnt_config = managed.client_config
@@ -347,7 +348,7 @@ function differingSessionName(group: DeviceGroup) {
 async function submitDevice() {
   if (formSubmitting.value) return
   let advancedToml = ''
-  if (deviceForm.value.client_type === 'VNT') {
+  if (isManagedClient(deviceForm.value.client_type)) {
     const currentServer = deviceForm.value.vnt_config.current_server.trim()
     const otherServers = deviceForm.value.vnt_config.other_servers.map((server) => server.trim()).filter(Boolean)
     const trafficServers = [currentServer, ...otherServers].filter(Boolean)
@@ -371,7 +372,7 @@ async function submitDevice() {
   try {
     let managedMutation: ManagedConfigMutation | undefined
     if (editingDevice.value) {
-      if (deviceForm.value.client_type === 'VNT') {
+      if (isManagedClient(deviceForm.value.client_type)) {
         managedMutation = await managedDeviceApi.update(
           networkCode.value,
           deviceForm.value.device_id,
@@ -414,7 +415,7 @@ async function submitDevice() {
       const payload = {
         network_code: networkCode.value,
         device_id: deviceForm.value.device_id,
-        ...(deviceForm.value.client_type !== 'VNT' ? { device_name: deviceForm.value.device_name } : {}),
+        ...(!isManagedClient(deviceForm.value.client_type) ? { device_name: deviceForm.value.device_name } : {}),
         ip: deviceForm.value.ip,
         ip_type: deviceForm.value.client_type === 'WIREGUARD' ? 'Static' : deviceForm.value.ip_type,
         client_type: deviceForm.value.client_type,
@@ -439,8 +440,9 @@ async function submitDevice() {
             }
           : {}),
       }
-      if (deviceForm.value.client_type === 'VNT') {
+      if (isManagedClient(deviceForm.value.client_type)) {
         const result = await managedDeviceApi.create({
+          client_type: deviceForm.value.client_type === 'REMOTE_DESKTOP' ? 'REMOTE_DESKTOP' : 'VNT',
           network_code: networkCode.value,
           device_id: deviceForm.value.device_id,
           device_name: deviceForm.value.device_name,
@@ -503,7 +505,7 @@ async function showSubscription(link: string) {
 
 async function openVntSubscription(group: DeviceGroup) {
   const device = localDevice(group)
-  if (!device || device.client_type !== 'VNT') return
+  if (!device || !isManagedClient(device.client_type)) return
   try {
     const result = await managedDeviceApi.subscription(networkCode.value, device.device_id)
     await showSubscription(result.subscription)
@@ -639,7 +641,7 @@ async function executeDelete() {
                 <div class="flex items-center gap-2 font-medium text-slate-900 dark:text-slate-100">
                   <span>{{ group.devices[0]?.device_name }}</span>
                   <span
-                    v-if="group.devices[0]?.client_type !== 'VNT'"
+                    v-if="!isManagedClient(group.devices[0]?.client_type)"
                     class="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500 dark:bg-slate-700 dark:text-slate-300"
                   >{{ group.devices[0]?.client_type || 'VNT' }}</span>
                   <span
@@ -733,7 +735,7 @@ async function executeDelete() {
                     <Pencil :size="15" />
                   </button>
                   <button
-                    v-if="localDevice(group)?.client_type === 'VNT'"
+                    v-if="isManagedClient(localDevice(group)?.client_type)"
                     class="flex h-7 w-7 items-center justify-center rounded-lg text-violet-500 transition hover:bg-violet-50 hover:text-violet-700 dark:hover:bg-violet-500/10"
                     title="订阅链接二维码"
                     @click="openVntSubscription(group)"
@@ -851,9 +853,10 @@ async function executeDelete() {
         <div>
           <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">设备类型</label>
           <select v-model="deviceForm.client_type" :class="inputClass" :disabled="Boolean(editingDevice)" @change="changeClientType">
-            <option value="VNT">VNT</option>
-            <option value="IKEV2">IKEv2</option>
-            <option value="WIREGUARD">WireGuard</option>
+            <option v-if="currentNetwork?.group_type !== 'RemoteDesktop'" value="VNT">VNT</option>
+            <option v-if="currentNetwork?.group_type === 'RemoteDesktop'" value="REMOTE_DESKTOP">远程桌面</option>
+            <option v-if="currentNetwork?.group_type !== 'RemoteDesktop'" value="IKEV2">IKEv2</option>
+            <option v-if="currentNetwork?.group_type !== 'RemoteDesktop'" value="WIREGUARD">WireGuard</option>
           </select>
           <p v-if="editingDevice" class="mt-1.5 text-xs text-slate-400">设备创建后不能修改类型。</p>
         </div>
@@ -869,9 +872,9 @@ async function executeDelete() {
           <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">设备名称</label>
           <input v-model.trim="deviceForm.device_name" type="text" :class="inputClass" maxlength="128" required />
         </div>
-        <section v-if="deviceForm.client_type === 'VNT'" class="space-y-4 rounded-xl border border-blue-100 bg-blue-50/40 p-4 dark:border-blue-500/20 dark:bg-blue-500/5">
+        <section v-if="isManagedClient(deviceForm.client_type)" class="space-y-4 rounded-xl border border-blue-100 bg-blue-50/40 p-4 dark:border-blue-500/20 dark:bg-blue-500/5">
           <div>
-            <h4 class="text-sm font-semibold text-slate-800 dark:text-slate-100">VNT 客户端配置</h4>
+            <h4 class="text-sm font-semibold text-slate-800 dark:text-slate-100">{{ deviceForm.client_type === 'REMOTE_DESKTOP' ? '远程桌面客户端配置' : 'VNT 客户端配置' }}</h4>
             <p class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">
               {{ editingDevice?.subscription_online ? '该客户端通过订阅链接接入，保存后会立即推送；实际应用结果会显示在设备状态中。' : '当前没有通过订阅链接验证的同步连接；配置会保存在服务端，客户端下次使用订阅链接启动时会获取。' }}
             </p>

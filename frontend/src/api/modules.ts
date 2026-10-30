@@ -75,7 +75,7 @@ export const deviceApi = {
 
 export const managedDeviceApi = {
   create: (payload: CreateManagedDevicePayload) =>
-    request<ManagedConfigMutation>('/devices', { method: 'POST', body: { ...payload, client_type: 'VNT' } }),
+    request<ManagedConfigMutation>('/devices', { method: 'POST', body: { ...payload, client_type: payload.client_type ?? 'VNT' } }),
   get: (code: string, deviceId: string) =>
     request<ManagedConfig>(`/networks/${encodeURIComponent(code)}/devices/${encodeURIComponent(deviceId)}/client-config`),
   update: (code: string, deviceId: string, configToml: string, subscriptionServer: string, trafficServersOverride: string[], deviceName: string, ip: string, ipType: DeviceIpType) =>

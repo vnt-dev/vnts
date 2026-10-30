@@ -36,6 +36,25 @@ impl NetworkType {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum GroupType {
+    #[default]
+    Network = 0,
+    RemoteDesktop = 1,
+}
+impl GroupType {
+    pub fn from_i32(value: i32) -> Self {
+        if value == 1 {
+            Self::RemoteDesktop
+        } else {
+            Self::Network
+        }
+    }
+    pub fn accepts(self, client: ClientType) -> bool {
+        (self == Self::RemoteDesktop) == (client == ClientType::RemoteDesktop)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeviceIpType {
     Dynamic = 0,
@@ -50,6 +69,7 @@ pub enum ClientType {
     Vnt = 0,
     Ikev2 = 1,
     Wireguard = 2,
+    RemoteDesktop = 3,
 }
 
 impl ClientType {
@@ -57,6 +77,7 @@ impl ClientType {
         match value {
             1 => Self::Ikev2,
             2 => Self::Wireguard,
+            3 => Self::RemoteDesktop,
             _ => Self::Vnt,
         }
     }
@@ -124,6 +145,7 @@ pub struct NetworkRecord {
     pub lease_duration: i64,
     pub source: NetworkSource,
     pub network_type: NetworkType,
+    pub group_type: GroupType,
     pub created_at: i64,
 }
 
@@ -295,6 +317,7 @@ pub async fn init_db_pool() -> anyhow::Result<()> {
             lease_duration INTEGER NOT NULL,
             source INTEGER NOT NULL DEFAULT 0,
             network_type INTEGER NOT NULL DEFAULT 0,
+            group_type INTEGER NOT NULL DEFAULT 0,
             created_at INTEGER NOT NULL
         )",
     )
@@ -306,6 +329,7 @@ pub async fn init_db_pool() -> anyhow::Result<()> {
     let _ = sqlx::query("ALTER TABLE networks ADD COLUMN source INTEGER NOT NULL DEFAULT 0")
         .execute(&pool)
         .await;
+    migrate_network_group_schema(&pool).await?;
     let _ = sqlx::query("ALTER TABLE networks ADD COLUMN network_type INTEGER NOT NULL DEFAULT 0")
         .execute(&pool)
         .await;
@@ -458,14 +482,29 @@ pub async fn init_db_pool() -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn migrate_network_group_schema(pool: &SqlitePool) -> anyhow::Result<()> {
+    let columns = sqlx::query("PRAGMA table_info(networks)")
+        .fetch_all(pool)
+        .await?;
+    if !columns
+        .iter()
+        .any(|row| row.get::<String, _>("name") == "group_type")
+    {
+        sqlx::query("ALTER TABLE networks ADD COLUMN group_type INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
 pub async fn save_network(record: &NetworkRecord) -> anyhow::Result<()> {
     let Some(pool) = DB_POOL.get() else {
         return Ok(());
     };
 
     sqlx::query(
-        r#"INSERT OR REPLACE INTO networks (network_code, gateway, netmask, lease_duration, source, network_type, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+        r#"INSERT OR REPLACE INTO networks (network_code, gateway, netmask, lease_duration, source, network_type, group_type, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)"#,
     )
     .bind(&record.network_code)
     .bind(&record.gateway)
@@ -473,6 +512,7 @@ pub async fn save_network(record: &NetworkRecord) -> anyhow::Result<()> {
     .bind(record.lease_duration)
     .bind(record.source as i32)
     .bind(record.network_type as i32)
+    .bind(record.group_type as i32)
     .bind(record.created_at)
     .execute(pool)
     .await
@@ -487,8 +527,8 @@ pub async fn save_network_if_not_exists(record: &NetworkRecord) -> anyhow::Resul
     };
 
     let result = sqlx::query(
-        r#"INSERT OR IGNORE INTO networks (network_code, gateway, netmask, lease_duration, source, network_type, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+        r#"INSERT OR IGNORE INTO networks (network_code, gateway, netmask, lease_duration, source, network_type, group_type, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)"#,
     )
     .bind(&record.network_code)
     .bind(&record.gateway)
@@ -496,6 +536,7 @@ pub async fn save_network_if_not_exists(record: &NetworkRecord) -> anyhow::Resul
     .bind(record.lease_duration)
     .bind(record.source as i32)
     .bind(record.network_type as i32)
+    .bind(record.group_type as i32)
     .bind(record.created_at)
     .execute(pool)
     .await
@@ -510,18 +551,20 @@ pub async fn update_network(
     netmask: u8,
     lease_duration: i64,
     network_type: NetworkType,
+    group_type: GroupType,
 ) -> anyhow::Result<bool> {
     let Some(pool) = DB_POOL.get() else {
         return Ok(false);
     };
 
     let result = sqlx::query(
-        r#"UPDATE networks SET gateway = ?, netmask = ?, lease_duration = ?, network_type = ? WHERE network_code = ?"#,
+        r#"UPDATE networks SET gateway = ?, netmask = ?, lease_duration = ?, network_type = ?, group_type = ? WHERE network_code = ?"#,
     )
     .bind(gateway)
     .bind(netmask as i32)
     .bind(lease_duration)
     .bind(network_type as i32)
+    .bind(group_type as i32)
     .bind(network_code)
     .execute(pool)
     .await
@@ -551,7 +594,7 @@ pub async fn get_network(network_code: &str) -> anyhow::Result<Option<NetworkRec
     };
 
     let row_option = sqlx::query(
-        r#"SELECT network_code, gateway, netmask, lease_duration, source, network_type, created_at FROM networks WHERE network_code = ?"#,
+        r#"SELECT network_code, gateway, netmask, lease_duration, source, network_type, group_type, created_at FROM networks WHERE network_code = ?"#,
     )
     .bind(network_code)
     .fetch_optional(pool)
@@ -570,6 +613,7 @@ pub async fn get_network(network_code: &str) -> anyhow::Result<Option<NetworkRec
                 lease_duration: row.get("lease_duration"),
                 source: NetworkSource::from_i32(source),
                 network_type: NetworkType::from_i32(network_type),
+                group_type: GroupType::from_i32(row.get("group_type")),
                 created_at: row.get("created_at"),
             }))
         }
@@ -583,7 +627,7 @@ pub async fn load_all_networks() -> anyhow::Result<Vec<NetworkRecord>> {
     };
 
     let records: Vec<NetworkRecord> = sqlx::query(
-        r#"SELECT network_code, gateway, netmask, lease_duration, source, network_type, created_at FROM networks ORDER BY created_at"#,
+        r#"SELECT network_code, gateway, netmask, lease_duration, source, network_type, group_type, created_at FROM networks ORDER BY created_at"#,
     )
     .fetch(pool)
     .try_filter_map(|row| async move {
@@ -597,6 +641,7 @@ pub async fn load_all_networks() -> anyhow::Result<Vec<NetworkRecord>> {
             lease_duration: row.try_get("lease_duration")?,
             source: NetworkSource::from_i32(source),
             network_type: NetworkType::from_i32(network_type),
+                group_type: GroupType::from_i32(row.get("group_type")),
             created_at: row.try_get("created_at")?,
         }))
     })
@@ -1476,5 +1521,33 @@ mod tests {
         assert_eq!(row.get::<i64, _>("updated_at"), 0);
         assert!(row.get::<Option<String>, _>("credential_key").is_none());
         assert!(row.get::<Option<String>, _>("subscription").is_none());
+    }
+    #[tokio::test]
+    async fn legacy_networks_gain_a_separate_group_type_without_changing_admission() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE networks (network_code TEXT PRIMARY KEY, network_type INTEGER NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO networks VALUES ('private', 1), ('public', 0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        super::migrate_network_group_schema(&pool).await.unwrap();
+        super::migrate_network_group_schema(&pool).await.unwrap();
+        let rows =
+            sqlx::query("SELECT network_type, group_type FROM networks ORDER BY network_type")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows[0].get::<i32, _>("network_type"), 0);
+        assert_eq!(rows[1].get::<i32, _>("network_type"), 1);
+        assert!(rows.iter().all(|row| row.get::<i32, _>("group_type") == 0));
     }
 }

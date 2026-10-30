@@ -9,7 +9,7 @@ use crate::protocol::control_message::{
 };
 use crate::server::control_server::db;
 use crate::server::control_server::db::{
-    ClientType, DeviceIpType, Ikev2InputRoute, NetworkRecord, NetworkSource, NetworkType,
+    ClientType, DeviceIpType, GroupType, Ikev2InputRoute, NetworkRecord, NetworkSource, NetworkType,
 };
 use crate::server::network_state_provider::{
     NetworkState, NetworkStateProvider, format_system_time_local, i64_to_system_time,
@@ -62,6 +62,7 @@ pub struct NetworkConfig {
     pub lease_duration: Duration,
     pub source: NetworkSource,
     pub network_type: NetworkType,
+    pub group_type: GroupType,
 }
 
 #[derive(Clone, Copy)]
@@ -281,17 +282,40 @@ pub struct ControlService {
 }
 
 impl ControlService {
+    #[cfg(test)]
     pub async fn new(
         default_net: Ipv4Net,
         custom_nets: HashMap<String, Ipv4Net>,
         white_list: HashSet<String>,
         lease_duration: Duration,
     ) -> anyhow::Result<Self> {
+        Self::new_with_groups(
+            default_net,
+            custom_nets,
+            white_list,
+            lease_duration,
+            HashMap::new(),
+        )
+        .await
+    }
+    pub async fn new_with_groups(
+        default_net: Ipv4Net,
+        custom_nets: HashMap<String, Ipv4Net>,
+        white_list: HashSet<String>,
+        lease_duration: Duration,
+        group_types: HashMap<String, GroupType>,
+    ) -> anyhow::Result<Self> {
         let default_net = default_net.trunc();
         let default_gateway = first_usable_ip(default_net)?;
         let network_states = Arc::new(DashMap::new());
 
-        let config_nets = Self::build_config_networks(&custom_nets, lease_duration);
+        let mut config_nets = Self::build_config_networks(&custom_nets, lease_duration);
+        for (code, group_type) in group_types {
+            config_nets
+                .get_mut(&code)
+                .ok_or_else(|| anyhow::anyhow!("group_types 中的编号不存在于 custom_nets: {code}"))?
+                .group_type = group_type;
+        }
         Self::save_config_networks_to_db(&config_nets).await;
         let db_nets = Self::merge_network_configs(Self::load_networks_from_db().await, config_nets);
 
@@ -431,6 +455,7 @@ impl ControlService {
                     lease_duration,
                     source: NetworkSource::Config,
                     network_type: NetworkType::Public,
+                    group_type: GroupType::Network,
                 },
             );
         }
@@ -451,6 +476,7 @@ impl ControlService {
                 lease_duration: config.lease_duration.as_secs() as i64,
                 source: NetworkSource::Config,
                 network_type: config.network_type,
+                group_type: config.group_type,
                 created_at: now,
             };
             match db::save_network_if_not_exists(&record).await {
@@ -503,6 +529,7 @@ impl ControlService {
                                 lease_duration: Duration::from_secs(record.lease_duration as u64),
                                 source: record.source,
                                 network_type: record.network_type,
+                                group_type: record.group_type,
                             },
                         );
                     }
@@ -520,12 +547,19 @@ impl ControlService {
         reg_req: RegRequestMsg,
         sender: Sender<Bytes>,
     ) -> anyhow::Result<Session> {
-        self.register_inner(reg_req, sender, ClientType::Vnt).await
+        let client_type = match reg_req.client_type {
+            crate::protocol::control_message::ClientType::Vnt => ClientType::Vnt,
+            crate::protocol::control_message::ClientType::RemoteDesktop => {
+                ClientType::RemoteDesktop
+            }
+            _ => bail!("此入口仅接受 VNT 或远程桌面客户端"),
+        };
+        self.register_inner(reg_req, sender, client_type).await
     }
 
     async fn register_inner(
         &self,
-        reg_req: RegRequestMsg,
+        mut reg_req: RegRequestMsg,
         sender: Sender<Bytes>,
         client_type: ClientType,
     ) -> anyhow::Result<Session> {
@@ -562,12 +596,31 @@ impl ControlService {
         let _mutation_guard = mutation_lock.lock().await;
 
         let is_new_network = !self.db_nets.read().contains_key(&reg_req.network_code);
-        let config = self.network_config(&reg_req.network_code, reg_req.ip)?;
+        let mut config = self.network_config(&reg_req.network_code, reg_req.ip)?;
+        if is_new_network && client_type == ClientType::RemoteDesktop {
+            config.group_type = GroupType::RemoteDesktop;
+        }
+        anyhow::ensure!(
+            config.group_type.accepts(client_type),
+            "客户端类型与组用途不匹配"
+        );
 
         if is_new_network {
-            self.db_nets
-                .write()
-                .insert(reg_req.network_code.clone(), config);
+            db::save_network(&NetworkRecord {
+                network_code: network_code.clone(),
+                gateway: config.gateway.to_string(),
+                netmask: config.net.prefix_len(),
+                lease_duration: config.lease_duration.as_secs() as i64,
+                source: NetworkSource::DeviceRegister,
+                network_type: config.network_type,
+                group_type: config.group_type,
+                created_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64,
+            })
+            .await?;
+            self.db_nets.write().insert(network_code.clone(), config);
         }
 
         let state = self
@@ -605,15 +658,38 @@ impl ControlService {
         {
             bail!("设备 ID '{}' 已被其他设备类型占用", reg_req.device_id);
         }
-        if client_type != ClientType::Vnt && existing.is_none() {
+        if !matches!(client_type, ClientType::Vnt | ClientType::RemoteDesktop) && existing.is_none()
+        {
             bail!("外部接入设备 '{}' 未由管理员预先创建", reg_req.device_id);
         }
 
         if config.network_type == NetworkType::Private
-            && client_type == ClientType::Vnt
+            && matches!(client_type, ClientType::Vnt | ClientType::RemoteDesktop)
             && !state.has_device(&reg_req.device_id)
         {
             bail!("私有网络仅允许已添加的设备连接");
+        }
+
+        if client_type == ClientType::RemoteDesktop
+            && let Some(manager) = self.get_peer_manager()
+        {
+            let remote = manager.remote_client_infos(&network_code);
+            let excluded = remote
+                .iter()
+                .filter(|device| device.id != reg_req.device_id)
+                .map(|device| Ipv4Addr::from(device.ip))
+                .collect::<HashSet<_>>();
+            if reg_req.ip.is_none()
+                && !excluded.is_empty()
+                && existing
+                    .as_ref()
+                    .and_then(|entry| entry.ip)
+                    .is_none_or(|ip| excluded.contains(&ip))
+            {
+                reg_req.ip = Some(state.first_available_ip_excluding(&excluded)?);
+            } else if reg_req.ip.is_some_and(|ip| excluded.contains(&ip)) {
+                bail!("请求的设备地址已在其他服务器使用");
+            }
         }
 
         let (session, entry) = {
@@ -717,6 +793,7 @@ impl ControlService {
                 lease_duration: config.lease_duration.as_secs() as i64,
                 source: NetworkSource::DeviceRegister,
                 network_type: NetworkType::Public,
+                group_type: GroupType::Network,
                 created_at: now,
             };
             tokio::spawn(async move {
@@ -1167,6 +1244,7 @@ impl ControlService {
             .or_else(|| state.first_available_ip_excluding(&remote_ips).ok())
             .context("IKEv2 address pool is exhausted")?;
         let request = RegRequestMsg {
+            client_type: crate::protocol::control_message::ClientType::Vnt,
             network_code: network_code.clone(),
             device_id,
             ip: Some(requested_ip),
@@ -1209,6 +1287,7 @@ impl ControlService {
             .filter(|ip| !remote_ips.contains(ip))
             .context("WireGuard 设备没有可用的固定地址")?;
         let request = RegRequestMsg {
+            client_type: crate::protocol::control_message::ClientType::Vnt,
             network_code: network_code.clone(),
             device_id,
             ip: Some(requested_ip),
@@ -1250,6 +1329,7 @@ impl ControlService {
             lease_duration: self.default_lease_duration,
             source: NetworkSource::DeviceRegister,
             network_type: NetworkType::Public,
+            group_type: GroupType::Network,
         })
     }
 
@@ -1287,6 +1367,7 @@ impl ControlService {
             .await,
         );
 
+        new_state.set_group_type(config.group_type);
         self.network_state_provider
             .insert(network_code, new_state.clone());
         new_state
@@ -1395,10 +1476,12 @@ impl ControlService {
 
                 for entry in state.sender_map().iter() {
                     let ip = *entry.key();
-                    if state
-                        .get_device_entry_by_ip(ip)
-                        .is_some_and(|device| device.client_type != ClientType::Vnt)
-                    {
+                    if state.get_device_entry_by_ip(ip).is_some_and(|device| {
+                        !matches!(
+                            device.client_type,
+                            ClientType::Vnt | ClientType::RemoteDesktop
+                        )
+                    }) {
                         continue;
                     }
                     let sender = entry.value().clone();
@@ -1420,6 +1503,7 @@ impl ControlService {
         }
     }
 
+    #[cfg(test)]
     pub async fn add_network(
         &self,
         network_code: String,
@@ -1427,6 +1511,25 @@ impl ControlService {
         netmask: u8,
         lease_duration: Option<Duration>,
         network_type: NetworkType,
+    ) -> anyhow::Result<()> {
+        self.add_network_group(
+            network_code,
+            gateway,
+            netmask,
+            lease_duration,
+            network_type,
+            GroupType::Network,
+        )
+        .await
+    }
+    pub async fn add_network_group(
+        &self,
+        network_code: String,
+        gateway: Ipv4Addr,
+        netmask: u8,
+        lease_duration: Option<Duration>,
+        network_type: NetworkType,
+        group_type: GroupType,
     ) -> anyhow::Result<()> {
         let mutation_lock = self
             .device_mutation_locks
@@ -1452,6 +1555,7 @@ impl ControlService {
             lease_duration: lease_duration.as_secs() as i64,
             source: NetworkSource::Manual,
             network_type,
+            group_type,
             created_at: now,
         };
 
@@ -1465,19 +1569,21 @@ impl ControlService {
                 lease_duration,
                 source: NetworkSource::Manual,
                 network_type,
+                group_type,
             },
         );
 
         Ok(())
     }
 
-    pub async fn update_network(
+    pub async fn update_network_group(
         &self,
         network_code: &str,
         gateway: Ipv4Addr,
         netmask: u8,
         lease_duration: Duration,
         network_type: NetworkType,
+        group_type: GroupType,
     ) -> anyhow::Result<()> {
         let net = network_from_gateway(gateway, netmask)?;
         let mutation_lock = self
@@ -1493,7 +1599,8 @@ impl ControlService {
             .copied()
             .ok_or_else(|| anyhow::anyhow!("网络编号 '{}' 不存在", network_code))?;
 
-        let topology_changed = original_config.net != net
+        let topology_changed = original_config.group_type != group_type
+            || original_config.net != net
             || original_config.gateway != gateway
             || original_config.lease_duration != lease_duration;
         if topology_changed && db::network_has_devices(network_code).await? {
@@ -1513,6 +1620,7 @@ impl ControlService {
             netmask,
             lease_duration.as_secs() as i64,
             network_type,
+            group_type,
         )
         .await?;
 
@@ -1524,6 +1632,7 @@ impl ControlService {
                 lease_duration,
                 source: original_config.source,
                 network_type,
+                group_type,
             },
         );
 
@@ -1676,6 +1785,10 @@ impl ControlService {
                 .map(|entry| entry.client_type)
                 .context("设备不存在")?,
         };
+        anyhow::ensure!(
+            config.group_type.accepts(client_type),
+            "客户端类型与组用途不匹配"
+        );
         // WireGuard peers are provisioned by the server with a stable tunnel address. Keep the
         // persisted/API IP type consistent even when an older client submits Dynamic or Fixed.
         let ip_type = if client_type == ClientType::Wireguard {
@@ -1755,7 +1868,7 @@ impl ControlService {
                 )?;
                 (Vec::new(), Vec::new(), outputs, routes)
             }
-            ClientType::Vnt => {
+            ClientType::Vnt | ClientType::RemoteDesktop => {
                 if ikev2_output_subnets
                     .as_ref()
                     .is_some_and(|value| !value.is_empty())
@@ -1792,7 +1905,7 @@ impl ControlService {
             .or_else(|| existing.as_ref().map(|entry| entry.wireguard_dns.clone()))
             .unwrap_or_default();
         let password = match client_type {
-            ClientType::Vnt => {
+            ClientType::Vnt | ClientType::RemoteDesktop => {
                 if ikev2_password.is_some() {
                     bail!("VNT 设备不能配置 IKEv2 密码");
                 }
@@ -1828,66 +1941,60 @@ impl ControlService {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty());
-        let (wireguard_private_key, wireguard_public_key, wireguard_keys_changed) =
-            if client_type == ClientType::Wireguard {
-                match provided_wireguard_private_key {
-                    Some(private_key) => {
-                        let bytes = crate::server::wireguard::decode_key(private_key)
-                            .map_err(|error| anyhow::anyhow!("无效的 WireGuard 私钥：{error}"))?;
-                        let secret = boringtun::x25519::StaticSecret::from(bytes);
-                        let public = boringtun::x25519::PublicKey::from(&secret);
-                        let public_key =
-                            base64::engine::general_purpose::STANDARD.encode(public.as_bytes());
-                        let unchanged = existing.as_ref().is_some_and(|entry| {
-                            entry.wireguard_private_key.as_deref() == Some(private_key)
-                                && entry.wireguard_public_key.as_deref()
-                                    == Some(public_key.as_str())
-                        });
-                        if !unchanged
-                            && self
-                                .wireguard_public_key_exists(&public_key, network_code, device_id)
-                                .await?
-                        {
-                            bail!("该 WireGuard 私钥已绑定其他设备，不能重复使用");
-                        }
-                        (
-                            Some(private_key.to_string()),
-                            Some(public_key),
-                            !unchanged,
-                        )
+        let (wireguard_private_key, wireguard_public_key, wireguard_keys_changed) = if client_type
+            == ClientType::Wireguard
+        {
+            match provided_wireguard_private_key {
+                Some(private_key) => {
+                    let bytes = crate::server::wireguard::decode_key(private_key)
+                        .map_err(|error| anyhow::anyhow!("无效的 WireGuard 私钥：{error}"))?;
+                    let secret = boringtun::x25519::StaticSecret::from(bytes);
+                    let public = boringtun::x25519::PublicKey::from(&secret);
+                    let public_key =
+                        base64::engine::general_purpose::STANDARD.encode(public.as_bytes());
+                    let unchanged = existing.as_ref().is_some_and(|entry| {
+                        entry.wireguard_private_key.as_deref() == Some(private_key)
+                            && entry.wireguard_public_key.as_deref() == Some(public_key.as_str())
+                    });
+                    if !unchanged
+                        && self
+                            .wireguard_public_key_exists(&public_key, network_code, device_id)
+                            .await?
+                    {
+                        bail!("该 WireGuard 私钥已绑定其他设备，不能重复使用");
                     }
-                    None => {
-                        match existing.as_ref().and_then(|entry| {
-                            Some((
-                                entry.wireguard_private_key.clone()?,
-                                entry.wireguard_public_key.clone()?,
-                            ))
-                        }) {
-                            Some(keys) => (Some(keys.0), Some(keys.1), false),
-                            None => {
-                                let mut bytes = [0u8; 32];
-                                rand::rng().fill_bytes(&mut bytes);
-                                let secret = boringtun::x25519::StaticSecret::from(bytes);
-                                let public = boringtun::x25519::PublicKey::from(&secret);
-                                (
-                                    Some(
-                                        base64::engine::general_purpose::STANDARD.encode(bytes),
-                                    ),
-                                    Some(
-                                        base64::engine::general_purpose::STANDARD
-                                            .encode(public.as_bytes()),
-                                    ),
-                                    true,
-                                )
-                            }
+                    (Some(private_key.to_string()), Some(public_key), !unchanged)
+                }
+                None => {
+                    match existing.as_ref().and_then(|entry| {
+                        Some((
+                            entry.wireguard_private_key.clone()?,
+                            entry.wireguard_public_key.clone()?,
+                        ))
+                    }) {
+                        Some(keys) => (Some(keys.0), Some(keys.1), false),
+                        None => {
+                            let mut bytes = [0u8; 32];
+                            rand::rng().fill_bytes(&mut bytes);
+                            let secret = boringtun::x25519::StaticSecret::from(bytes);
+                            let public = boringtun::x25519::PublicKey::from(&secret);
+                            (
+                                Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+                                Some(
+                                    base64::engine::general_purpose::STANDARD
+                                        .encode(public.as_bytes()),
+                                ),
+                                true,
+                            )
                         }
                     }
                 }
-            } else {
-                (None, None, false)
-            };
+            }
+        } else {
+            (None, None, false)
+        };
         let device_name = match client_type {
-            ClientType::Vnt => device_name
+            ClientType::Vnt | ClientType::RemoteDesktop => device_name
                 .or_else(|| existing.as_ref().map(|entry| entry.device_name.clone()))
                 .unwrap_or_else(|| device_id.to_string()),
             ClientType::Ikev2 | ClientType::Wireguard => device_name
@@ -2216,6 +2323,14 @@ impl ControlService {
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone();
         let _guard = mutation_lock.lock().await;
+        let kind = self
+            .get_group_type(&session.network_code)
+            .ok_or_else(|| anyhow::anyhow!("组已删除"))?;
+        let client = session
+            .network_state
+            .get_device_entry(&session.device_id)
+            .ok_or_else(|| anyhow::anyhow!("设备已删除"))?;
+        anyhow::ensure!(kind.accepts(client.client_type), "客户端类型与组用途不匹配");
         session.network_state.fast_register(
             &session.device_id,
             session.ip,
@@ -2300,6 +2415,12 @@ impl ControlService {
             .map(|s| s.clone())
     }
 
+    pub fn get_group_type(&self, network_code: &str) -> Option<GroupType> {
+        self.db_nets
+            .read()
+            .get(network_code)
+            .map(|config| config.group_type)
+    }
     pub fn get_network_type(&self, network_code: &str) -> Option<NetworkType> {
         self.db_nets
             .read()
@@ -2441,7 +2562,7 @@ impl ControlService {
             if local_device.is_some_and(|device| match source_type {
                 ClientType::Ikev2 => !device.allow_ikev2,
                 ClientType::Wireguard => !device.allow_wireguard,
-                ClientType::Vnt => true,
+                ClientType::Vnt | ClientType::RemoteDesktop => true,
             }) {
                 return Ok(false);
             }
@@ -2452,10 +2573,10 @@ impl ControlService {
         let msg_type = match destination_type {
             ClientType::Ikev2 => MsgType::Ikev2Relay,
             ClientType::Wireguard => MsgType::WireGuardRelay,
-            ClientType::Vnt => match source_type {
+            ClientType::Vnt | ClientType::RemoteDesktop => match source_type {
                 ClientType::Ikev2 => MsgType::Ikev2Relay,
                 ClientType::Wireguard => MsgType::WireGuardRelay,
-                ClientType::Vnt => return Ok(false),
+                ClientType::Vnt | ClientType::RemoteDesktop => return Ok(false),
             },
         };
         packet.set_msg_type(msg_type);
@@ -2611,6 +2732,7 @@ impl ControlService {
                     lease_duration: config.lease_duration.as_secs(),
                     source: config.source,
                     network_type: config.network_type,
+                    group_type: config.group_type,
                     all_count,
                     online_count,
                 }
@@ -2705,7 +2827,11 @@ impl ControlService {
         }
 
         for device in &mut devices {
-            if device.client_type != ClientType::Vnt || device.device_id.starts_with("remote-") {
+            if !matches!(
+                device.client_type,
+                ClientType::Vnt | ClientType::RemoteDesktop
+            ) || device.device_id.starts_with("remote-")
+            {
                 continue;
             }
             if let Ok(Some(managed)) = db::get_managed_config(network_code, &device.device_id).await
@@ -2870,6 +2996,7 @@ pub struct NetworkInfoVO {
     pub lease_duration: u64,
     pub source: NetworkSource,
     pub network_type: NetworkType,
+    pub group_type: GroupType,
     pub all_count: u32,
     pub online_count: u32,
 }
@@ -2896,7 +3023,8 @@ mod tests {
         SubscriptionRegistration, SubscriptionServerProof,
     };
     use crate::server::control_server::db::{
-        ClientType, DeviceIpType, Ikev2InputRoute, ManagedConfigRecord, NetworkSource, NetworkType,
+        ClientType, DeviceIpType, GroupType, Ikev2InputRoute, ManagedConfigRecord, NetworkSource,
+        NetworkType,
     };
     use base64::Engine;
     use bytes::Bytes;
@@ -3191,6 +3319,7 @@ mod tests {
 
     fn registration(network_code: &str, device_id: &str) -> RegRequestMsg {
         RegRequestMsg {
+            client_type: crate::protocol::control_message::ClientType::Vnt,
             network_code: network_code.to_string(),
             device_id: device_id.to_string(),
             ip: None,
@@ -3474,6 +3603,7 @@ mod tests {
             lease_duration: Duration::from_secs(60),
             source: NetworkSource::Config,
             network_type: NetworkType::Public,
+            group_type: GroupType::Network,
         };
         let configured = NetworkConfig {
             net: "10.2.0.0/24".parse().unwrap(),
@@ -3481,6 +3611,7 @@ mod tests {
             lease_duration: Duration::from_secs(120),
             source: NetworkSource::Config,
             network_type: NetworkType::Public,
+            group_type: GroupType::Network,
         };
         let merged = ControlService::merge_network_configs(
             HashMap::from([("net1".to_string(), persisted)]),
@@ -4074,15 +4205,15 @@ mod tests {
                 "10.92.0.8".parse().unwrap(),
                 DeviceIpType::Fixed,
                 ClientType::Ikev2,
-                    Some("old-password".to_string()),
-                    Some("Alice Phone".to_string()),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
+                Some("old-password".to_string()),
+                Some("Alice Phone".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert!(
@@ -4430,7 +4561,10 @@ mod tests {
                         target_ip: "10.97.0.21".parse().unwrap(),
                     },
                 ]),
-                Some(vec!["10.53.53.53".parse().unwrap(), "10.53.53.54".parse().unwrap()]),
+                Some(vec![
+                    "10.53.53.53".parse().unwrap(),
+                    "10.53.53.54".parse().unwrap(),
+                ]),
                 None,
             )
             .await
@@ -4507,8 +4641,8 @@ mod tests {
 
     #[tokio::test]
     async fn wireguard_user_supplied_private_key_is_validated_and_deduplicated() {
-        use base64::engine::general_purpose::STANDARD;
         use base64::Engine;
+        use base64::engine::general_purpose::STANDARD;
 
         let service = ControlService::new(
             "10.98.0.0/24".parse().unwrap(),
@@ -4547,7 +4681,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(record.wireguard_private_key.as_deref(), Some(private_key.as_str()));
+        assert_eq!(
+            record.wireguard_private_key.as_deref(),
+            Some(private_key.as_str())
+        );
         assert_eq!(
             record.wireguard_public_key.as_deref(),
             Some(expected_public.as_str())
@@ -4616,7 +4753,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(record.wireguard_private_key.as_deref(), Some(private_key2.as_str()));
+        assert_eq!(
+            record.wireguard_private_key.as_deref(),
+            Some(private_key2.as_str())
+        );
 
         let error = service
             .add_device_typed(
@@ -4726,5 +4866,132 @@ mod tests {
         packet[12..16].copy_from_slice(&source.octets());
         packet[16..20].copy_from_slice(&destination.octets());
         packet
+    }
+    #[tokio::test]
+    async fn remote_groups_are_independent_from_public_private_admission() {
+        let service = ControlService::new(
+            "10.230.29.0/24".parse().unwrap(),
+            HashMap::new(),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(128);
+        let mut first = registration("remote-public", "desktop-a");
+        first.client_type = crate::protocol::control_message::ClientType::RemoteDesktop;
+        let mut session = service.register(first, tx.clone()).await.unwrap();
+        assert_eq!(
+            service.get_group_type("remote-public"),
+            Some(GroupType::RemoteDesktop)
+        );
+        assert_eq!(
+            service.get_network_type("remote-public"),
+            Some(NetworkType::Public)
+        );
+        assert!(
+            service
+                .register(registration("remote-public", "ordinary"), tx.clone())
+                .await
+                .is_err()
+        );
+        assert!(
+            service
+                .update_network_group(
+                    "remote-public",
+                    "10.230.29.1".parse().unwrap(),
+                    24,
+                    Duration::from_secs(3600),
+                    NetworkType::Public,
+                    GroupType::Network
+                )
+                .await
+                .is_err()
+        );
+        service
+            .fast_register(&mut session, "10.230.29.8".parse().unwrap())
+            .await
+            .unwrap();
+        service
+            .update_network_group(
+                "remote-public",
+                "10.230.29.1".parse().unwrap(),
+                24,
+                Duration::from_secs(3600),
+                NetworkType::Private,
+                GroupType::RemoteDesktop,
+            )
+            .await
+            .unwrap();
+        let mut unknown = registration("remote-public", "desktop-b");
+        unknown.client_type = crate::protocol::control_message::ClientType::RemoteDesktop;
+        assert!(service.register(unknown, tx.clone()).await.is_err());
+        let mut known = registration("remote-public", "desktop-a");
+        known.client_type = crate::protocol::control_message::ClientType::RemoteDesktop;
+        assert!(service.register(known, tx.clone()).await.is_ok());
+        let ordinary = service
+            .register(registration("ordinary-group", "vnt-a"), tx.clone())
+            .await
+            .unwrap();
+        let mut wrong = registration("ordinary-group", "desktop-c");
+        wrong.client_type = crate::protocol::control_message::ClientType::RemoteDesktop;
+        assert!(service.register(wrong, tx).await.is_err());
+        drop((session, ordinary));
+    }
+    #[tokio::test]
+    async fn concurrent_first_registration_cannot_mix_group_purposes() {
+        let service = ControlService::new(
+            "10.231.29.0/24".parse().unwrap(),
+            HashMap::new(),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(128);
+        let mut desktop = registration("race", "desktop");
+        desktop.client_type = crate::protocol::control_message::ClientType::RemoteDesktop;
+        let (remote, ordinary) = tokio::join!(
+            service.register(desktop, tx.clone()),
+            service.register(registration("race", "vnt"), tx)
+        );
+        assert_ne!(remote.is_ok(), ordinary.is_ok());
+        let kind = service.get_group_type("race").unwrap();
+        assert_eq!(
+            kind,
+            if remote.is_ok() {
+                GroupType::RemoteDesktop
+            } else {
+                GroupType::Network
+            }
+        );
+    }
+    #[tokio::test]
+    async fn remote_reconnection_preserves_its_address_with_peer_discovery_enabled() {
+        let service = ControlService::new(
+            "10.235.29.0/24".parse().unwrap(),
+            HashMap::new(),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        service.set_peer_manager(std::sync::Arc::new(
+            crate::server::peer_server::PeerServerManager::new(
+                "test".into(),
+                service.get_network_state_provider().clone(),
+            ),
+        ));
+        let (tx, _rx) = tokio::sync::mpsc::channel(128);
+        let request = || {
+            let mut request = registration("remote-lease", "desktop");
+            request.client_type = crate::protocol::control_message::ClientType::RemoteDesktop;
+            request
+        };
+        let first = service.register(request(), tx.clone()).await.unwrap();
+        let address = first.ip;
+        drop(first);
+        let next = service.register(request(), tx).await.unwrap();
+        assert_eq!(next.ip, address);
     }
 }

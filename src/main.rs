@@ -91,11 +91,12 @@ async fn main() -> anyhow::Result<()> {
     let username = conf.username.unwrap_or("admin".to_string());
     let password = conf.password.unwrap_or("admin".to_string());
 
-    let control_service = ControlService::new(
+    let control_service = ControlService::new_with_groups(
         conf.network,
         conf.custom_nets,
         conf.white_list,
         Duration::from_secs(conf.lease_duration),
+        conf.group_types,
     )
     .await?;
 

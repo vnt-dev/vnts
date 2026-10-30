@@ -11,9 +11,11 @@ enum ClientType {
     VNT = 0;
     IKEV2 = 1;
     WIREGUARD = 2;
+  REMOTE_DESKTOP = 3;
 }
 
 message RegRequestMsg {
+  ClientType client_type = 15;
     string network_code = 1;
     string device_id = 2;
     optional fixed32 ip = 3;
@@ -32,6 +34,7 @@ message RegRequestMsg {
 
 
 message RegResponseMsg {
+  bool application_channel_supported = 10;
     fixed32 ip = 1;
     uint32 prefix_len = 2;
     fixed32 gateway = 3;

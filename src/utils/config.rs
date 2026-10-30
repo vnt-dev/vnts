@@ -18,6 +18,8 @@ pub struct ConfigFile {
     #[serde(default)]
     pub custom_nets: HashMap<String, Ipv4Net>,
     #[serde(default)]
+    pub group_types: HashMap<String, crate::server::control_server::db::GroupType>,
+    #[serde(default)]
     pub white_list: HashSet<String>,
     pub lease_duration: u64,
     pub web_bind: Option<SocketAddr>,
@@ -210,6 +212,7 @@ impl Default for ConfigFile {
             key: None,
             network: Ipv4Net::new_assert(Ipv4Addr::new(10, 26, 0, 0), 24),
             custom_nets: Default::default(),
+            group_types: Default::default(),
             white_list: Default::default(),
             lease_duration: 24 * 60 * 60,
             web_bind: Some("[::]:29871".parse().unwrap()),

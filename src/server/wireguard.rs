@@ -733,6 +733,7 @@ mod tests {
         let seed = control
             .register(
                 RegRequestMsg {
+                    client_type: crate::protocol::control_message::ClientType::Vnt,
                     network_code: "wg-test".to_string(),
                     device_id: "seed".to_string(),
                     ip: None,

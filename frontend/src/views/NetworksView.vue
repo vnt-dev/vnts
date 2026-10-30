@@ -8,7 +8,7 @@ import BaseModal from '@/components/BaseModal.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import NetworkCard from '@/components/NetworkCard.vue'
 import { useToast } from '@/composables/useToast'
-import type { CreateNetworkPayload, NetworkInfo, NetworkType } from '@/types'
+import type { CreateNetworkPayload, NetworkInfo, NetworkType, GroupType } from '@/types'
 
 const router = useRouter()
 const toast = useToast()
@@ -50,6 +50,7 @@ const form = reactive({
   netmask: 24,
   lease_duration: null as number | null,
   network_type: 'Public' as NetworkType,
+  group_type: 'Network' as GroupType,
 })
 
 const inputClass =
@@ -65,6 +66,7 @@ function openCreateModal() {
   form.netmask = 24
   form.lease_duration = null
   form.network_type = 'Public'
+  form.group_type = 'Network'
   showFormModal.value = true
 }
 
@@ -75,6 +77,7 @@ function openEditModal(net: NetworkInfo) {
   form.netmask = net.netmask
   form.lease_duration = net.lease_duration
   form.network_type = net.network_type ?? 'Public'
+  form.group_type = net.group_type ?? 'Network'
   showFormModal.value = true
 }
 
@@ -92,6 +95,7 @@ async function submitForm() {
         netmask: form.netmask,
         lease_duration: form.lease_duration as number,
         network_type: form.network_type,
+        group_type: form.group_type,
       })
     } else {
       const payload: CreateNetworkPayload = {
@@ -99,6 +103,7 @@ async function submitForm() {
         gateway: form.gateway,
         netmask: form.netmask,
         network_type: form.network_type,
+        group_type: form.group_type,
       }
       if (form.lease_duration) payload.lease_duration = form.lease_duration
       await networkApi.create(payload)
@@ -204,6 +209,12 @@ async function executeDelete() {
         </div>
         <div>
           <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">网络类型</label>
+          <label class="block mb-2">组类型</label>
+          <select v-model="form.group_type" :class="inputClass" :disabled="isEditMode && (networks.find(n => n.network_code === form.network_code)?.all_count ?? 0) > 0">
+            <option value="Network">组网设备组</option>
+            <option value="RemoteDesktop">远程连接组</option>
+          </select>
+          <label class="block mt-4 mb-2">设备加入规则</label>
           <select v-model="form.network_type" :class="inputClass">
             <option value="Public">公开网络</option>
             <option value="Private">私有网络</option>
