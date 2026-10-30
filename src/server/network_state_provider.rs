@@ -2,7 +2,7 @@ use crate::protocol::control_message::RegRequestMsg;
 use crate::server::control_server::db;
 use crate::server::control_server::db::DeviceRecord;
 use crate::server::control_server::db::{ClientType, DeviceIpType, Ikev2InputRoute};
-use anyhow::bail;
+use anyhow::{Context, bail};
 use bytes::Bytes;
 use dashmap::DashMap;
 use ipnet::Ipv4Net;
@@ -344,9 +344,9 @@ pub struct NetworkState {
     group_type: std::sync::atomic::AtomicU8,
     time: Mutex<Instant>,
     network_code: String,
-    gateway: Ipv4Addr,
-    net: Ipv4Net,
-    lease_duration: Duration,
+    gateway: Option<Ipv4Addr>,
+    net: Option<Ipv4Net>,
+    lease_duration: Option<Duration>,
     sender_map: DashMap<Ipv4Addr, DeviceSender>,
     lease_state: Mutex<NetworkStateInner>,
     traffic_stats_map: DashMap<Ipv4Addr, Arc<TrafficStats>>,
@@ -374,13 +374,13 @@ impl NetworkState {
     }
 
     pub fn gateway(&self) -> Ipv4Addr {
-        self.gateway
+        self.gateway.unwrap_or(Ipv4Addr::UNSPECIFIED)
     }
     pub fn net_prefix_len(&self) -> u8 {
-        self.net.prefix_len()
+        self.net.map(|net| net.prefix_len()).unwrap_or(0)
     }
     pub fn network_contains(&self, ip: Ipv4Addr) -> bool {
-        self.net.contains(&ip)
+        self.net.is_some_and(|net| net.contains(&ip))
     }
 
     pub fn sender_map(&self) -> &DashMap<Ipv4Addr, DeviceSender> {
@@ -412,13 +412,13 @@ impl NetworkState {
         excluded: &std::collections::HashSet<Ipv4Addr>,
     ) -> anyhow::Result<Ipv4Addr> {
         let guard = self.lease_state.lock();
-        let start = u32::from(self.net.network())
+        let start = u32::from(self.net.context("该组没有 VPN 网段")?.network())
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("Invalid network address"))?;
-        let end = u32::from(self.net.broadcast());
+        let end = u32::from(self.net.context("该组没有 VPN 网段")?.broadcast());
         for raw in start..end {
             let ip = Ipv4Addr::from(raw);
-            if ip != self.gateway
+            if Some(ip) != self.gateway
                 && !excluded.contains(&ip)
                 && !guard.device_ip_map.contains_key(&ip)
                 && !guard.active_ip_map.contains_key(&ip)
@@ -560,6 +560,17 @@ impl NetworkState {
         random_id: u64,
         client_instance_id: &[u8],
     ) {
+        if self.group_type() == db::GroupType::RemoteDesktop {
+            // A transport session ending must not release a configured remote identifier.
+            if let Some(record) = self.offline_ip(device_id, ip, random_id, client_instance_id) {
+                tokio::spawn(async move {
+                    if let Err(error) = db::save_or_update_device(&record).await {
+                        log::error!("保存远程设备离线状态失败: {error:#}");
+                    }
+                });
+            }
+            return;
+        }
         let should_remove = {
             let mut guard = self.lease_state.lock();
             let pool_drained = self
@@ -856,10 +867,14 @@ impl NetworkState {
         if entry.ip_type == DeviceIpType::Fixed && entry.ip != Some(new_ip) {
             bail!("快速注册 IP 与设备设置的固定 IP 不一致");
         }
-        if !self.net.contains(&new_ip)
-            || new_ip == self.gateway
-            || new_ip == self.net.network()
-            || new_ip == self.net.broadcast()
+        if self.group_type() == db::GroupType::RemoteDesktop {
+            crate::connection_id::ConnectionId::from_encoded(u32::from(new_ip))?;
+        }
+        if self.group_type() != db::GroupType::RemoteDesktop
+            && (!self.net.is_some_and(|net| net.contains(&new_ip))
+                || Some(new_ip) == self.gateway
+                || new_ip == self.net.context("该组没有 VPN 网段")?.network()
+                || new_ip == self.net.context("该组没有 VPN 网段")?.broadcast())
         {
             bail!("快速注册 IP 不在可用虚拟网段内");
         }
@@ -987,7 +1002,7 @@ impl NetworkState {
             return Ok((ip, None, Some(existing)));
         }
         let (ip, old_ip) = guard.allocate_ip_as(
-            &self.net,
+            self.net.as_ref(),
             self.gateway,
             reg_req.clone(),
             random_id,
@@ -1040,8 +1055,11 @@ impl NetworkState {
     }
 
     pub fn collect_expired_devices(&self) -> Vec<String> {
+        if self.group_type() == db::GroupType::RemoteDesktop {
+            return Vec::new();
+        }
         let guard = self.lease_state.lock();
-        guard.collect_expired_devices(self.lease_duration)
+        guard.collect_expired_devices(self.lease_duration.unwrap_or_default())
     }
 
     pub fn remove_devices(&self, device_ids: &[String]) -> Vec<String> {
@@ -1073,6 +1091,8 @@ impl NetworkState {
 
         for entry in guard.device_map.values() {
             list.push(crate::server::control_server::service::DeviceInfoVO {
+                connection_id: None,
+                current_connection_id: None,
                 device_id: entry.device_id.clone(),
                 device_name: entry.device_name.clone(),
                 current_device_name: entry.is_connected.then(|| {
@@ -1346,7 +1366,10 @@ impl NetworkStateInner {
         self.device_map
             .iter()
             .filter_map(|(k, v)| {
-                if v.is_connected || v.ip_type != DeviceIpType::Dynamic {
+                if v.client_type == ClientType::RemoteDesktop
+                    || v.is_connected
+                    || v.ip_type != DeviceIpType::Dynamic
+                {
                     return None;
                 }
                 if let Some(disconnect_time) = v.disconnect_time {
@@ -1368,7 +1391,10 @@ impl NetworkStateInner {
         let mut released = Vec::new();
         for device_id in device_ids {
             if let Some(entry) = self.device_map.get_mut(device_id) {
-                if entry.is_connected || entry.ip_type != DeviceIpType::Dynamic {
+                if entry.client_type == ClientType::RemoteDesktop
+                    || entry.is_connected
+                    || entry.ip_type != DeviceIpType::Dynamic
+                {
                     continue;
                 }
                 if let Some(ip) = entry.ip.take() {
@@ -1426,12 +1452,72 @@ impl NetworkStateInner {
 
     fn allocate_ip_as(
         &mut self,
-        net: &Ipv4Net,
-        gateway: Ipv4Addr,
+        net: Option<&Ipv4Net>,
+        gateway: Option<Ipv4Addr>,
         reg_req: RegRequestMsg,
         random_id: u64,
         client_type: ClientType,
     ) -> anyhow::Result<(Ipv4Addr, Option<Ipv4Addr>)> {
+        if client_type == ClientType::RemoteDesktop {
+            let existing = self.device_map.get(&reg_req.device_id).cloned();
+            let key = existing
+                .as_ref()
+                .and_then(|entry| entry.ip)
+                .or(reg_req.ip)
+                .ok_or_else(|| anyhow::anyhow!("远程设备必须配置连接 ID"))?;
+            crate::connection_id::ConnectionId::from_encoded(u32::from(key))?;
+            if let Some(requested) = reg_req.ip {
+                anyhow::ensure!(requested == key, "连接 ID 与设备配置不一致");
+            }
+            self.validate_ip_available(key, Some(&reg_req.device_id))?;
+            let old = existing.as_ref().and_then(|entry| entry.ip);
+            let mut entry = existing.unwrap_or_else(|| DeviceEntry {
+                device_id: reg_req.device_id.clone(),
+                ip: Some(key),
+                ip_type: DeviceIpType::Fixed,
+                client_type,
+                ikev2_password: None,
+                wireguard_private_key: None,
+                wireguard_public_key: None,
+                allow_ikev2: false,
+                allow_wireguard: false,
+                random_id,
+                runtime_device_name: None,
+                device_name: reg_req.name.clone(),
+                device_version: String::new(),
+                is_connected: false,
+                last_connect_time: SystemTime::now(),
+                disconnect_time: None,
+                data_version: 0,
+                key_sign: None,
+                latency_ms: None,
+                traffic_stats: Arc::new(TrafficStats::new()),
+                advertised_subnets: Vec::new(),
+                ikev2_input_routes: Vec::new(),
+                wireguard_input_routes: Vec::new(),
+                wireguard_dns: Vec::new(),
+                subnet_advertisement_active: false,
+            });
+            self.data_version += 1;
+            entry.ip = Some(key);
+            entry.ip_type = DeviceIpType::Fixed;
+            entry.is_connected = true;
+            entry.disconnect_time = None;
+            entry.last_connect_time = SystemTime::now();
+            entry.random_id = random_id;
+            entry.runtime_device_name = Some(reg_req.name);
+            entry.device_version = reg_req.version;
+            entry.key_sign = reg_req.key_sign;
+            entry.data_version = self.data_version;
+            entry.allow_ikev2 = false;
+            entry.allow_wireguard = false;
+            entry.advertised_subnets.clear();
+            entry.subnet_advertisement_active = false;
+            self.add_device(entry);
+            return Ok((key, old.filter(|old| *old != key)));
+        }
+        let net = net.ok_or_else(|| anyhow::anyhow!("该组没有 VPN 网段"))?;
+        let gateway = gateway.ok_or_else(|| anyhow::anyhow!("该组没有 VPN 网关"))?;
         let advertised_subnets = reg_req.advertised_subnets.clone();
         let subnet_advertisement_active =
             reg_req.registration_mode == crate::protocol::control_message::RegistrationMode::Normal;
@@ -1667,7 +1753,13 @@ impl NetworkStateInner {
         reg_req: RegRequestMsg,
         random_id: u64,
     ) -> anyhow::Result<(Ipv4Addr, Option<Ipv4Addr>)> {
-        self.allocate_ip_as(net, gateway, reg_req, random_id, ClientType::Vnt)
+        self.allocate_ip_as(
+            Some(net),
+            Some(gateway),
+            reg_req,
+            random_id,
+            ClientType::Vnt,
+        )
     }
 
     fn find_available_ip(&self, net: &Ipv4Net, gateway: Ipv4Addr) -> anyhow::Result<Ipv4Addr> {
@@ -1693,10 +1785,26 @@ impl NetworkStateInner {
 }
 
 impl NetworkState {
-    async fn build_initial_inner_state(
-        network_code: &str,
+    #[cfg(test)]
+    pub async fn new_from_db(
+        network_code: String,
         net: Ipv4Net,
         gateway: Ipv4Addr,
+        lease_duration: Duration,
+    ) -> Self {
+        Self::new_for_group(
+            network_code,
+            Some(net),
+            Some(gateway),
+            Some(lease_duration),
+            db::GroupType::Network,
+        )
+        .await
+    }
+    async fn build_initial_inner_state(
+        network_code: &str,
+        net: Option<Ipv4Net>,
+        gateway: Option<Ipv4Addr>,
     ) -> NetworkStateInner {
         match db::load_all_devices(network_code).await {
             Ok(records) => {
@@ -1707,10 +1815,16 @@ impl NetworkState {
                 for record in records {
                     let entry = DeviceEntry::from_record(record);
                     if let Some(ip) = entry.ip
-                        && net.contains(&ip)
-                        && gateway != ip
-                        && ip != net.network()
-                        && ip != net.broadcast()
+                        && ((entry.client_type == ClientType::RemoteDesktop
+                            && crate::connection_id::ConnectionId::from_encoded(u32::from(ip))
+                                .is_ok())
+                            || (entry.client_type != ClientType::RemoteDesktop
+                                && net.is_some_and(|net| {
+                                    net.contains(&ip)
+                                        && ip != net.network()
+                                        && ip != net.broadcast()
+                                })
+                                && gateway != Some(ip)))
                     {
                         device_ip_map.insert(ip, entry.device_id.clone());
                     }
@@ -1751,16 +1865,17 @@ impl NetworkState {
         }
     }
 
-    pub async fn new_from_db(
+    pub async fn new_for_group(
         network_code: String,
-        net: Ipv4Net,
-        gateway: Ipv4Addr,
-        lease_duration: Duration,
+        net: Option<Ipv4Net>,
+        gateway: Option<Ipv4Addr>,
+        lease_duration: Option<Duration>,
+        group_type: db::GroupType,
     ) -> NetworkState {
         let initial_inner_state =
             Self::build_initial_inner_state(&network_code, net, gateway).await;
         Self {
-            group_type: Default::default(),
+            group_type: std::sync::atomic::AtomicU8::new(group_type as u8),
             time: Mutex::new(Instant::now()),
             network_code,
             gateway,
@@ -1915,9 +2030,9 @@ mod tests {
             group_type: Default::default(),
             time: Mutex::new(Instant::now()),
             network_code: "test-net".to_string(),
-            gateway: Ipv4Addr::new(10, 26, 0, 1),
-            net: "10.26.0.0/24".parse().unwrap(),
-            lease_duration: Duration::from_secs(60),
+            gateway: Some(Ipv4Addr::new(10, 26, 0, 1)),
+            net: Some("10.26.0.0/24".parse().unwrap()),
+            lease_duration: Some(Duration::from_secs(60)),
             sender_map: Default::default(),
             lease_state: Mutex::new(empty_state()),
             traffic_stats_map: Default::default(),

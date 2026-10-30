@@ -1711,7 +1711,7 @@ mod tests {
                     name: "Remote Host".into(),
                     version: "test".into(),
                     key_sign: Some("key-sign".into()),
-                    ip: u32::from(Ipv4Addr::new(10, 234, 29, 3)),
+                    ip: 1001,
                     latency_ms: 10,
                     advertised_subnets: Vec::new(),
                     client_type: crate::protocol::server_message::ClientType::RemoteDesktop as i32,
@@ -1731,8 +1731,54 @@ mod tests {
         assert_eq!(devices[0].name, "Remote Host");
         assert_eq!(devices[0].client_type, 3);
         assert_eq!(
-            manager.remote_client_type("remote-peer", "10.234.29.3".parse().unwrap()),
+            manager.remote_client_type("remote-peer", Ipv4Addr::from(1001)),
             Some(crate::server::control_server::db::ClientType::RemoteDesktop)
         );
+        let service = crate::server::control_server::service::ControlService::new(
+            "10.26.0.0/24".parse().unwrap(),
+            Default::default(),
+            Default::default(),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+        service.set_peer_manager(Arc::new(manager));
+        let request = |device: &str, id: &str| RegRequestMsg {
+            client_type: crate::protocol::control_message::ClientType::RemoteDesktop,
+            network_code: "remote-peer".into(),
+            device_id: device.into(),
+            ip: Some(
+                id.parse::<crate::connection_id::ConnectionId>()
+                    .unwrap()
+                    .transport_key(),
+            ),
+            name: device.into(),
+            version: "test".into(),
+            key_sign: None,
+            ip_variable: true,
+            server_id: 0,
+            registration_mode: RegistrationMode::Normal,
+            advertised_subnets: Vec::new(),
+            allow_ikev2: false,
+            allow_wireguard: false,
+            subscription: None,
+            client_instance_id: Vec::new(),
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(128);
+        assert!(
+            service
+                .register(request("intruder", "001"), tx.clone())
+                .await
+                .is_err()
+        );
+        let same = service
+            .register(request("remote-host", "001"), tx.clone())
+            .await
+            .unwrap();
+        let distinct = service
+            .register(request("distinct", "0001"), tx)
+            .await
+            .unwrap();
+        assert_ne!(same.ip, distinct.ip);
     }
 }

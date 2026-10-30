@@ -78,9 +78,9 @@ export const managedDeviceApi = {
     request<ManagedConfigMutation>('/devices', { method: 'POST', body: { ...payload, client_type: payload.client_type ?? 'VNT' } }),
   get: (code: string, deviceId: string) =>
     request<ManagedConfig>(`/networks/${encodeURIComponent(code)}/devices/${encodeURIComponent(deviceId)}/client-config`),
-  update: (code: string, deviceId: string, configToml: string, subscriptionServer: string, trafficServersOverride: string[], deviceName: string, ip: string, ipType: DeviceIpType) =>
+  update: (code: string, deviceId: string, configToml: string, subscriptionServer: string, trafficServersOverride: string[], deviceName: string, ip: string, ipType: DeviceIpType, remote = false) =>
     request<ManagedConfigMutation>(`/networks/${encodeURIComponent(code)}/devices/${encodeURIComponent(deviceId)}/client-config`, {
-      method: 'PUT', body: { config_toml: configToml, subscription_server: subscriptionServer, traffic_servers_override: trafficServersOverride, device_name: deviceName, ip, ip_type: ipType },
+      method: 'PUT', body: { config_toml: configToml, subscription_server: subscriptionServer, traffic_servers_override: trafficServersOverride, device_name: deviceName, ...(remote ? { connection_id: ip } : { ip, ip_type: ipType }) },
     }),
   subscription: (code: string, deviceId: string) =>
     request<{ subscription: string }>(`/networks/${encodeURIComponent(code)}/devices/${encodeURIComponent(deviceId)}/subscription`),

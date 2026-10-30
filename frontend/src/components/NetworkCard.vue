@@ -25,7 +25,7 @@ const onlineRatio = computed(() =>
         <h3 class="truncate text-base font-bold text-slate-900 group-hover:text-blue-700 dark:text-slate-100 dark:group-hover:text-blue-400">
           {{ network.network_code }}
         </h3>
-        <p class="mt-0.5 font-mono text-sm text-slate-500 dark:text-slate-400">{{ network.net }}</p>
+        <p v-if="network.group_type !== 'RemoteDesktop'" class="mt-0.5 font-mono text-sm text-slate-500 dark:text-slate-400">{{ network.net }}</p>
       </div>
       <div class="flex shrink-0 items-center gap-1">
         <button
@@ -46,16 +46,16 @@ const onlineRatio = computed(() =>
     </div>
 
     <div class="mt-3 space-y-1.5 text-xs text-slate-500 dark:text-slate-400">
-      <div class="flex items-center gap-1.5">
+      <div v-if="network.group_type !== 'RemoteDesktop'" class="flex items-center gap-1.5">
         <Server :size="13" class="shrink-0 text-slate-400 dark:text-slate-500" />
         网关
         <span class="font-mono font-medium text-slate-700 dark:text-slate-300">{{ network.gateway }}</span>
         <span class="text-slate-400 dark:text-slate-500">/ {{ network.netmask }}</span>
       </div>
-      <div class="flex items-center gap-1.5">
+      <div v-if="network.group_type !== 'RemoteDesktop'" class="flex items-center gap-1.5">
         <Clock :size="13" class="shrink-0 text-slate-400 dark:text-slate-500" />
         租期
-        <span class="font-medium text-slate-700 dark:text-slate-300">{{ formatDuration(network.lease_duration) }}</span>
+        <span class="font-medium text-slate-700 dark:text-slate-300">{{ formatDuration(network.lease_duration ?? 0) }}</span>
       </div>
       <div class="flex items-center gap-1.5">
         <Globe :size="13" class="shrink-0 text-slate-400 dark:text-slate-500" />

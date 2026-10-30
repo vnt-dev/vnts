@@ -73,8 +73,8 @@ function openCreateModal() {
 function openEditModal(net: NetworkInfo) {
   isEditMode.value = true
   form.network_code = net.network_code
-  form.gateway = net.gateway
-  form.netmask = net.netmask
+  form.gateway = net.gateway ?? ''
+  form.netmask = net.netmask ?? 24
   form.lease_duration = net.lease_duration
   form.network_type = net.network_type ?? 'Public'
   form.group_type = net.group_type ?? 'Network'
@@ -83,7 +83,7 @@ function openEditModal(net: NetworkInfo) {
 
 async function submitForm() {
   if (formSubmitting.value) return
-  if (isEditMode.value && !form.lease_duration) {
+  if (isEditMode.value && form.group_type !== 'RemoteDesktop' && !form.lease_duration) {
     toast.error('请输入有效的 IP 租期')
     return
   }
@@ -91,21 +91,18 @@ async function submitForm() {
   try {
     if (isEditMode.value) {
       await networkApi.update(form.network_code, {
-        gateway: form.gateway,
-        netmask: form.netmask,
-        lease_duration: form.lease_duration as number,
+        ...(form.group_type === 'RemoteDesktop' ? {} : { gateway: form.gateway, netmask: form.netmask, lease_duration: form.lease_duration as number }),
         network_type: form.network_type,
         group_type: form.group_type,
       })
     } else {
       const payload: CreateNetworkPayload = {
         network_code: form.network_code,
-        gateway: form.gateway,
-        netmask: form.netmask,
+        ...(form.group_type === 'RemoteDesktop' ? {} : { gateway: form.gateway, netmask: form.netmask }),
         network_type: form.network_type,
         group_type: form.group_type,
       }
-      if (form.lease_duration) payload.lease_duration = form.lease_duration
+      if (form.group_type !== 'RemoteDesktop' && form.lease_duration) payload.lease_duration = form.lease_duration
       await networkApi.create(payload)
     }
     showFormModal.value = false
@@ -227,11 +224,11 @@ async function executeDelete() {
               私有网络：仅允许设备列表中已有的设备 ID 连接，新设备需先手动添加。
             </template>
             <template v-else>
-              公开网络：允许新设备直接注册，服务端会自动分配并记录设备。
+              公开组允许新设备直接注册并记录设备；远程连接组使用客户端提供的连接 ID。
             </template>
           </p>
         </div>
-        <div>
+        <div v-if="form.group_type !== 'RemoteDesktop'">
           <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">网关地址</label>
           <input
             v-model.trim="form.gateway"
@@ -241,7 +238,7 @@ async function executeDelete() {
             required
           />
         </div>
-        <div>
+        <div v-if="form.group_type !== 'RemoteDesktop'">
           <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">掩码长度</label>
           <input
             v-model.number="form.netmask"
@@ -253,7 +250,7 @@ async function executeDelete() {
             required
           />
         </div>
-        <div>
+        <div v-if="form.group_type !== 'RemoteDesktop'">
           <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">IP 租期（秒）</label>
           <input
             v-model.number="form.lease_duration"

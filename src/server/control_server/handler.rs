@@ -120,11 +120,15 @@ impl ControlHandler {
         let session = self.session.insert(session);
 
         let reg_msg_response = RegResponseMsg {
+            connection_id: (session.network_state.group_type()
+                == crate::server::control_server::db::GroupType::RemoteDesktop)
+                .then(|| u32::from(session.ip)),
             ip: session.ip,
             prefix_len: session.network_state.net_prefix_len(),
             gateway: session.network_state.gateway(),
             server_version: env!("CARGO_PKG_VERSION").to_string(),
-            subnet_sync_supported: true,
+            subnet_sync_supported: session.network_state.group_type()
+                != crate::server::control_server::db::GroupType::RemoteDesktop,
             subscription_config_supported: false,
             subscription: None,
             server_instance_id: self.control_service.server_instance_id(),
@@ -245,6 +249,11 @@ impl ControlHandler {
         };
         match msg_type {
             MsgType::Turn => {
+                if session.network_state.group_type()
+                    == crate::server::control_server::db::GroupType::RemoteDesktop
+                {
+                    return Ok(());
+                }
                 if let Some(reply) = Self::handle_icmp_ping(&packet) {
                     _ = sender.try_send(reply);
                 }
@@ -356,6 +365,11 @@ impl ControlHandler {
                 self.handle_rpc(session, &sender, &packet)?;
             }
             MsgType::SubnetSyncReq => {
+                anyhow::ensure!(
+                    session.network_state.group_type()
+                        != crate::server::control_server::db::GroupType::RemoteDesktop,
+                    "远程连接组不支持子网同步"
+                );
                 let request = SubnetSyncRequest::from_slice(packet.payload())?;
                 let (snapshot_hash, nodes) = self
                     .control_service

@@ -349,6 +349,64 @@ pub fn resolve_cert_mode(certificate_fingerprint: Option<&str>) -> anyhow::Resul
     Ok(format!("finger:{}", fingerprint.to_ascii_lowercase()))
 }
 
+/// Only transport policy is meaningful for remote connection groups.
+pub fn validate_remote_advanced_config(source: &str) -> anyhow::Result<()> {
+    let table: toml::Table = toml::from_str(source)?;
+    for key in table.keys() {
+        anyhow::ensure!(
+            [
+                "password",
+                "peer_address",
+                "turn",
+                "punch_model",
+                "outbound_interface",
+                "udp_stun",
+                "tcp_stun",
+                "tunnel_addr",
+                "tunnel_port",
+                "no_punch",
+                "compress",
+                "rtx",
+                "fec"
+            ]
+            .contains(&key.as_str()),
+            "远程连接组不支持配置 {key}"
+        );
+    }
+    for key in ["turn", "punch_model"] {
+        for rule in table
+            .get(key)
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let rule = rule
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("{key} 必须是字符串数组"))?;
+            let mut parts = rule.split(',').map(str::trim);
+            parts
+                .next()
+                .unwrap_or_default()
+                .parse::<crate::connection_id::ConnectionId>()?;
+            let rest = parts.collect::<Vec<_>>();
+            anyhow::ensure!(!rest.is_empty(), "{key} 缺少规则参数");
+            if key == "turn" {
+                anyhow::ensure!(rest.len() == 1, "turn 格式为目标连接ID,中继连接ID");
+                rest[0].parse::<crate::connection_id::ConnectionId>()?;
+            } else {
+                for mode in rest {
+                    let normalized = mode.to_ascii_lowercase().replace(['-', '_'], "");
+                    anyhow::ensure!(
+                        ["ipv4tcp", "ipv4udp", "ipv6tcp", "ipv6udp"].contains(&normalized.as_str()),
+                        "无效的打洞模式 {mode}"
+                    );
+                }
+            }
+        }
+    }
+    validate_managed_advanced_config(source)
+}
+
 pub fn validate_managed_advanced_config(source: &str) -> anyhow::Result<()> {
     let table: toml::Table = if source.trim().is_empty() {
         Default::default()
@@ -950,5 +1008,38 @@ mod tests {
         assert!(
             canonicalize_stored_client_config("compress = 'yes'", "node", false, None).is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    #[test]
+    fn remote_configuration_accepts_only_transport_settings_and_id_targets() {
+        for source in [
+            "",
+            "compress=true",
+            "turn=['001,0001']",
+            "punch_model=['001,IPv4Tcp,IPv4Udp']",
+            "tunnel_port=29873",
+        ] {
+            super::validate_remote_advanced_config(source).unwrap();
+        }
+        for source in [
+            "mtu=1400",
+            "device_mode='no'",
+            "input=[]",
+            "output=[]",
+            "no_broadcast=true",
+            "allow_ikev2=false",
+            "allow_wireguard=false",
+            "allow_mapping=false",
+            "turn=['10.0.0.0/24,001']",
+            "punch_model=['10.0.0.1,IPv4Tcp']",
+        ] {
+            assert!(
+                super::validate_remote_advanced_config(source).is_err(),
+                "{source}"
+            );
+        }
     }
 }

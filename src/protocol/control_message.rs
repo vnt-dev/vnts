@@ -98,7 +98,16 @@ impl RegRequestMsg {
                 .map_err(|_| anyhow!("unknown client type"))?,
             network_code: msg.network_code,
             device_id: msg.device_id,
-            ip: msg.ip.map(|ip| ip.into()),
+            ip: if msg.client_type == ClientType::RemoteDesktop as i32 {
+                Some(
+                    crate::connection_id::ConnectionId::from_encoded(
+                        msg.connection_id.ok_or_else(|| anyhow!("缺少连接 ID"))?,
+                    )?
+                    .transport_key(),
+                )
+            } else {
+                msg.ip.map(Into::into)
+            },
             name: msg.name,
             version: msg.version,
             key_sign: msg.key_sign,
@@ -117,7 +126,14 @@ impl RegRequestMsg {
             client_type: self.client_type as i32,
             network_code: self.network_code,
             device_id: self.device_id,
-            ip: self.ip.map(|ip| ip.into()),
+            connection_id: (self.client_type == ClientType::RemoteDesktop)
+                .then(|| self.ip.map(u32::from))
+                .flatten(),
+            ip: if self.client_type == ClientType::RemoteDesktop {
+                None
+            } else {
+                self.ip.map(u32::from)
+            },
             name: self.name,
             version: self.version,
             key_sign: self.key_sign,
@@ -138,6 +154,7 @@ impl RegRequestMsg {
 }
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct RegResponseMsg {
+    pub connection_id: Option<u32>,
     pub ip: Ipv4Addr,
     pub prefix_len: u8,
     pub gateway: Ipv4Addr,
@@ -152,7 +169,12 @@ pub struct RegResponseMsg {
 impl RegResponseMsg {
     pub fn to(self) -> proto::RegResponseMsg {
         proto::RegResponseMsg {
-            ip: self.ip.into(),
+            connection_id: self.connection_id,
+            ip: if self.connection_id.is_some() {
+                0
+            } else {
+                self.ip.into()
+            },
             prefix_len: self.prefix_len as _,
             gateway: self.gateway.into(),
             server_version: self.server_version,
@@ -275,6 +297,7 @@ pub struct SubscriptionPing {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct SubscriptionConfigEnvelope {
+    pub connection_id: Option<u32>,
     pub revision: u64,
     pub toml: String,
     pub managed_ip: Ipv4Addr,
@@ -296,7 +319,12 @@ impl SubscriptionConfigEnvelope {
             revision: self.revision,
             config: Some(proto::SubscriptionConfigV1 {
                 toml: self.toml,
-                managed_ip: u32::from(self.managed_ip),
+                connection_id: self.connection_id,
+                managed_ip: if self.connection_id.is_some() {
+                    0
+                } else {
+                    u32::from(self.managed_ip)
+                },
                 managed_prefix_len: self.managed_prefix_len.into(),
                 managed_device_name: self.managed_device_name,
             }),
@@ -338,7 +366,7 @@ impl SubscriptionConfigAck {
             apply_mode: msg.apply_mode,
             changed_fields: msg.changed_fields,
             effective_device_name: msg.effective_device_name,
-            effective_ip: Ipv4Addr::from(msg.effective_ip),
+            effective_ip: Ipv4Addr::from(msg.effective_connection_id.unwrap_or(msg.effective_ip)),
             effective_prefix_len: msg.effective_prefix_len,
             effective_output: msg
                 .effective_output
@@ -358,6 +386,7 @@ impl SubscriptionConfigAck {
 
     fn to(self) -> proto::SubscriptionConfigAck {
         proto::SubscriptionConfigAck {
+            effective_connection_id: None,
             revision: self.revision,
             status: self.status as i32,
             error: self.error,
@@ -459,11 +488,20 @@ pub struct FastRegRequestMsg {
 
 impl FastRegRequestMsg {
     pub fn from(msg: proto::FastRegRequestMsg) -> anyhow::Result<Self> {
-        Ok(Self { ip: msg.ip.into() })
+        Ok(Self {
+            ip: if let Some(value) = msg.connection_id {
+                crate::connection_id::ConnectionId::from_encoded(value)?.transport_key()
+            } else {
+                msg.ip.into()
+            },
+        })
     }
 
     pub fn to(self) -> proto::FastRegRequestMsg {
-        proto::FastRegRequestMsg { ip: self.ip.into() }
+        proto::FastRegRequestMsg {
+            ip: self.ip.into(),
+            connection_id: None,
+        }
     }
 }
 

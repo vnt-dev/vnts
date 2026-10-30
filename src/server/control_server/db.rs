@@ -11,6 +11,29 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::Path;
 
+const DEVICE_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS devices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id TEXT NOT NULL,
+            network_code TEXT NOT NULL,
+            ip TEXT,
+            ip_type INTEGER NOT NULL DEFAULT 0,
+            client_type INTEGER NOT NULL DEFAULT 0,
+            ikev2_password TEXT,
+            ikev2_output_subnets TEXT NOT NULL DEFAULT '[]',
+            ikev2_input_routes TEXT NOT NULL DEFAULT '[]',
+            wireguard_output_subnets TEXT NOT NULL DEFAULT '[]',
+            wireguard_input_routes TEXT NOT NULL DEFAULT '[]',
+            wireguard_dns TEXT NOT NULL DEFAULT '[]',
+            wireguard_private_key TEXT,
+            wireguard_public_key TEXT,
+            device_name TEXT NOT NULL,
+            device_version TEXT NOT NULL,
+            last_connect_time INTEGER NOT NULL,
+            tx_bytes INTEGER NOT NULL DEFAULT 0,
+            rx_bytes INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(device_id, network_code)
+        )";
+
 static DB_POOL: OnceCell<SqlitePool> = OnceCell::new();
 const DB_FILE: &str = "network_control.db";
 
@@ -215,6 +238,20 @@ pub struct Ikev2InputRoute {
     pub target_ip: Ipv4Addr,
 }
 
+fn device_transport_key(row: &SqliteRow) -> Result<Option<String>, sqlx::Error> {
+    if row.try_get::<i32, _>("client_type")? == ClientType::RemoteDesktop as i32 {
+        return row
+            .try_get::<Option<u32>, _>("connection_id")?
+            .map(|value| {
+                crate::connection_id::ConnectionId::from_encoded(value)
+                    .map(|id| id.transport_key().to_string())
+                    .map_err(|error| sqlx::Error::Decode(error.into()))
+            })
+            .transpose();
+    }
+    row.try_get("ip")
+}
+
 fn decode_json_column<T: DeserializeOwned>(
     row: &SqliteRow,
     column: &str,
@@ -334,34 +371,12 @@ pub async fn init_db_pool() -> anyhow::Result<()> {
         .execute(&pool)
         .await;
 
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS devices (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_id TEXT NOT NULL,
-            network_code TEXT NOT NULL,
-            ip TEXT,
-            ip_type INTEGER NOT NULL DEFAULT 0,
-            client_type INTEGER NOT NULL DEFAULT 0,
-            ikev2_password TEXT,
-            ikev2_output_subnets TEXT NOT NULL DEFAULT '[]',
-            ikev2_input_routes TEXT NOT NULL DEFAULT '[]',
-            wireguard_output_subnets TEXT NOT NULL DEFAULT '[]',
-            wireguard_input_routes TEXT NOT NULL DEFAULT '[]',
-            wireguard_dns TEXT NOT NULL DEFAULT '[]',
-            wireguard_private_key TEXT,
-            wireguard_public_key TEXT,
-            device_name TEXT NOT NULL,
-            device_version TEXT NOT NULL,
-            last_connect_time INTEGER NOT NULL,
-            tx_bytes INTEGER NOT NULL DEFAULT 0,
-            rx_bytes INTEGER NOT NULL DEFAULT 0,
-            UNIQUE(device_id, network_code)
-        )",
-    )
-    .execute(&pool)
-    .await
-    .context("Failed to create devices table")?;
+    sqlx::query(DEVICE_TABLE_SQL)
+        .execute(&pool)
+        .await
+        .context("Failed to create devices table")?;
 
+    migrate_connection_id_schema(&pool).await?;
     let _ = sqlx::query("ALTER TABLE devices ADD COLUMN ip_type INTEGER NOT NULL DEFAULT 0")
         .execute(&pool)
         .await;
@@ -688,16 +703,40 @@ pub async fn load_device_counts() -> anyhow::Result<HashMap<String, u32>> {
         .context("Failed to decode device counts")
 }
 
+async fn migrate_connection_id_schema(pool: &SqlitePool) -> anyhow::Result<()> {
+    add_column_if_missing(
+        pool,
+        "ALTER TABLE devices ADD COLUMN connection_id INTEGER",
+        "connection_id",
+    )
+    .await?;
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS devices_connection_id ON devices(network_code, connection_id) WHERE connection_id IS NOT NULL").execute(pool).await?;
+    Ok(())
+}
+
 pub async fn save_or_update_device(device: &DeviceRecord) -> anyhow::Result<()> {
     let Some(pool) = DB_POOL.get() else {
         return Ok(());
     };
 
+    save_or_update_device_on(pool, device).await
+}
+
+async fn save_or_update_device_on(pool: &SqlitePool, device: &DeviceRecord) -> anyhow::Result<()> {
+    if device.client_type == ClientType::RemoteDesktop {
+        let key: Ipv4Addr = device
+            .ip
+            .as_deref()
+            .context("远程设备缺少连接 ID")?
+            .parse()?;
+        crate::connection_id::ConnectionId::from_encoded(u32::from(key))?;
+    }
     sqlx::query(
-        r#"INSERT INTO devices (device_id, network_code, ip, ip_type, client_type, ikev2_password, ikev2_output_subnets, ikev2_input_routes, wireguard_output_subnets, wireguard_input_routes, wireguard_dns, wireguard_private_key, wireguard_public_key, device_name, device_version, last_connect_time, tx_bytes, rx_bytes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        r#"INSERT INTO devices (device_id, network_code, ip, ip_type, client_type, ikev2_password, ikev2_output_subnets, ikev2_input_routes, wireguard_output_subnets, wireguard_input_routes, wireguard_dns, wireguard_private_key, wireguard_public_key, device_name, device_version, last_connect_time, tx_bytes, rx_bytes, connection_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(device_id, network_code) DO UPDATE SET
                ip = excluded.ip,
+               connection_id = excluded.connection_id,
                ip_type = excluded.ip_type,
                client_type = excluded.client_type,
                ikev2_password = excluded.ikev2_password,
@@ -716,7 +755,7 @@ pub async fn save_or_update_device(device: &DeviceRecord) -> anyhow::Result<()> 
     )
     .bind(&device.device_id)
     .bind(&device.network_code)
-    .bind(&device.ip)
+    .bind(if device.client_type == ClientType::RemoteDesktop { None } else { device.ip.as_deref() })
     .bind(device.ip_type as i32)
     .bind(device.client_type as i32)
     .bind(&device.ikev2_password)
@@ -732,6 +771,9 @@ pub async fn save_or_update_device(device: &DeviceRecord) -> anyhow::Result<()> 
     .bind(device.last_connect_time)
     .bind(device.tx_bytes)
     .bind(device.rx_bytes)
+    .bind(if device.client_type == ClientType::RemoteDesktop {
+        Some(i64::from(u32::from(device.ip.as_deref().context("远程设备缺少连接 ID")?.parse::<Ipv4Addr>()?)))
+    } else { None })
     .execute(pool)
     .await
     .context("Failed to save or update device")?;
@@ -760,7 +802,7 @@ async fn release_device_ip_on(
     sqlx::query(
         r#"UPDATE devices
            SET ip = NULL
-           WHERE network_code = ? AND device_id = ?
+           WHERE network_code = ? AND device_id = ? AND client_type != 3
              AND NOT EXISTS (
                  SELECT 1 FROM vnt_device_configs
                  WHERE vnt_device_configs.network_code = devices.network_code
@@ -786,7 +828,7 @@ pub async fn get_device(
     };
 
     let row_option = sqlx::query(
-        r#"SELECT device_id, network_code, ip, ip_type, client_type, ikev2_password, ikev2_output_subnets, ikev2_input_routes, wireguard_output_subnets, wireguard_input_routes, wireguard_dns, wireguard_private_key, wireguard_public_key, device_name, device_version, last_connect_time,
+        r#"SELECT device_id, network_code, ip, connection_id, ip_type, client_type, ikev2_password, ikev2_output_subnets, ikev2_input_routes, wireguard_output_subnets, wireguard_input_routes, wireguard_dns, wireguard_private_key, wireguard_public_key, device_name, device_version, last_connect_time,
            COALESCE(tx_bytes, 0) as tx_bytes, COALESCE(rx_bytes, 0) as rx_bytes
            FROM devices WHERE network_code = ? AND device_id = ?"#,
     )
@@ -800,7 +842,7 @@ pub async fn get_device(
         Some(row) => Ok(Some(DeviceRecord {
             device_id: row.get("device_id"),
             network_code: row.get("network_code"),
-            ip: row.get("ip"),
+            ip: device_transport_key(&row)?,
             ip_type: DeviceIpType::from_i32(row.get("ip_type")),
             client_type: ClientType::from_i32(row.get("client_type")),
             ikev2_password: row.get("ikev2_password"),
@@ -827,7 +869,7 @@ pub async fn load_all_devices(network_code: &str) -> anyhow::Result<Vec<DeviceRe
     };
 
     let records: Vec<DeviceRecord> = sqlx::query(
-        r#"SELECT device_id, network_code, ip, ip_type, client_type, ikev2_password, ikev2_output_subnets, ikev2_input_routes, wireguard_output_subnets, wireguard_input_routes, wireguard_dns, wireguard_private_key, wireguard_public_key, device_name, device_version, last_connect_time,
+        r#"SELECT device_id, network_code, ip, connection_id, ip_type, client_type, ikev2_password, ikev2_output_subnets, ikev2_input_routes, wireguard_output_subnets, wireguard_input_routes, wireguard_dns, wireguard_private_key, wireguard_public_key, device_name, device_version, last_connect_time,
            COALESCE(tx_bytes, 0) as tx_bytes, COALESCE(rx_bytes, 0) as rx_bytes
            FROM devices WHERE network_code = ?"#,
     )
@@ -837,7 +879,7 @@ pub async fn load_all_devices(network_code: &str) -> anyhow::Result<Vec<DeviceRe
         Ok(Some(DeviceRecord {
             device_id: row.try_get("device_id")?,
             network_code: row.try_get("network_code")?,
-            ip: row.try_get("ip")?,
+            ip: device_transport_key(&row)?,
             ip_type: DeviceIpType::from_i32(row.try_get("ip_type")?),
             client_type: ClientType::from_i32(row.try_get("client_type")?),
             ikev2_password: row.try_get("ikev2_password")?,
@@ -867,7 +909,7 @@ pub async fn load_all_ikev2_devices() -> anyhow::Result<Vec<DeviceRecord>> {
         return Ok(Vec::new());
     };
     let rows = sqlx::query(
-        r#"SELECT device_id, network_code, ip, ip_type, client_type, ikev2_password, ikev2_output_subnets, ikev2_input_routes, wireguard_output_subnets, wireguard_input_routes, wireguard_dns, wireguard_private_key, wireguard_public_key, device_name, device_version, last_connect_time,
+        r#"SELECT device_id, network_code, ip, connection_id, ip_type, client_type, ikev2_password, ikev2_output_subnets, ikev2_input_routes, wireguard_output_subnets, wireguard_input_routes, wireguard_dns, wireguard_private_key, wireguard_public_key, device_name, device_version, last_connect_time,
            COALESCE(tx_bytes, 0) as tx_bytes, COALESCE(rx_bytes, 0) as rx_bytes
            FROM devices WHERE client_type = 1"#,
     )
@@ -879,7 +921,7 @@ pub async fn load_all_ikev2_devices() -> anyhow::Result<Vec<DeviceRecord>> {
             Ok(DeviceRecord {
                 device_id: row.try_get("device_id")?,
                 network_code: row.try_get("network_code")?,
-                ip: row.try_get("ip")?,
+                ip: device_transport_key(&row)?,
                 ip_type: DeviceIpType::from_i32(row.try_get("ip_type")?),
                 client_type: ClientType::from_i32(row.try_get("client_type")?),
                 ikev2_password: row.try_get("ikev2_password")?,
@@ -906,7 +948,7 @@ pub async fn load_all_wireguard_devices() -> anyhow::Result<Vec<DeviceRecord>> {
         return Ok(Vec::new());
     };
     let rows = sqlx::query(
-        r#"SELECT device_id, network_code, ip, ip_type, client_type, ikev2_password, ikev2_output_subnets, ikev2_input_routes, wireguard_output_subnets, wireguard_input_routes, wireguard_dns, wireguard_private_key, wireguard_public_key, device_name, device_version, last_connect_time,
+        r#"SELECT device_id, network_code, ip, connection_id, ip_type, client_type, ikev2_password, ikev2_output_subnets, ikev2_input_routes, wireguard_output_subnets, wireguard_input_routes, wireguard_dns, wireguard_private_key, wireguard_public_key, device_name, device_version, last_connect_time,
            COALESCE(tx_bytes, 0) as tx_bytes, COALESCE(rx_bytes, 0) as rx_bytes
            FROM devices WHERE client_type = 2"#,
     )
@@ -918,7 +960,7 @@ pub async fn load_all_wireguard_devices() -> anyhow::Result<Vec<DeviceRecord>> {
             Ok(DeviceRecord {
                 device_id: row.try_get("device_id")?,
                 network_code: row.try_get("network_code")?,
-                ip: row.try_get("ip")?,
+                ip: device_transport_key(&row)?,
                 ip_type: DeviceIpType::from_i32(row.try_get("ip_type")?),
                 client_type: ClientType::from_i32(row.try_get("client_type")?),
                 ikev2_password: row.try_get("ikev2_password")?,
@@ -998,11 +1040,16 @@ fn managed_record_from_row(row: SqliteRow) -> Result<ManagedConfigRecord, sqlx::
         join_id: row.try_get("join_id")?,
         updated_at: row.try_get("updated_at")?,
         configured_device_name: row.try_get("configured_device_name")?,
-        configured_ip: row
-            .try_get::<Option<String>, _>("configured_ip")?
-            .map(|value| value.parse())
-            .transpose()
-            .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,
+        configured_ip: if let Some(value) =
+            row.try_get::<Option<u32>, _>("configured_connection_id")?
+        {
+            Some(Ipv4Addr::from(value))
+        } else {
+            row.try_get::<Option<String>, _>("configured_ip")?
+                .map(|value| value.parse())
+                .transpose()
+                .map_err(|error| sqlx::Error::Decode(Box::new(error)))?
+        },
         fixed_ip: row
             .try_get::<Option<String>, _>("fixed_ip")?
             .map(|value| value.parse())
@@ -1021,7 +1068,7 @@ pub async fn get_managed_config(
     let row = sqlx::query(
         "SELECT c.network_code, c.device_id, c.revision, c.config_toml, c.subscription_server, c.traffic_servers_override, c.credential_key, c.subscription,
                 COALESCE(c.join_id, '') AS join_id,
-                c.updated_at, d.device_name AS configured_device_name, d.ip AS configured_ip,
+                c.updated_at, d.device_name AS configured_device_name, d.ip AS configured_ip, d.connection_id AS configured_connection_id,
                 CASE WHEN d.ip_type = 2 THEN d.ip ELSE NULL END AS fixed_ip
          FROM vnt_device_configs c
          JOIN devices d ON d.network_code = c.network_code AND d.device_id = c.device_id
@@ -1051,7 +1098,7 @@ pub async fn get_managed_config_by_join_id(
     let row = sqlx::query(
         "SELECT c.network_code, c.device_id, c.revision, c.config_toml, c.subscription_server, c.traffic_servers_override, c.credential_key, c.subscription,
                 COALESCE(c.join_id, '') AS join_id,
-                c.updated_at, d.device_name AS configured_device_name, d.ip AS configured_ip,
+                c.updated_at, d.device_name AS configured_device_name, d.ip AS configured_ip, d.connection_id AS configured_connection_id,
                 CASE WHEN d.ip_type = 2 THEN d.ip ELSE NULL END AS fixed_ip
          FROM vnt_device_configs c
          JOIN devices d ON d.network_code = c.network_code AND d.device_id = c.device_id
@@ -1099,7 +1146,7 @@ pub async fn list_managed_configs() -> anyhow::Result<Vec<ManagedConfigRecord>> 
     let rows = sqlx::query(
         "SELECT c.network_code, c.device_id, c.revision, c.config_toml, c.subscription_server, c.traffic_servers_override, c.credential_key, c.subscription,
                 COALESCE(c.join_id, '') AS join_id,
-                c.updated_at, d.device_name AS configured_device_name, d.ip AS configured_ip,
+                c.updated_at, d.device_name AS configured_device_name, d.ip AS configured_ip, d.connection_id AS configured_connection_id,
                 CASE WHEN d.ip_type = 2 THEN d.ip ELSE NULL END AS fixed_ip
          FROM vnt_device_configs c
          JOIN devices d ON d.network_code = c.network_code AND d.device_id = c.device_id",
@@ -1420,6 +1467,7 @@ mod tests {
                 network_code TEXT NOT NULL,
                 device_id TEXT NOT NULL,
                 ip TEXT,
+                client_type INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(network_code, device_id)
             )",
         )
@@ -1549,5 +1597,95 @@ mod tests {
         assert_eq!(rows[0].get::<i32, _>("network_type"), 0);
         assert_eq!(rows[1].get::<i32, _>("network_type"), 1);
         assert!(rows.iter().all(|row| row.get::<i32, _>("group_type") == 0));
+    }
+    #[tokio::test]
+    async fn remote_ids_are_integer_unique_per_group_and_survive_database_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("remote.db").display()
+        );
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        sqlx::query(super::DEVICE_TABLE_SQL)
+            .execute(&pool)
+            .await
+            .unwrap();
+        super::migrate_connection_id_schema(&pool).await.unwrap();
+        super::migrate_connection_id_schema(&pool).await.unwrap();
+        let record = |device: &str, group: &str, id: &str| super::DeviceRecord {
+            device_id: device.into(),
+            network_code: group.into(),
+            ip: Some(
+                id.parse::<crate::connection_id::ConnectionId>()
+                    .unwrap()
+                    .transport_key()
+                    .to_string(),
+            ),
+            ip_type: super::DeviceIpType::Fixed,
+            client_type: super::ClientType::RemoteDesktop,
+            ikev2_password: None,
+            ikev2_output_subnets: vec![],
+            ikev2_input_routes: vec![],
+            wireguard_output_subnets: vec![],
+            wireguard_input_routes: vec![],
+            wireguard_dns: vec![],
+            wireguard_private_key: None,
+            wireguard_public_key: None,
+            device_name: device.into(),
+            device_version: String::new(),
+            last_connect_time: 0,
+            tx_bytes: 0,
+            rx_bytes: 0,
+        };
+        super::save_or_update_device_on(&pool, &record("a", "group", "001"))
+            .await
+            .unwrap();
+        assert!(
+            super::save_or_update_device_on(&pool, &record("b", "group", "001"))
+                .await
+                .is_err()
+        );
+        super::save_or_update_device_on(&pool, &record("b", "group", "0001"))
+            .await
+            .unwrap();
+        super::save_or_update_device_on(&pool, &record("a", "other-group", "001"))
+            .await
+            .unwrap();
+        let row = sqlx::query("SELECT ip, connection_id, typeof(connection_id) AS storage FROM devices WHERE network_code='group' AND device_id='a'").fetch_one(&pool).await.unwrap();
+        assert_eq!(row.get::<Option<String>, _>("ip"), None);
+        assert_eq!(row.get::<u32, _>("connection_id"), 1001);
+        assert_eq!(row.get::<String, _>("storage"), "integer");
+        pool.close().await;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        let row = sqlx::query("SELECT * FROM devices WHERE network_code='group' AND device_id='a'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let key = super::device_transport_key(&row)
+            .unwrap()
+            .unwrap()
+            .parse::<std::net::Ipv4Addr>()
+            .unwrap();
+        assert_eq!(
+            crate::connection_id::ConnectionId::from_encoded(u32::from(key))
+                .unwrap()
+                .to_string(),
+            "001"
+        );
+        super::save_or_update_device_on(&pool, &record("a", "group", "0"))
+            .await
+            .unwrap();
+        super::save_or_update_device_on(&pool, &record("c", "group", "001"))
+            .await
+            .unwrap();
+        pool.close().await;
     }
 }

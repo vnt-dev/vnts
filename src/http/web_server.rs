@@ -430,7 +430,7 @@ async fn get_device_wireguard_access(
     let Some(network) = network else {
         return no_store(ApiResponse::<()>::err("网络不存在").into_response());
     };
-    let mut allowed_ips = vec![network.net.to_string()];
+    let mut allowed_ips = vec![network.net.map(|net| net.to_string()).unwrap_or_default()];
     for subnet in wireguard_input_routes
         .iter()
         .map(|route| route.subnet.to_string())
@@ -453,7 +453,7 @@ async fn get_device_wireguard_access(
     };
     let config_text = format!(
         "[Interface]\nPrivateKey = {private_key}\nAddress = {ip}/{}{dns_line}\n\n[Peer]\nPublicKey = {server_public_key}\nAllowedIPs = {}\nEndpoint = {}\nPersistentKeepalive = {}\n",
-        network.netmask,
+        network.netmask.unwrap_or(0),
         allowed_ips.join(", "),
         service_config.endpoint,
         service_config.persistent_keepalive,
@@ -467,7 +467,7 @@ async fn get_device_wireguard_access(
                 state.control_service.get_wireguard_runtime_error(),
             ),
             network_code,
-            network_net: network.net.to_string(),
+            network_net: network.net.map(|net| net.to_string()).unwrap_or_default(),
             device_id,
             private_key,
             public_key,
@@ -534,7 +534,7 @@ async fn network_net(state: &AppState, network_code: &str) -> Option<String> {
         .await
         .into_iter()
         .find(|network| network.network_code == network_code)
-        .map(|network| network.net.to_string())
+        .map(|network| network.net.map(|net| net.to_string()).unwrap_or_default())
 }
 
 async fn get_ikev2_settings(State(state): State<AppState>) -> Response {
@@ -1095,6 +1095,7 @@ struct ManagedConfigRequest {
     traffic_servers_override: Option<Option<Vec<String>>>,
     client_config: Option<ManagedClientConfigForm>,
     device_name: Option<String>,
+    #[serde(default, alias = "connection_id")]
     ip: Option<String>,
     ip_type: Option<DeviceIpType>,
 }
@@ -1113,6 +1114,7 @@ struct CreateManagedDeviceRequest {
     network_code: String,
     device_id: String,
     device_name: String,
+    #[serde(default, alias = "connection_id")]
     ip: String,
     ip_type: Option<DeviceIpType>,
     #[serde(default)]
@@ -1312,11 +1314,30 @@ async fn create_managed_device(
     State(state): State<AppState>,
     Json(body): Json<CreateManagedDeviceRequest>,
 ) -> Response {
-    let ip: Ipv4Addr = match body.ip.parse() {
+    let remote =
+        state.control_service.get_group_type(&body.network_code) == Some(GroupType::RemoteDesktop);
+    let ip: Ipv4Addr = match if remote {
+        body.ip
+            .parse::<crate::connection_id::ConnectionId>()
+            .map(|id| id.transport_key())
+    } else {
+        body.ip.parse::<Ipv4Addr>().map_err(anyhow::Error::from)
+    } {
         Ok(ip) => ip,
-        Err(_) => return ApiResponse::<()>::err("无效的 IP 地址").into_response(),
+        Err(_) => {
+            return ApiResponse::<()>::err(if remote {
+                "连接 ID 必须为 1～9 位纯数字"
+            } else {
+                "无效的 IP 地址"
+            })
+            .into_response();
+        }
     };
-    let ip_type = body.ip_type.unwrap_or(DeviceIpType::Dynamic);
+    let ip_type = if remote {
+        DeviceIpType::Fixed
+    } else {
+        body.ip_type.unwrap_or(DeviceIpType::Dynamic)
+    };
     let form_traffic_servers = body
         .client_config
         .as_ref()
@@ -1353,6 +1374,11 @@ async fn create_managed_device(
     };
     if body.client_config.is_none()
         && let Err(error) = validate_managed_advanced_config(&editable_toml)
+    {
+        return ApiResponse::<()>::err(error.to_string()).into_response();
+    }
+    if remote
+        && let Err(error) = crate::managed_config::validate_remote_advanced_config(&editable_toml)
     {
         return ApiResponse::<()>::err(error.to_string()).into_response();
     }
@@ -1536,12 +1562,30 @@ async fn put_managed_device_config(
         Ok(value) => value,
         Err(error) => return ApiResponse::<()>::err(error.to_string()).into_response(),
     };
+    let remote = device.client_type == ClientType::RemoteDesktop;
+    let requested_key = if remote {
+        match body
+            .ip
+            .as_deref()
+            .map(str::parse::<crate::connection_id::ConnectionId>)
+            .transpose()
+        {
+            Ok(value) => value.map(|id| id.transport_key().to_string()),
+            Err(error) => return ApiResponse::<()>::err(error.to_string()).into_response(),
+        }
+    } else {
+        body.ip.clone()
+    };
     let (old_ip, target_ip) =
-        match resolve_managed_device_ips(device.ip.as_deref(), body.ip.as_deref()) {
+        match resolve_managed_device_ips(device.ip.as_deref(), requested_key.as_deref()) {
             Ok(value) => value,
             Err(error) => return ApiResponse::<()>::err(error.to_string()).into_response(),
         };
-    let target_ip_type = body.ip_type.unwrap_or(device.ip_type);
+    let target_ip_type = if remote {
+        DeviceIpType::Fixed
+    } else {
+        body.ip_type.unwrap_or(device.ip_type)
+    };
     let target_device_name = body
         .device_name
         .clone()
@@ -1613,6 +1657,12 @@ async fn put_managed_device_config(
     } else {
         base_source
     };
+    if remote
+        && let Err(error) = editable_client_config(source)
+            .and_then(|editable| crate::managed_config::validate_remote_advanced_config(&editable))
+    {
+        return ApiResponse::<()>::err(error.to_string()).into_response();
+    }
     let fixed_ip = (target_ip_type == DeviceIpType::Fixed).then_some(target_ip);
     let normalized = match canonicalize_client_config(
         source,
@@ -2088,7 +2138,9 @@ async fn delete_peer_server(
 #[derive(Deserialize)]
 struct CreateNetworkRequest {
     network_code: String,
+    #[serde(default)]
     gateway: String,
+    #[serde(default)]
     netmask: u8,
     lease_duration: Option<u64>,
     network_type: Option<NetworkType>,
@@ -2099,14 +2151,23 @@ async fn create_network(
     State(state): State<AppState>,
     Json(body): Json<CreateNetworkRequest>,
 ) -> Response {
-    let gateway: Ipv4Addr = match body.gateway.parse() {
+    let is_remote = body
+        .group_type
+        .or_else(|| state.control_service.get_group_type(&body.network_code))
+        .unwrap_or_default()
+        == GroupType::RemoteDesktop;
+    let gateway: Ipv4Addr = match if is_remote {
+        Ok(Ipv4Addr::UNSPECIFIED)
+    } else {
+        body.gateway.parse()
+    } {
         Ok(ip) => ip,
         Err(_) => {
             return ApiResponse::<()>::err("无效的网关地址").into_response();
         }
     };
 
-    if body.netmask > 30 {
+    if !is_remote && body.netmask > 30 {
         return ApiResponse::<()>::err("无效的掩码").into_response();
     }
 
@@ -2131,8 +2192,11 @@ async fn create_network(
 
 #[derive(Deserialize)]
 struct UpdateNetworkRequest {
+    #[serde(default)]
     gateway: String,
+    #[serde(default)]
     netmask: u8,
+    #[serde(default)]
     lease_duration: u64,
     network_type: Option<NetworkType>,
     group_type: Option<GroupType>,
@@ -2143,14 +2207,23 @@ async fn update_network(
     Path(network_code): Path<String>,
     Json(body): Json<UpdateNetworkRequest>,
 ) -> Response {
-    let gateway: Ipv4Addr = match body.gateway.parse() {
+    let is_remote = body
+        .group_type
+        .or_else(|| state.control_service.get_group_type(&network_code))
+        .unwrap_or_default()
+        == GroupType::RemoteDesktop;
+    let gateway: Ipv4Addr = match if is_remote {
+        Ok(Ipv4Addr::UNSPECIFIED)
+    } else {
+        body.gateway.parse()
+    } {
         Ok(ip) => ip,
         Err(_) => {
             return ApiResponse::<()>::err("无效的网关地址").into_response();
         }
     };
 
-    if body.netmask > 30 {
+    if !is_remote && body.netmask > 30 {
         return ApiResponse::<()>::err("无效的掩码").into_response();
     }
 
@@ -2219,6 +2292,7 @@ struct CreateDeviceRequest {
     network_code: String,
     device_id: String,
     device_name: Option<String>,
+    #[serde(default, alias = "connection_id")]
     ip: String,
     ip_type: Option<DeviceIpType>,
     #[serde(default)]
@@ -2247,9 +2321,24 @@ async fn create_device(
     State(state): State<AppState>,
     Json(body): Json<CreateDeviceRequest>,
 ) -> Response {
-    let ip: Ipv4Addr = match body.ip.parse() {
+    let remote =
+        state.control_service.get_group_type(&body.network_code) == Some(GroupType::RemoteDesktop);
+    let ip: Ipv4Addr = match if remote {
+        body.ip
+            .parse::<crate::connection_id::ConnectionId>()
+            .map(|id| id.transport_key())
+    } else {
+        body.ip.parse::<Ipv4Addr>().map_err(anyhow::Error::from)
+    } {
         Ok(ip) => ip,
-        Err(_) => return ApiResponse::<()>::err("无效的 IP 地址").into_response(),
+        Err(_) => {
+            return ApiResponse::<()>::err(if remote {
+                "连接 ID 必须为 1～9 位纯数字"
+            } else {
+                "无效的 IP 地址"
+            })
+            .into_response();
+        }
     };
     let client_type = body.client_type;
     if state
@@ -2259,7 +2348,11 @@ async fn create_device(
     {
         return ApiResponse::<()>::err("客户端类型与组用途不匹配").into_response();
     }
-    let ip_type = body.ip_type.unwrap_or(DeviceIpType::Dynamic);
+    let ip_type = if remote {
+        DeviceIpType::Fixed
+    } else {
+        body.ip_type.unwrap_or(DeviceIpType::Dynamic)
+    };
     if matches!(client_type, ClientType::Vnt | ClientType::RemoteDesktop) {
         let device_name = body.device_name.unwrap_or_else(|| body.device_id.clone());
         return create_managed_device(
@@ -2308,6 +2401,7 @@ async fn create_device(
 struct UpdateDeviceRequest {
     network_code: String,
     device_name: Option<String>,
+    #[serde(default, alias = "connection_id")]
     ip: String,
     ip_type: DeviceIpType,
     ikev2_password: Option<String>,
@@ -2342,9 +2436,24 @@ async fn update_device(
         Ok(None) => return ApiResponse::<()>::err_code(404, "设备不存在").into_response(),
         Err(error) => return ApiResponse::<()>::err(error.to_string()).into_response(),
     }
-    let ip: Ipv4Addr = match body.ip.parse() {
+    let remote =
+        state.control_service.get_group_type(&body.network_code) == Some(GroupType::RemoteDesktop);
+    let ip: Ipv4Addr = match if remote {
+        body.ip
+            .parse::<crate::connection_id::ConnectionId>()
+            .map(|id| id.transport_key())
+    } else {
+        body.ip.parse::<Ipv4Addr>().map_err(anyhow::Error::from)
+    } {
         Ok(ip) => ip,
-        Err(_) => return ApiResponse::<()>::err("无效的 IP 地址").into_response(),
+        Err(_) => {
+            return ApiResponse::<()>::err(if remote {
+                "连接 ID 必须为 1～9 位纯数字"
+            } else {
+                "无效的 IP 地址"
+            })
+            .into_response();
+        }
     };
     match state
         .control_service

@@ -21,10 +21,10 @@ export interface Ikev2InputRoute {
 
 export interface NetworkInfo {
   network_code: string
-  gateway: string
-  netmask: number
-  net: string
-  lease_duration: number
+  gateway: string | null
+  netmask: number | null
+  net: string | null
+  lease_duration: number | null
   source: NetworkSource
   group_type: GroupType
   network_type: NetworkType
@@ -40,6 +40,8 @@ export interface DeviceInfo {
   current_device_name: string | null
   device_version: string
   client_type: ClientType
+  connection_id?: string | null
+  current_connection_id?: string | null
   ip: string | null
   current_ip: string | null
   ip_type: DeviceIpType | null
@@ -73,17 +75,17 @@ export interface DeviceInfo {
 
 export interface CreateNetworkPayload {
   network_code: string
-  gateway: string
-  netmask: number
+  gateway?: string
+  netmask?: number
   lease_duration?: number
   group_type?: GroupType
   network_type?: NetworkType
 }
 
 export interface UpdateNetworkPayload {
-  gateway: string
-  netmask: number
-  lease_duration: number
+  gateway?: string
+  netmask?: number
+  lease_duration?: number
   group_type?: GroupType
   network_type?: NetworkType
 }
@@ -92,7 +94,8 @@ export interface CreateDevicePayload {
   network_code: string
   device_id: string
   device_name?: string
-  ip: string
+  connection_id?: string
+  ip?: string
   ip_type?: DeviceIpType
   client_type: ClientType
   ikev2_password?: string
@@ -107,8 +110,9 @@ export interface CreateDevicePayload {
 export interface UpdateDevicePayload {
   network_code: string
   device_name?: string
-  ip: string
-  ip_type: DeviceIpType
+  connection_id?: string
+  ip?: string
+  ip_type?: DeviceIpType
   ikev2_password?: string
   ikev2_output_subnets?: string[]
   ikev2_input_routes?: Ikev2InputRoute[]
@@ -272,8 +276,9 @@ export interface CreateManagedDevicePayload {
   network_code: string
   device_id: string
   device_name: string
-  ip: string
-  ip_type: DeviceIpType
+  connection_id?: string
+  ip?: string
+  ip_type?: DeviceIpType
   config_toml: string
   subscription_server: string
   traffic_servers_override: string[]

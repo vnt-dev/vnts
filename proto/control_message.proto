@@ -15,6 +15,7 @@ enum ClientType {
 }
 
 message RegRequestMsg {
+  optional fixed32 connection_id = 16;
   ClientType client_type = 15;
     string network_code = 1;
     string device_id = 2;
@@ -34,6 +35,7 @@ message RegRequestMsg {
 
 
 message RegResponseMsg {
+  optional fixed32 connection_id = 11;
   bool application_channel_supported = 10;
     fixed32 ip = 1;
     uint32 prefix_len = 2;
@@ -69,6 +71,7 @@ message SubscriptionServerProof {
 }
 
 message SubscriptionConfigV1 {
+  optional fixed32 connection_id = 5;
   string toml = 1;
   fixed32 managed_ip = 2;
   uint32 managed_prefix_len = 3;
@@ -116,6 +119,7 @@ message SubscriptionConfigEnvelope {
 }
 
 message SubscriptionConfigAck {
+  optional fixed32 effective_connection_id = 15;
     uint64 revision = 1;
     SubscriptionConfigApplyStatus status = 2;
     string error = 3;
@@ -159,6 +163,7 @@ message ConfirmRegResponseMsg {
 }
 
 message FastRegRequestMsg {
+  optional fixed32 connection_id = 2;
     fixed32 ip = 1;
 }
 

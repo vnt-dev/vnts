@@ -131,6 +131,30 @@ export function parseAdvancedToml(source: string, base = emptyVntClientConfig())
   return { form, extras }
 }
 
-export function validateAdvancedToml(source: string): void {
+export const REMOTE_ADVANCED_CONFIG_TEMPLATE = `# 仅配置中继、打洞及通信参数；按需取消注释
+# peer_address = ["tcp://192.168.1.10:29873"]
+# turn = ["001,0001"]
+# punch_model = ["001,IPv4Tcp,IPv4Udp"]
+# no_punch = false
+# compress = false
+# udp_stun = ["stun.example.com:3478"]
+# tcp_stun = ["stun.example.com:3478"]
+# tunnel_port = 29873
+# outbound_interface = ""
+# password = ""
+`
+const remoteFields = new Set(['password', 'peer_address', 'turn', 'punch_model', 'outbound_interface', 'udp_stun', 'tcp_stun', 'tunnel_addr', 'tunnel_port', 'no_punch', 'compress', 'rtx', 'fec'])
+export function validateAdvancedToml(source: string, remote = false): void {
+  if (remote) {
+    const table = parse(source)
+    for (const key of Object.keys(table)) if (!remoteFields.has(key)) throw new Error(`远程连接组不支持配置 ${key}`)
+    for (const key of ['turn', 'punch_model']) {
+      for (const rule of expectStringArray(table, key)) {
+        const parts = rule.split(',').map(part => part.trim())
+        if (!/^[0-9]{1,9}$/.test(parts[0] ?? '') || parts.length < 2) throw new Error(`${key} 的目标必须为连接 ID`)
+        if (key === 'turn' && (parts.length !== 2 || !/^[0-9]{1,9}$/.test(parts[1] ?? ''))) throw new Error('turn 格式为目标连接ID,中继连接ID')
+      }
+    }
+  }
   parseAdvancedToml(source, emptyVntClientConfig())
 }

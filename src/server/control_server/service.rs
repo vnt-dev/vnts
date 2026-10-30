@@ -57,12 +57,25 @@ pub enum SubscriptionPushStatus {
 
 #[derive(Clone, Copy)]
 pub struct NetworkConfig {
-    pub net: Ipv4Net,
-    pub gateway: Ipv4Addr,
-    pub lease_duration: Duration,
+    pub net: Option<Ipv4Net>,
+    pub gateway: Option<Ipv4Addr>,
+    pub lease_duration: Option<Duration>,
     pub source: NetworkSource,
     pub network_type: NetworkType,
     pub group_type: GroupType,
+}
+
+impl NetworkConfig {
+    fn remote(source: NetworkSource, network_type: NetworkType) -> Self {
+        Self {
+            net: None,
+            gateway: None,
+            lease_duration: None,
+            source,
+            network_type,
+            group_type: GroupType::RemoteDesktop,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -311,10 +324,19 @@ impl ControlService {
 
         let mut config_nets = Self::build_config_networks(&custom_nets, lease_duration);
         for (code, group_type) in group_types {
-            config_nets
-                .get_mut(&code)
-                .ok_or_else(|| anyhow::anyhow!("group_types 中的编号不存在于 custom_nets: {code}"))?
-                .group_type = group_type;
+            if group_type == GroupType::RemoteDesktop {
+                config_nets.insert(
+                    code,
+                    NetworkConfig::remote(NetworkSource::Config, NetworkType::Public),
+                );
+            } else {
+                config_nets
+                    .get_mut(&code)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("group_types 中的组网编号不存在于 custom_nets: {code}")
+                    })?
+                    .group_type = group_type;
+            }
         }
         Self::save_config_networks_to_db(&config_nets).await;
         let db_nets = Self::merge_network_configs(Self::load_networks_from_db().await, config_nets);
@@ -450,9 +472,9 @@ impl ControlService {
             config_nets.insert(
                 code.clone(),
                 NetworkConfig {
-                    net,
-                    gateway,
-                    lease_duration,
+                    net: Some(net),
+                    gateway: Some(gateway),
+                    lease_duration: Some(lease_duration),
                     source: NetworkSource::Config,
                     network_type: NetworkType::Public,
                     group_type: GroupType::Network,
@@ -471,9 +493,12 @@ impl ControlService {
         for (code, config) in config_nets {
             let record = NetworkRecord {
                 network_code: code.clone(),
-                gateway: config.gateway.to_string(),
-                netmask: config.net.prefix_len(),
-                lease_duration: config.lease_duration.as_secs() as i64,
+                gateway: config
+                    .gateway
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                netmask: config.net.map(|value| value.prefix_len()).unwrap_or(0),
+                lease_duration: config.lease_duration.unwrap_or_default().as_secs() as i64,
                 source: NetworkSource::Config,
                 network_type: config.network_type,
                 group_type: config.group_type,
@@ -517,6 +542,13 @@ impl ControlService {
         match db::load_all_networks().await {
             Ok(records) => {
                 for record in records {
+                    if record.group_type == GroupType::RemoteDesktop {
+                        nets.insert(
+                            record.network_code,
+                            NetworkConfig::remote(record.source, record.network_type),
+                        );
+                        continue;
+                    }
                     let gateway = record.gateway.parse::<Ipv4Addr>();
                     if let (Some(net), Ok(gateway)) = (record.to_ipv4_net(), gateway)
                         && validate_gateway(net, gateway).is_ok()
@@ -524,9 +556,11 @@ impl ControlService {
                         nets.insert(
                             record.network_code,
                             NetworkConfig {
-                                net,
-                                gateway,
-                                lease_duration: Duration::from_secs(record.lease_duration as u64),
+                                net: Some(net),
+                                gateway: Some(gateway),
+                                lease_duration: Some(Duration::from_secs(
+                                    record.lease_duration as u64,
+                                )),
                                 source: record.source,
                                 network_type: record.network_type,
                                 group_type: record.group_type,
@@ -559,7 +593,7 @@ impl ControlService {
 
     async fn register_inner(
         &self,
-        mut reg_req: RegRequestMsg,
+        reg_req: RegRequestMsg,
         sender: Sender<Bytes>,
         client_type: ClientType,
     ) -> anyhow::Result<Session> {
@@ -596,10 +630,14 @@ impl ControlService {
         let _mutation_guard = mutation_lock.lock().await;
 
         let is_new_network = !self.db_nets.read().contains_key(&reg_req.network_code);
-        let mut config = self.network_config(&reg_req.network_code, reg_req.ip)?;
-        if is_new_network && client_type == ClientType::RemoteDesktop {
-            config.group_type = GroupType::RemoteDesktop;
-        }
+        let config = if is_new_network && client_type == ClientType::RemoteDesktop {
+            crate::connection_id::ConnectionId::from_encoded(u32::from(
+                reg_req.ip.context("远程设备必须配置连接 ID")?,
+            ))?;
+            NetworkConfig::remote(NetworkSource::DeviceRegister, NetworkType::Public)
+        } else {
+            self.network_config(&reg_req.network_code, reg_req.ip)?
+        };
         anyhow::ensure!(
             config.group_type.accepts(client_type),
             "客户端类型与组用途不匹配"
@@ -608,9 +646,12 @@ impl ControlService {
         if is_new_network {
             db::save_network(&NetworkRecord {
                 network_code: network_code.clone(),
-                gateway: config.gateway.to_string(),
-                netmask: config.net.prefix_len(),
-                lease_duration: config.lease_duration.as_secs() as i64,
+                gateway: config
+                    .gateway
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                netmask: config.net.map(|value| value.prefix_len()).unwrap_or(0),
+                lease_duration: config.lease_duration.unwrap_or_default().as_secs() as i64,
                 source: NetworkSource::DeviceRegister,
                 network_type: config.network_type,
                 group_type: config.group_type,
@@ -679,17 +720,12 @@ impl ControlService {
                 .filter(|device| device.id != reg_req.device_id)
                 .map(|device| Ipv4Addr::from(device.ip))
                 .collect::<HashSet<_>>();
-            if reg_req.ip.is_none()
-                && !excluded.is_empty()
-                && existing
-                    .as_ref()
-                    .and_then(|entry| entry.ip)
-                    .is_none_or(|ip| excluded.contains(&ip))
-            {
-                reg_req.ip = Some(state.first_available_ip_excluding(&excluded)?);
-            } else if reg_req.ip.is_some_and(|ip| excluded.contains(&ip)) {
-                bail!("请求的设备地址已在其他服务器使用");
-            }
+            let requested = existing
+                .as_ref()
+                .and_then(|entry| entry.ip)
+                .or(reg_req.ip)
+                .ok_or_else(|| anyhow::anyhow!("远程设备必须配置连接 ID"))?;
+            anyhow::ensure!(!excluded.contains(&requested), "连接 ID 已在其他服务器使用");
         }
 
         let (session, entry) = {
@@ -788,12 +824,15 @@ impl ControlService {
                 .as_secs() as i64;
             let record = NetworkRecord {
                 network_code: network_code.clone(),
-                gateway: config.gateway.to_string(),
-                netmask: config.net.prefix_len(),
-                lease_duration: config.lease_duration.as_secs() as i64,
+                gateway: config
+                    .gateway
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                netmask: config.net.map(|value| value.prefix_len()).unwrap_or(0),
+                lease_duration: config.lease_duration.unwrap_or_default().as_secs() as i64,
                 source: NetworkSource::DeviceRegister,
                 network_type: NetworkType::Public,
-                group_type: GroupType::Network,
+                group_type: config.group_type,
                 created_at: now,
             };
             tokio::spawn(async move {
@@ -939,10 +978,10 @@ impl ControlService {
             .db_nets
             .read()
             .get(&record.network_code)
-            .copied()
-            .context("受管设备所属网络不存在")?
+            .context("受管设备所属组不存在")?
             .net
-            .prefix_len();
+            .map(|net| net.prefix_len())
+            .unwrap_or(0);
         let source_server_id = hex::encode(self.server_instance_id.as_ref());
         let mut content = Sha256::new();
         content.update(toml.as_bytes());
@@ -951,6 +990,9 @@ impl ControlService {
         content.update(record.configured_device_name.as_bytes());
         let content_sha256 = content.finalize().to_vec();
         Ok(SubscriptionConfigEnvelope {
+            connection_id: (self.get_group_type(&record.network_code)
+                == Some(GroupType::RemoteDesktop))
+            .then(|| u32::from(managed_ip)),
             revision: record.revision as u64,
             toml,
             managed_ip,
@@ -971,6 +1013,19 @@ impl ControlService {
         random_id: u64,
         ack: SubscriptionConfigAck,
     ) -> anyhow::Result<Option<(bool, bool)>> {
+        if self.get_group_type(network_code) == Some(GroupType::RemoteDesktop) {
+            anyhow::ensure!(
+                ack.effective_output.is_empty()
+                    && !ack.allow_ikev2
+                    && !ack.allow_wireguard
+                    && !ack.allow_mapping
+                    && ack.effective_prefix_len == 0,
+                "远程连接组回执不能包含 VPN 配置"
+            );
+            if !ack.effective_ip.is_unspecified() {
+                crate::connection_id::ConnectionId::from_encoded(u32::from(ack.effective_ip))?;
+            }
+        }
         let identity = (network_code.to_string(), device_id.to_string());
         // ACKs may arrive concurrently through multiple links. Serialize the
         // complete state-and-database update with registration and other device
@@ -1324,9 +1379,9 @@ impl ControlService {
             (self.default_net, self.default_gateway)
         };
         Ok(NetworkConfig {
-            net,
-            gateway,
-            lease_duration: self.default_lease_duration,
+            net: Some(net),
+            gateway: Some(gateway),
+            lease_duration: Some(self.default_lease_duration),
             source: NetworkSource::DeviceRegister,
             network_type: NetworkType::Public,
             group_type: GroupType::Network,
@@ -1358,11 +1413,12 @@ impl ControlService {
         }
 
         let new_state = Arc::new(
-            NetworkState::new_from_db(
+            NetworkState::new_for_group(
                 network_code.clone(),
                 config.net,
                 config.gateway,
                 config.lease_duration,
+                config.group_type,
             )
             .await,
         );
@@ -1541,6 +1597,26 @@ impl ControlService {
             bail!("网络编号 '{}' 已存在", network_code);
         }
 
+        if group_type == GroupType::RemoteDesktop {
+            let original = self.db_nets.read().get(&network_code).copied();
+            let config = NetworkConfig::remote(NetworkSource::Manual, network_type);
+            if original.is_some() {
+                bail!("组编号已存在");
+            }
+            db::save_network(&NetworkRecord {
+                network_code: network_code.clone(),
+                gateway: String::new(),
+                netmask: 0,
+                lease_duration: 0,
+                source: config.source,
+                network_type,
+                group_type,
+                created_at: unix_now(),
+            })
+            .await?;
+            self.db_nets.write().insert(network_code, config);
+            return Ok(());
+        }
         let net = network_from_gateway(gateway, netmask)?;
         let lease_duration = lease_duration.unwrap_or(self.default_lease_duration);
         let now = std::time::SystemTime::now()
@@ -1564,9 +1640,9 @@ impl ControlService {
         self.db_nets.write().insert(
             network_code,
             NetworkConfig {
-                net,
-                gateway,
-                lease_duration,
+                net: Some(net),
+                gateway: Some(gateway),
+                lease_duration: Some(lease_duration),
                 source: NetworkSource::Manual,
                 network_type,
                 group_type,
@@ -1585,6 +1661,37 @@ impl ControlService {
         network_type: NetworkType,
         group_type: GroupType,
     ) -> anyhow::Result<()> {
+        if group_type == GroupType::RemoteDesktop {
+            let lock = self
+                .device_mutation_locks
+                .entry(network_code.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone();
+            let _guard = lock.lock().await;
+            let original = self
+                .db_nets
+                .read()
+                .get(network_code)
+                .copied()
+                .context("组不存在")?;
+            if original.group_type != group_type
+                && (db::network_has_devices(network_code).await?
+                    || self
+                        .get_network_state(network_code)
+                        .is_some_and(|state| state.count().0 > 0))
+            {
+                bail!("组内存在设备，不能修改组用途");
+            }
+            db::update_network(network_code, "", 0, 0, network_type, group_type).await?;
+            self.db_nets.write().insert(
+                network_code.to_string(),
+                NetworkConfig::remote(original.source, network_type),
+            );
+            if original.group_type != group_type {
+                self.network_state_provider.remove(network_code);
+            }
+            return Ok(());
+        }
         let net = network_from_gateway(gateway, netmask)?;
         let mutation_lock = self
             .device_mutation_locks
@@ -1600,9 +1707,9 @@ impl ControlService {
             .ok_or_else(|| anyhow::anyhow!("网络编号 '{}' 不存在", network_code))?;
 
         let topology_changed = original_config.group_type != group_type
-            || original_config.net != net
-            || original_config.gateway != gateway
-            || original_config.lease_duration != lease_duration;
+            || original_config.net != Some(net)
+            || original_config.gateway != Some(gateway)
+            || original_config.lease_duration != Some(lease_duration);
         if topology_changed && db::network_has_devices(network_code).await? {
             bail!("网络下存在设备，只能修改网络类型");
         }
@@ -1627,9 +1734,9 @@ impl ControlService {
         self.db_nets.write().insert(
             network_code.to_string(),
             NetworkConfig {
-                net,
-                gateway,
-                lease_duration,
+                net: Some(net),
+                gateway: Some(gateway),
+                lease_duration: Some(lease_duration),
                 source: original_config.source,
                 network_type,
                 group_type,
@@ -1674,13 +1781,23 @@ impl ControlService {
     }
 
     fn validate_device_ip(config: NetworkConfig, ip: Ipv4Addr) -> anyhow::Result<()> {
-        if !config.net.contains(&ip) {
-            bail!("IP {} 不属于网段 {}", ip, config.net);
+        if config.group_type == GroupType::RemoteDesktop {
+            crate::connection_id::ConnectionId::from_encoded(u32::from(ip))?;
+            return Ok(());
         }
-        if ip == config.gateway {
+        if !config.net.is_some_and(|net| net.contains(&ip)) {
+            bail!(
+                "IP {} 不属于网段 {}",
+                ip,
+                config.net.context("该组没有 VPN 网段")?
+            );
+        }
+        if Some(ip) == config.gateway {
             bail!("此IP为网关IP，不允许使用");
         }
-        if ip == config.net.network() || ip == config.net.broadcast() {
+        if ip == config.net.context("该组没有 VPN 网段")?.network()
+            || ip == config.net.context("该组没有 VPN 网段")?.broadcast()
+        {
             bail!("此IP为网段的网络地址或广播地址，不允许使用");
         }
         Ok(())
@@ -1765,6 +1882,17 @@ impl ControlService {
             .copied()
             .ok_or_else(|| anyhow::anyhow!("网络编号 '{}' 不存在", network_code))?;
         Self::validate_device_ip(config, ip)?;
+        if config.group_type == GroupType::RemoteDesktop
+            && let Some(manager) = self.get_peer_manager()
+        {
+            anyhow::ensure!(
+                !manager
+                    .remote_client_infos(network_code)
+                    .iter()
+                    .any(|peer| peer.id != device_id && peer.ip == u32::from(ip)),
+                "连接 ID 已在其他服务器使用"
+            );
+        }
 
         let state = self
             .get_or_create_network_state(network_code.to_string(), config)
@@ -1791,7 +1919,9 @@ impl ControlService {
         );
         // WireGuard peers are provisioned by the server with a stable tunnel address. Keep the
         // persisted/API IP type consistent even when an older client submits Dynamic or Fixed.
-        let ip_type = if client_type == ClientType::Wireguard {
+        let ip_type = if client_type == ClientType::RemoteDesktop {
+            DeviceIpType::Fixed
+        } else if client_type == ClientType::Wireguard {
             DeviceIpType::Static
         } else {
             ip_type
@@ -2447,7 +2577,7 @@ impl ControlService {
             .db_nets
             .read()
             .get(network_code)
-            .is_some_and(|config| config.net.contains(&address))
+            .is_some_and(|config| config.net.is_some_and(|net| net.contains(&address)))
         {
             return false;
         }
@@ -2470,7 +2600,7 @@ impl ControlService {
         destination: Ipv4Addr,
     ) -> Option<Ipv4Addr> {
         let config = self.db_nets.read().get(network_code).copied()?;
-        if config.net.contains(&destination) {
+        if config.net.is_some_and(|net| net.contains(&destination)) {
             return Some(destination);
         }
         self.get_network_state(network_code)?
@@ -2727,9 +2857,9 @@ impl ControlService {
                 NetworkInfoVO {
                     network_code: code,
                     gateway: config.gateway,
-                    netmask: config.net.prefix_len(),
+                    netmask: config.net.map(|value| value.prefix_len()),
                     net: config.net,
-                    lease_duration: config.lease_duration.as_secs(),
+                    lease_duration: config.lease_duration.map(|value| value.as_secs()),
                     source: config.source,
                     network_type: config.network_type,
                     group_type: config.group_type,
@@ -2748,6 +2878,8 @@ impl ControlService {
                 Ok(records) => records
                     .into_iter()
                     .map(|r| DeviceInfoVO {
+                        connection_id: None,
+                        current_connection_id: None,
                         device_id: r.device_id,
                         device_name: r.device_name,
                         current_device_name: None,
@@ -2793,6 +2925,8 @@ impl ControlService {
 
             for (ip, server_addr, latency_ms, advertised_subnets, client_type) in remote_devices {
                 devices.push(DeviceInfoVO {
+                    connection_id: None,
+                    current_connection_id: None,
                     device_id: format!("remote-{}", ip),
                     device_name: format!("Remote Device ({})", ip),
                     current_device_name: None,
@@ -2861,6 +2995,21 @@ impl ControlService {
             }
         }
 
+        for device in &mut devices {
+            if device.client_type == ClientType::RemoteDesktop {
+                let decode = |key: Ipv4Addr| {
+                    crate::connection_id::ConnectionId::from_encoded(u32::from(key))
+                        .ok()
+                        .map(|id| id.to_string())
+                };
+                device.connection_id = device.ip.and_then(decode);
+                device.current_connection_id = device.current_ip.and_then(decode);
+                device.ip = None;
+                device.current_ip = None;
+                device.ip_type = None;
+                device.advertised_subnets.clear();
+            }
+        }
         Some(devices)
     }
 }
@@ -2953,6 +3102,8 @@ impl Drop for Session {
 
 #[derive(Serialize)]
 pub struct DeviceInfoVO {
+    pub connection_id: Option<String>,
+    pub current_connection_id: Option<String>,
     pub device_id: String,
     pub device_name: String,
     pub current_device_name: Option<String>,
@@ -2990,15 +3141,22 @@ pub struct DeviceInfoVO {
 #[derive(Serialize)]
 pub struct NetworkInfoVO {
     pub network_code: String,
-    pub gateway: Ipv4Addr,
-    pub netmask: u8,
-    pub net: Ipv4Net,
-    pub lease_duration: u64,
+    pub gateway: Option<Ipv4Addr>,
+    pub netmask: Option<u8>,
+    pub net: Option<Ipv4Net>,
+    pub lease_duration: Option<u64>,
     pub source: NetworkSource,
     pub network_type: NetworkType,
     pub group_type: GroupType,
     pub all_count: u32,
     pub online_count: u32,
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 fn network_counts(memory_counts: Option<(u32, u32)>, persisted_count: Option<u32>) -> (u32, u32) {
@@ -3590,25 +3748,25 @@ mod tests {
         .unwrap();
 
         let config = service.network_config("net1", None).unwrap();
-        assert_eq!(config.net, "10.40.0.0/24".parse::<Ipv4Net>().unwrap());
-        assert_eq!(config.gateway, Ipv4Addr::new(10, 40, 0, 1));
+        assert_eq!(config.net, Some("10.40.0.0/24".parse::<Ipv4Net>().unwrap()));
+        assert_eq!(config.gateway, Some(Ipv4Addr::new(10, 40, 0, 1)));
         assert_eq!(config.source, NetworkSource::Config);
     }
 
     #[test]
     fn persisted_network_overrides_configured_initial_value() {
         let persisted = NetworkConfig {
-            net: "10.1.0.0/24".parse().unwrap(),
-            gateway: Ipv4Addr::new(10, 1, 0, 1),
-            lease_duration: Duration::from_secs(60),
+            net: Some("10.1.0.0/24".parse().unwrap()),
+            gateway: Some(Ipv4Addr::new(10, 1, 0, 1)),
+            lease_duration: Some(Duration::from_secs(60)),
             source: NetworkSource::Config,
             network_type: NetworkType::Public,
             group_type: GroupType::Network,
         };
         let configured = NetworkConfig {
-            net: "10.2.0.0/24".parse().unwrap(),
-            gateway: Ipv4Addr::new(10, 2, 0, 1),
-            lease_duration: Duration::from_secs(120),
+            net: Some("10.2.0.0/24".parse().unwrap()),
+            gateway: Some(Ipv4Addr::new(10, 2, 0, 1)),
+            lease_duration: Some(Duration::from_secs(120)),
             source: NetworkSource::Config,
             network_type: NetworkType::Public,
             group_type: GroupType::Network,
@@ -4880,6 +5038,13 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(128);
         let mut first = registration("remote-public", "desktop-a");
         first.client_type = crate::protocol::control_message::ClientType::RemoteDesktop;
+
+        first.ip = Some(
+            "001"
+                .parse::<crate::connection_id::ConnectionId>()
+                .unwrap()
+                .transport_key(),
+        );
         let mut session = service.register(first, tx.clone()).await.unwrap();
         assert_eq!(
             service.get_group_type("remote-public"),
@@ -4909,7 +5074,13 @@ mod tests {
                 .is_err()
         );
         service
-            .fast_register(&mut session, "10.230.29.8".parse().unwrap())
+            .fast_register(
+                &mut session,
+                "001"
+                    .parse::<crate::connection_id::ConnectionId>()
+                    .unwrap()
+                    .transport_key(),
+            )
             .await
             .unwrap();
         service
@@ -4925,9 +5096,23 @@ mod tests {
             .unwrap();
         let mut unknown = registration("remote-public", "desktop-b");
         unknown.client_type = crate::protocol::control_message::ClientType::RemoteDesktop;
+
+        unknown.ip = Some(
+            "001"
+                .parse::<crate::connection_id::ConnectionId>()
+                .unwrap()
+                .transport_key(),
+        );
         assert!(service.register(unknown, tx.clone()).await.is_err());
         let mut known = registration("remote-public", "desktop-a");
         known.client_type = crate::protocol::control_message::ClientType::RemoteDesktop;
+
+        known.ip = Some(
+            "001"
+                .parse::<crate::connection_id::ConnectionId>()
+                .unwrap()
+                .transport_key(),
+        );
         assert!(service.register(known, tx.clone()).await.is_ok());
         let ordinary = service
             .register(registration("ordinary-group", "vnt-a"), tx.clone())
@@ -4935,6 +5120,13 @@ mod tests {
             .unwrap();
         let mut wrong = registration("ordinary-group", "desktop-c");
         wrong.client_type = crate::protocol::control_message::ClientType::RemoteDesktop;
+
+        wrong.ip = Some(
+            "001"
+                .parse::<crate::connection_id::ConnectionId>()
+                .unwrap()
+                .transport_key(),
+        );
         assert!(service.register(wrong, tx).await.is_err());
         drop((session, ordinary));
     }
@@ -4951,6 +5143,13 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(128);
         let mut desktop = registration("race", "desktop");
         desktop.client_type = crate::protocol::control_message::ClientType::RemoteDesktop;
+
+        desktop.ip = Some(
+            "001"
+                .parse::<crate::connection_id::ConnectionId>()
+                .unwrap()
+                .transport_key(),
+        );
         let (remote, ordinary) = tokio::join!(
             service.register(desktop, tx.clone()),
             service.register(registration("race", "vnt"), tx)
@@ -4986,6 +5185,13 @@ mod tests {
         let request = || {
             let mut request = registration("remote-lease", "desktop");
             request.client_type = crate::protocol::control_message::ClientType::RemoteDesktop;
+
+            request.ip = Some(
+                "001"
+                    .parse::<crate::connection_id::ConnectionId>()
+                    .unwrap()
+                    .transport_key(),
+            );
             request
         };
         let first = service.register(request(), tx.clone()).await.unwrap();
@@ -4993,5 +5199,194 @@ mod tests {
         drop(first);
         let next = service.register(request(), tx).await.unwrap();
         assert_eq!(next.ip, address);
+    }
+    fn remote_registration(group: &str, device: &str, id: &str) -> RegRequestMsg {
+        let mut request = registration(group, device);
+        request.client_type = crate::protocol::control_message::ClientType::RemoteDesktop;
+        request.ip = Some(
+            id.parse::<crate::connection_id::ConnectionId>()
+                .unwrap()
+                .transport_key(),
+        );
+        request
+    }
+
+    #[tokio::test]
+    async fn remote_ids_are_unique_per_group_and_never_expire() {
+        let service = ControlService::new(
+            "10.26.0.0/24".parse().unwrap(),
+            HashMap::new(),
+            HashSet::new(),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+        let (tx, _rx) = mpsc::channel(128);
+        for (index, id) in ["0", "00", "001", "0001", "999999999"].iter().enumerate() {
+            let session = service
+                .register(
+                    remote_registration("remote-ids", &format!("device-{index}"), id),
+                    tx.clone(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                session.ip,
+                id.parse::<crate::connection_id::ConnectionId>()
+                    .unwrap()
+                    .transport_key()
+            );
+            drop(session);
+        }
+        let state = service.get_network_state("remote-ids").unwrap();
+        assert!(state.collect_expired_devices().is_empty());
+        assert_eq!(state.count().0, 5);
+        let same = service
+            .register(
+                remote_registration("remote-ids", "duplicate", "001"),
+                tx.clone(),
+            )
+            .await;
+        assert!(same.is_err());
+        let other = service
+            .register(
+                remote_registration("other-remote", "duplicate", "001"),
+                tx.clone(),
+            )
+            .await
+            .unwrap();
+        drop(other);
+        let first = service
+            .register(
+                remote_registration("remote-ids", "device-2", "001"),
+                tx.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(u32::from(first.ip), 1001);
+        drop(first);
+        let config = service.db_nets.read().get("remote-ids").copied().unwrap();
+        assert!(
+            config.net.is_none() && config.gateway.is_none() && config.lease_duration.is_none()
+        );
+        let infos = service.get_device_info("remote-ids").await.unwrap();
+        let info = infos
+            .iter()
+            .find(|device| device.device_id == "device-2")
+            .unwrap();
+        assert_eq!(info.connection_id.as_deref(), Some("001"));
+        assert!(info.ip.is_none() && info.ip_type.is_none());
+        service
+            .delete_device("remote-ids", "device-2")
+            .await
+            .unwrap();
+        assert!(
+            service
+                .register(remote_registration("remote-ids", "replacement", "001"), tx)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_registration_requires_an_id_and_serializes_concurrent_conflicts() {
+        let service = ControlService::new(
+            "10.26.0.0/24".parse().unwrap(),
+            HashMap::new(),
+            HashSet::new(),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+        let (tx, _rx) = mpsc::channel(128);
+        let mut missing = registration("remote-missing", "missing");
+        missing.client_type = crate::protocol::control_message::ClientType::RemoteDesktop;
+        assert!(service.register(missing, tx.clone()).await.is_err());
+        let (a, b) = tokio::join!(
+            service.register(remote_registration("remote-race", "a", "0001"), tx.clone()),
+            service.register(remote_registration("remote-race", "b", "0001"), tx.clone())
+        );
+        assert_ne!(a.is_ok(), b.is_ok());
+    }
+
+    #[tokio::test]
+    async fn remote_group_creation_and_edit_need_no_vpn_configuration() {
+        let service = ControlService::new(
+            "10.26.0.0/24".parse().unwrap(),
+            HashMap::new(),
+            HashSet::new(),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+        service
+            .add_network_group(
+                "pure-remote".into(),
+                Ipv4Addr::UNSPECIFIED,
+                0,
+                None,
+                NetworkType::Public,
+                GroupType::RemoteDesktop,
+            )
+            .await
+            .unwrap();
+        service
+            .update_network_group(
+                "pure-remote",
+                Ipv4Addr::UNSPECIFIED,
+                0,
+                Duration::ZERO,
+                NetworkType::Private,
+                GroupType::RemoteDesktop,
+            )
+            .await
+            .unwrap();
+        let info = service
+            .get_network_info()
+            .await
+            .into_iter()
+            .find(|group| group.network_code == "pure-remote")
+            .unwrap();
+        assert!(
+            info.gateway.is_none()
+                && info.net.is_none()
+                && info.netmask.is_none()
+                && info.lease_duration.is_none()
+        );
+        assert_eq!(info.network_type, NetworkType::Private);
+    }
+    #[tokio::test]
+    async fn remote_pre_registration_disconnect_keeps_the_identifier_bound() {
+        let service = ControlService::new(
+            "10.26.0.0/24".parse().unwrap(),
+            HashMap::new(),
+            HashSet::new(),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+        let (tx, _rx) = mpsc::channel(128);
+        let mut request = remote_registration("pending-remote", "pending", "0001");
+        request.registration_mode = RegistrationMode::PreRegister;
+        let session = service.register(request, tx.clone()).await.unwrap();
+        drop(session);
+        let state = service.get_network_state("pending-remote").unwrap();
+        assert!(state.has_device("pending"));
+        assert!(state.collect_expired_devices().is_empty());
+        assert!(
+            service
+                .register(
+                    remote_registration("pending-remote", "intruder", "0001"),
+                    tx.clone()
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            service
+                .register(remote_registration("pending-remote", "pending", "0001"), tx)
+                .await
+                .is_ok()
+        );
     }
 }

@@ -129,7 +129,7 @@ export function useDeviceMonitor() {
     // 按 IP 累计速度历史
     const ipSpeed = new Map<string, TrafficPoint>()
     for (const dev of data) {
-      const key = dev.ip ?? `no-ip-${dev.device_id}`
+      const key = dev.connection_id ?? dev.ip ?? `no-ip-${dev.device_id}`
       const point = ipSpeed.get(key) ?? { tx: 0, rx: 0 }
       point.tx += dev.tx_speed ?? 0
       point.rx += dev.rx_speed ?? 0
@@ -167,6 +167,8 @@ export function useDeviceMonitor() {
     const q = search.value.toLowerCase()
     const filtered = devices.value.filter(
       (d) =>
+        (d.connection_id && d.connection_id.includes(q)) ||
+        (d.current_connection_id && d.current_connection_id.includes(q)) ||
         (d.ip && d.ip.includes(q)) ||
         (d.current_ip && d.current_ip.includes(q)) ||
         d.advertised_subnets.some((subnet) => subnet.toLowerCase().includes(q)) ||
@@ -177,7 +179,7 @@ export function useDeviceMonitor() {
 
     const groups = new Map<string, DeviceInfo[]>()
     for (const dev of filtered) {
-      const key = dev.ip ?? `no-ip-${dev.device_id}`
+      const key = dev.connection_id ?? dev.ip ?? `no-ip-${dev.device_id}`
       const list = groups.get(key) ?? []
       list.push(dev)
       groups.set(key, list)

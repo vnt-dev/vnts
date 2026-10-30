@@ -34,7 +34,7 @@ import { useToast } from '@/composables/useToast'
 import type { ClientType, DeviceInfo, DeviceIpType, Ikev2InputRoute, ManagedConfigMutation, NetworkInfo } from '@/types'
 import { copyText } from '@/utils/clipboard'
 import { formatBytes, formatSpeed } from '@/utils/format'
-import { ADVANCED_CONFIG_TEMPLATE, emptyVntClientConfig, validateAdvancedToml } from '@/utils/managedConfigToml'
+import { ADVANCED_CONFIG_TEMPLATE, REMOTE_ADVANCED_CONFIG_TEMPLATE, emptyVntClientConfig, validateAdvancedToml } from '@/utils/managedConfigToml'
 
 const route = useRoute()
 const router = useRouter()
@@ -45,6 +45,7 @@ const monitor = useDeviceMonitor()
 const { devices, mergedDevices, loading, search } = monitor
 function isManagedClient(type: ClientType | undefined) { return type === 'VNT' || type === 'REMOTE_DESKTOP' }
 const currentNetwork = ref<NetworkInfo | null>(null)
+const isRemote = computed(() => currentNetwork.value?.group_type === 'RemoteDesktop')
 
 async function loadCurrentNetwork(code: string) {
   currentNetwork.value = null
@@ -120,7 +121,7 @@ function numberToIpv4(value: number) {
 }
 
 const availableIpSuggestion = computed<string | null | undefined>(() => {
-  if (!currentNetwork.value || loading.value) return undefined
+  if (isRemote.value || !currentNetwork.value?.net || loading.value) return undefined
   const [networkAddress, prefixText] = currentNetwork.value.net.split('/')
   const address = ipv4ToNumber(networkAddress ?? '')
   const prefix = Number(prefixText)
@@ -151,6 +152,7 @@ const availableIpSuggestion = computed<string | null | undefined>(() => {
 })
 
 const ipPlaceholder = computed(() => {
+  if (isRemote.value) return '1～9 位纯数字，保留前导零'
   if (editingDevice.value) return '请输入 IP 地址'
   if (availableIpSuggestion.value === undefined) return '正在计算可用 IP…'
   return availableIpSuggestion.value ? `例如：${availableIpSuggestion.value}` : 'IP 已用尽'
@@ -239,6 +241,8 @@ async function loadVntAccessDefaults() {
 }
 
 async function openCreateDevice() {
+  if (!currentNetwork.value) await loadCurrentNetwork(networkCode.value)
+  if (!currentNetwork.value) { toast.error('加载组信息失败'); return }
   editingDevice.value = null
   const suggestedIp = availableIpSuggestion.value
   deviceForm.value = {
@@ -259,7 +263,7 @@ async function openCreateDevice() {
   showIkev2Password.value = false
   vntSubscriptionServer.value = ''
   await loadVntAccessDefaults()
-  vntAdvancedToml.value = ADVANCED_CONFIG_TEMPLATE
+  vntAdvancedToml.value = isRemote.value ? REMOTE_ADVANCED_CONFIG_TEMPLATE : ADVANCED_CONFIG_TEMPLATE
   vntAdvancedError.value = ''
   showDeviceModal.value = true
 }
@@ -310,7 +314,7 @@ async function openEditDevice(group: DeviceGroup) {
   deviceForm.value = {
     device_id: device.device_id,
     device_name: device.device_name,
-    ip: device.ip ?? '',
+    ip: device.connection_id ?? device.ip ?? '',
     ip_type: device.client_type === 'WIREGUARD' ? 'Static' : (device.ip_type ?? 'Dynamic'),
     client_type: device.client_type,
     ikev2_password: '',
@@ -347,6 +351,7 @@ function differingSessionName(group: DeviceGroup) {
 
 async function submitDevice() {
   if (formSubmitting.value) return
+  if (isRemote.value && !/^[0-9]{1,9}$/.test(deviceForm.value.ip)) { toast.error('连接 ID 必须为 1～9 位纯数字'); return }
   let advancedToml = ''
   if (isManagedClient(deviceForm.value.client_type)) {
     const currentServer = deviceForm.value.vnt_config.current_server.trim()
@@ -360,7 +365,7 @@ async function submitDevice() {
     deviceForm.value.vnt_config.other_servers = otherServers
     vntAdvancedError.value = ''
     try {
-      validateAdvancedToml(vntAdvancedToml.value)
+      validateAdvancedToml(vntAdvancedToml.value, isRemote.value)
       advancedToml = vntAdvancedToml.value
     } catch (error) {
       vntAdvancedError.value = error instanceof Error ? error.message : 'TOML 格式错误'
@@ -382,6 +387,7 @@ async function submitDevice() {
           deviceForm.value.device_name,
           deviceForm.value.ip,
           deviceForm.value.ip_type,
+          isRemote.value,
         )
       } else await deviceApi.update(editingDevice.value.device_id, {
           network_code: networkCode.value,
@@ -446,8 +452,7 @@ async function submitDevice() {
           network_code: networkCode.value,
           device_id: deviceForm.value.device_id,
           device_name: deviceForm.value.device_name,
-          ip: deviceForm.value.ip,
-          ip_type: deviceForm.value.ip_type,
+          ...(isRemote.value ? { connection_id: deviceForm.value.ip } : { ip: deviceForm.value.ip, ip_type: deviceForm.value.ip_type }),
           config_toml: advancedToml,
           subscription_server: vntSubscriptionServer.value.trim(),
           traffic_servers_override: [deviceForm.value.vnt_config.current_server, ...deviceForm.value.vnt_config.other_servers].filter(Boolean),
@@ -565,7 +570,7 @@ async function executeDelete() {
       <div class="flex w-full items-center gap-3 lg:w-auto">
         <div class="relative min-w-0 flex-1 lg:w-72">
           <Search :size="15" class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-500" />
-          <input v-model="search" type="text" :class="searchInputClass" placeholder="搜索 IP 或设备 ID..." />
+          <input v-model="search" type="text" :class="searchInputClass" :placeholder="isRemote ? '搜索连接 ID 或设备唯一标识...' : '搜索 IP 或设备 ID...'" />
         </div>
         <button
           class="flex shrink-0 items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-2 text-sm font-semibold text-white transition hover:bg-blue-700"
@@ -588,10 +593,10 @@ async function executeDelete() {
           <tr class="border-b border-slate-100 bg-slate-50/80 text-xs text-slate-500 dark:border-slate-700 dark:bg-slate-800/80 dark:text-slate-400">
             <th class="w-16 px-4 py-3"></th>
             <th class="px-4 py-3 font-semibold">状态</th>
-            <th class="px-4 py-3 font-semibold">设备名称 / ID</th>
-            <th class="px-4 py-3 font-semibold">IP 地址</th>
-            <th class="px-4 py-3 font-semibold">上报出口网段</th>
-            <th class="px-4 py-3 font-semibold">IP 类型</th>
+            <th class="px-4 py-3 font-semibold">{{ isRemote ? '设备名称 / 设备唯一标识' : '设备名称 / ID' }}</th>
+            <th class="px-4 py-3 font-semibold">{{ isRemote ? '连接 ID' : 'IP 地址' }}</th>
+            <th v-if="!isRemote" class="px-4 py-3 font-semibold">上报出口网段</th>
+            <th v-if="!isRemote" class="px-4 py-3 font-semibold">IP 类型</th>
             <th class="px-4 py-3 font-semibold">版本</th>
             <th class="px-4 py-3 font-semibold">延迟</th>
             <th class="px-3 py-3 font-semibold">流量 <span class="font-normal">(上/下)</span></th>
@@ -677,7 +682,7 @@ async function executeDelete() {
                   （当前使用：{{ differingSessionIp(group) }}）
                 </span>
               </td>
-              <td class="px-4 py-3">
+              <td v-if="!isRemote" class="px-4 py-3">
                 <div v-if="group.advertisedSubnets.length" class="flex max-w-72 flex-wrap gap-1">
                   <span
                     v-for="subnet in group.advertisedSubnets"
@@ -689,7 +694,7 @@ async function executeDelete() {
                 </div>
                 <span v-else class="text-slate-300 dark:text-slate-600">-</span>
               </td>
-              <td class="px-4 py-3 text-xs font-medium">
+              <td v-if="!isRemote" class="px-4 py-3 text-xs font-medium">
                 <span
                   v-if="localDevice(group)?.ip_type"
                   :class="localDevice(group)?.ip_type === 'Fixed' ? 'text-red-600 dark:text-red-400' : localDevice(group)?.ip_type === 'Static' ? 'text-amber-600 dark:text-amber-400' : 'text-blue-600 dark:text-blue-400'"
@@ -777,7 +782,7 @@ async function executeDelete() {
 
             <!-- 网速历史图表行 -->
             <tr v-if="monitor.chartExpanded[group.key]" class="border-b border-slate-50 bg-white dark:border-slate-700/60 dark:bg-slate-800">
-              <td colspan="12" class="px-4 py-3">
+              <td :colspan="isRemote ? 10 : 12" class="px-4 py-3">
                 <div class="rounded-lg border border-slate-100 bg-white px-4 py-3 dark:border-slate-700 dark:bg-slate-900">
                   <SpeedChart :history="monitor.historyOf(group.key)" />
                 </div>
@@ -803,7 +808,7 @@ async function executeDelete() {
                 <span class="ml-2 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500 dark:bg-slate-700 dark:text-slate-300">{{ dev.client_type || 'VNT' }}</span>
               </td>
               <td class="px-4 py-3 text-xs text-slate-400 dark:text-slate-500">-</td>
-              <td class="px-4 py-3">
+              <td v-if="!isRemote" class="px-4 py-3">
                 <div v-if="dev.advertised_subnets.length" class="flex max-w-72 flex-wrap gap-1">
                   <span
                     v-for="subnet in dev.advertised_subnets"
@@ -815,7 +820,7 @@ async function executeDelete() {
                 </div>
                 <span v-else class="text-slate-300 dark:text-slate-600">-</span>
               </td>
-              <td class="px-4 py-3 text-xs text-slate-400 dark:text-slate-500">-</td>
+              <td v-if="!isRemote" class="px-4 py-3 text-xs text-slate-400 dark:text-slate-500">-</td>
               <td class="px-4 py-3 text-xs text-slate-500 dark:text-slate-400">{{ dev.device_version }}</td>
               <td class="px-4 py-3 text-xs">
                 <LatencyBadge :ms="dev.latency_ms" />
@@ -835,7 +840,7 @@ async function executeDelete() {
           </template>
 
           <tr v-if="mergedDevices.length === 0">
-            <td colspan="12" class="px-4 py-16 text-center text-sm text-slate-400 dark:text-slate-500">
+            <td :colspan="isRemote ? 10 : 12" class="px-4 py-16 text-center text-sm text-slate-400 dark:text-slate-500">
               暂无设备数据
             </td>
           </tr>
@@ -861,7 +866,7 @@ async function executeDelete() {
           <p v-if="editingDevice" class="mt-1.5 text-xs text-slate-400">设备创建后不能修改类型。</p>
         </div>
         <div>
-          <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">{{ deviceForm.client_type === 'IKEV2' ? '用户名（设备 ID）' : '设备 ID' }}</label>
+          <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">{{ isRemote ? '设备唯一标识' : deviceForm.client_type === 'IKEV2' ? '用户名（设备 ID）' : '设备 ID' }}</label>
           <div class="flex gap-2">
             <input v-model.trim="deviceForm.device_id" type="text" :class="inputClass" :disabled="Boolean(editingDevice)" :maxlength="deviceForm.client_type === 'IKEV2' ? 48 : 64" required />
             <button v-if="!editingDevice" type="button" class="rounded-lg border border-slate-200 px-3 text-slate-500 hover:text-cyan-600 dark:border-slate-600" :title="deviceForm.client_type === 'IKEV2' ? '重新生成用户名' : '重新生成设备 ID'" @click="generateDeviceId"><RefreshCw :size="15" /></button>
@@ -905,8 +910,8 @@ async function executeDelete() {
           <details class="rounded-lg border border-slate-200 bg-white/70 dark:border-slate-700 dark:bg-slate-900/40">
             <summary class="cursor-pointer px-3 py-2 text-sm font-medium text-slate-700 dark:text-slate-200">高级配置</summary>
             <div class="border-t border-slate-100 p-3 dark:border-slate-700">
-              <textarea v-model="vntAdvancedToml" rows="24" :class="inputClass" class="resize-y font-mono text-xs leading-5" spellcheck="false" placeholder="# 按需填写 VNT 客户端 TOML 配置；留空则使用客户端默认值&#10;# 例如：&#10;# mtu = 1400（范围：576-1500）&#10;# compress = true" />
-              <p class="mt-2 text-xs text-slate-400">只填写需要由服务端同步的配置。未填写的字段不固化默认值；MTU 可设置为 576–1500。服务端地址、证书、设备身份和虚拟 IP 请在基础区域配置。</p>
+              <textarea v-model="vntAdvancedToml" rows="24" :class="inputClass" class="resize-y font-mono text-xs leading-5" spellcheck="false" :placeholder="isRemote ? REMOTE_ADVANCED_CONFIG_TEMPLATE : ADVANCED_CONFIG_TEMPLATE" />
+              <p class="mt-2 text-xs text-slate-400">{{ isRemote ? '仅支持通信、中继与打洞配置。设备身份和连接 ID 在基础区域配置，连接 ID 不按租期回收。' : '只填写需要由服务端同步的配置。MTU 可设置为 576–1500。设备身份和虚拟 IP 在基础区域配置。' }}</p>
               <p v-if="vntAdvancedError" class="mt-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600 dark:bg-red-500/10 dark:text-red-300">{{ vntAdvancedError }}</p>
             </div>
           </details>
@@ -960,10 +965,10 @@ async function executeDelete() {
           <p class="mt-1.5 text-xs leading-5 text-slate-400 dark:text-slate-500">标准 WireGuard 私钥（base64，44 位）；同一私钥只能绑定一台设备。{{ editingDevice ? '更换后需要重新下载客户端配置。' : '' }}</p>
         </div>
         <div>
-          <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">IP 地址</label>
+          <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">{{ isRemote ? '连接 ID' : 'IP 地址' }}</label>
           <input v-model.trim="deviceForm.ip" type="text" :class="inputClass" :placeholder="ipPlaceholder" required @input="pendingCreateIpSuggestion = false" />
         </div>
-        <div>
+        <div v-if="!isRemote">
           <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">IP 类型</label>
           <select v-model="deviceForm.ip_type" :class="inputClass" :disabled="deviceForm.client_type === 'WIREGUARD'">
             <option value="Static">静态IP</option>
