@@ -1234,81 +1234,153 @@ pub async fn update_managed_config_with_endpoints(
     let Some(pool) = DB_POOL.get() else {
         return Ok(None);
     };
-    let encoded = traffic_servers_override
-        .map(serde_json::to_string)
-        .transpose()?;
-    let result = sqlx::query(
-        "UPDATE vnt_device_configs
-         SET config_toml = ?, subscription_server = ?, traffic_servers_override = ?, revision = revision + 1, updated_at = ?,
-             join_id = CASE WHEN join_id IS NULL OR join_id = '' THEN ? ELSE join_id END
-         WHERE network_code = ? AND device_id = ?",
+    if !update_managed_config_with_endpoints_on(
+        pool,
+        network_code,
+        device_id,
+        config_toml,
+        subscription_server,
+        traffic_servers_override,
+        join_id,
+        updated_at,
     )
-    .bind(config_toml)
-    .bind(subscription_server)
-    .bind(encoded)
-    .bind(updated_at)
-    .bind(join_id)
-    .bind(network_code)
-    .bind(device_id)
-    .execute(pool)
-    .await
-    .context("Failed to update managed config endpoints")?;
-    if result.rows_affected() == 0 {
+    .await?
+    {
         return Ok(None);
     }
     get_managed_config(network_code, device_id).await
 }
 
-/// Atomically advances every device which inherits the global traffic-server
-/// list. The caller pushes the returned committed records afterwards.
-pub async fn update_inherited_traffic_servers(
-    traffic_servers: &[String],
-    fallback_subscription_server: &str,
+async fn update_managed_config_with_endpoints_on(
+    pool: &SqlitePool,
+    network_code: &str,
+    device_id: &str,
+    config_toml: &str,
+    subscription_server: &str,
+    traffic_servers_override: Option<&[String]>,
+    join_id: &str,
+    updated_at: i64,
+) -> anyhow::Result<bool> {
+    let encoded = traffic_servers_override
+        .map(serde_json::to_string)
+        .transpose()?;
+    let mut transaction = pool.begin().await?;
+    let subscription: Option<String> = sqlx::query_scalar(
+        "SELECT subscription FROM vnt_device_configs WHERE network_code = ? AND device_id = ?",
+    )
+    .bind(network_code)
+    .bind(device_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    .flatten();
+    let subscription = subscription
+        .map(|link| crate::managed_config::update_subscription_server(&link, subscription_server))
+        .transpose()?;
+    let result = sqlx::query(
+        "UPDATE vnt_device_configs
+         SET config_toml = ?, subscription_server = ?, subscription = ?, traffic_servers_override = ?, revision = revision + 1, updated_at = ?,
+             join_id = CASE WHEN join_id IS NULL OR join_id = '' THEN ? ELSE join_id END
+         WHERE network_code = ? AND device_id = ?",
+    )
+    .bind(config_toml)
+    .bind(subscription_server)
+    .bind(subscription)
+    .bind(encoded)
+    .bind(updated_at)
+    .bind(join_id)
+    .bind(network_code)
+    .bind(device_id)
+    .execute(&mut *transaction)
+    .await
+    .context("Failed to update managed config endpoints")?;
+    transaction.commit().await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Keeps inherited endpoints and their issued bootstrap links in one transaction.
+/// Explicit device endpoints that differ from the previous default are retained.
+pub async fn update_inherited_client_access(
+    previous: &crate::utils::config::ClientAccessConfig,
+    current: &crate::utils::config::ClientAccessConfig,
     updated_at: i64,
 ) -> anyhow::Result<Vec<ManagedConfigRecord>> {
     let Some(pool) = DB_POOL.get() else {
         return Ok(Vec::new());
     };
-    let effective = if traffic_servers.is_empty() {
-        vec![fallback_subscription_server.to_string()]
-    } else {
-        traffic_servers.to_vec()
-    };
-    let rows = sqlx::query(
-        "SELECT network_code, device_id, config_toml FROM vnt_device_configs
-         WHERE traffic_servers_override IS NULL",
-    )
-    .fetch_all(pool)
-    .await?;
+    let changed = update_inherited_client_access_on(pool, previous, current, updated_at).await?;
+    let mut records = Vec::new();
+    for (network, device) in changed {
+        if let Some(record) = get_managed_config(&network, &device).await? {
+            records.push(record);
+        }
+    }
+    Ok(records)
+}
+
+async fn update_inherited_client_access_on(
+    pool: &SqlitePool,
+    previous: &crate::utils::config::ClientAccessConfig,
+    current: &crate::utils::config::ClientAccessConfig,
+    updated_at: i64,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let effective = current.resolved_traffic_servers();
+    let subscription_changed = previous.subscription_server != current.subscription_server;
+    let traffic_changed = previous.resolved_traffic_servers() != effective;
     let mut transaction = pool.begin().await?;
+    let rows = sqlx::query(
+        "SELECT network_code, device_id, config_toml, subscription_server, subscription,
+                traffic_servers_override FROM vnt_device_configs",
+    )
+    .fetch_all(&mut *transaction)
+    .await?;
+    let mut changed = Vec::new();
     for row in rows {
         let network_code: String = row.try_get("network_code")?;
         let device_id: String = row.try_get("device_id")?;
         let source: String = row.try_get("config_toml")?;
-        let mut table: toml::Table = toml::from_str(&source)?;
-        table.insert(
-            "server".to_string(),
-            toml::Value::Array(effective.iter().cloned().map(toml::Value::String).collect()),
-        );
-        let rendered = toml::to_string_pretty(&table)?;
+        let mut server: String = row.try_get("subscription_server")?;
+        let mut subscription: Option<String> = row.try_get("subscription")?;
+        let traffic_override: Option<String> = row.try_get("traffic_servers_override")?;
+        let update_subscription =
+            subscription_changed && (server.is_empty() || server == previous.subscription_server);
+        let update_traffic = traffic_changed && traffic_override.is_none();
+        if !update_subscription && !update_traffic {
+            continue;
+        }
+        if update_subscription {
+            server = current.subscription_server.clone();
+            subscription = subscription
+                .map(|link| crate::managed_config::update_subscription_server(&link, &server))
+                .transpose()?;
+        }
+        let rendered = if update_traffic {
+            let mut table: toml::Table = toml::from_str(&source)?;
+            table.insert(
+                "server".to_string(),
+                toml::Value::Array(effective.iter().cloned().map(toml::Value::String).collect()),
+            );
+            toml::to_string_pretty(&table)?
+        } else {
+            source
+        };
         sqlx::query(
             "UPDATE vnt_device_configs
-             SET config_toml = ?, revision = revision + 1, updated_at = ?
-             WHERE network_code = ? AND device_id = ? AND traffic_servers_override IS NULL",
+             SET config_toml = ?, subscription_server = ?, subscription = ?,
+                 revision = revision + 1, updated_at = ?
+             WHERE network_code = ? AND device_id = ?",
         )
         .bind(rendered)
+        .bind(server)
+        .bind(subscription)
         .bind(updated_at)
-        .bind(network_code)
-        .bind(device_id)
+        .bind(&network_code)
+        .bind(&device_id)
         .execute(&mut *transaction)
         .await?;
+        changed.push((network_code, device_id));
     }
     transaction.commit().await?;
-    Ok(list_managed_configs()
-        .await?
-        .into_iter()
-        .filter(|record| record.traffic_servers_override.is_none())
-        .collect())
+    Ok(changed)
 }
 
 /// Rewrites the persisted representation without changing its semantic revision.
@@ -1454,6 +1526,184 @@ pub async fn delete_peer_server(server_addr: &str) -> anyhow::Result<bool> {
 mod tests {
     use super::migrate_managed_config_schema;
     use sqlx::{Row, SqlitePool, sqlite::SqlitePoolOptions};
+
+    fn decode_subscription(link: &str) -> crate::managed_config::SubscriptionPayloadV2 {
+        use base64::Engine;
+        serde_json::from_slice(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(
+                    link.strip_prefix(crate::managed_config::SUBSCRIPTION_PREFIX)
+                        .unwrap(),
+                )
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    async fn subscription_test_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE vnt_device_configs (
+            network_code TEXT, device_id TEXT, config_toml TEXT NOT NULL,
+            subscription_server TEXT NOT NULL, subscription TEXT, credential_key TEXT,
+            traffic_servers_override TEXT, revision INTEGER, updated_at INTEGER,
+            join_id TEXT, PRIMARY KEY(network_code, device_id))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool
+    }
+
+    async fn insert_subscription(
+        pool: &SqlitePool,
+        id: &str,
+        server: &str,
+        traffic: Option<&str>,
+    ) -> String {
+        let access = crate::utils::config::ClientAccessConfig::new(server.into(), Vec::new());
+        let issued =
+            crate::managed_config::issue_subscription(&access, Some(&"a".repeat(64)), id).unwrap();
+        sqlx::query(
+            "INSERT INTO vnt_device_configs VALUES
+            ('net', ?, 'server = [\"tcp://old-data:29872\"]', ?, ?, ?, ?, 1, 0, ?)",
+        )
+        .bind(id)
+        .bind(server)
+        .bind(&issued.subscription)
+        .bind(&issued.credential_key)
+        .bind(traffic)
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+        issued.subscription
+    }
+
+    #[tokio::test]
+    async fn device_endpoint_update_refreshes_link_without_rotating_credentials() {
+        let pool = subscription_test_pool().await;
+        let old = insert_subscription(&pool, "device", "tcp://127.0.0.1:29872", None).await;
+        assert!(
+            super::update_managed_config_with_endpoints_on(
+                &pool,
+                "net",
+                "device",
+                "",
+                "tcp://127.0.0.1:29873",
+                None,
+                "device",
+                10,
+            )
+            .await
+            .unwrap()
+        );
+        let row = sqlx::query("SELECT * FROM vnt_device_configs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let link: String = row.get("subscription");
+        let payload = decode_subscription(&link);
+        assert_eq!(payload.server, "tcp://127.0.0.1:29873");
+        let original = decode_subscription(&old);
+        assert_eq!(payload.credential_key, original.credential_key);
+        assert_eq!(payload.join_id, original.join_id);
+        assert_eq!(payload.cert_mode, original.cert_mode);
+        assert_eq!(
+            row.get::<String, _>("credential_key"),
+            original.credential_key
+        );
+        assert_eq!(row.get::<i64, _>("revision"), 2);
+    }
+
+    #[tokio::test]
+    async fn global_subscription_change_updates_existing_links_and_preserves_overrides() {
+        use crate::utils::config::ClientAccessConfig;
+        let pool = subscription_test_pool().await;
+        let old = "tcp://127.0.0.1:29872";
+        let new = "tcp://127.0.0.1:29873";
+        let custom = "tcp://custom.example.com:443";
+        let inherited_link = insert_subscription(&pool, "inherited", old, None).await;
+        insert_subscription(&pool, "custom-data", old, Some("[]")).await;
+        let custom_link = insert_subscription(&pool, "custom", custom, Some("[]")).await;
+        // Only the subscription endpoint changes; an explicit data-plane list is unchanged.
+        let traffic = vec!["tcp://old-data:29872".to_string()];
+        let previous = ClientAccessConfig::new(old.into(), traffic.clone());
+        let current = ClientAccessConfig::new(new.into(), traffic);
+        let changed = super::update_inherited_client_access_on(&pool, &previous, &current, 10)
+            .await
+            .unwrap();
+        assert_eq!(changed.len(), 2);
+        let rows = sqlx::query("SELECT * FROM vnt_device_configs")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        for row in rows {
+            let id: String = row.get("device_id");
+            let link: String = row.get("subscription");
+            if id == "custom" {
+                assert_eq!(link, custom_link);
+                assert_eq!(row.get::<i64, _>("revision"), 1);
+            } else {
+                assert_eq!(row.get::<String, _>("subscription_server"), new);
+                assert_eq!(decode_subscription(&link).server, new);
+                assert_eq!(row.get::<i64, _>("revision"), 2);
+            }
+            if id == "inherited" {
+                assert_eq!(
+                    decode_subscription(&link).credential_key,
+                    decode_subscription(&inherited_link).credential_key
+                );
+            }
+        }
+        // Re-saving unchanged settings must not advance revisions again.
+        assert!(
+            super::update_inherited_client_access_on(&pool, &current, &current, 11)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn subscription_endpoint_change_updates_fallback_traffic_and_rolls_back_on_failure() {
+        use crate::utils::config::ClientAccessConfig;
+        let pool = subscription_test_pool().await;
+        let old = "tcp://127.0.0.1:29872";
+        let new = "tcp://127.0.0.1:29873";
+        insert_subscription(&pool, "device", old, None).await;
+        let previous = ClientAccessConfig::new(old.into(), Vec::new());
+        let current = ClientAccessConfig::new(new.into(), Vec::new());
+        super::update_inherited_client_access_on(&pool, &previous, &current, 10)
+            .await
+            .unwrap();
+        let source: String = sqlx::query_scalar("SELECT config_toml FROM vnt_device_configs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let table: toml::Table = toml::from_str(&source).unwrap();
+        assert_eq!(table["server"][0].as_str(), Some(new));
+        // A malformed issued link must not leave endpoint and link out of sync.
+        sqlx::query("UPDATE vnt_device_configs SET subscription = 'invalid'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            super::update_inherited_client_access_on(&pool, &current, &previous, 11)
+                .await
+                .is_err()
+        );
+        let server: String =
+            sqlx::query_scalar("SELECT subscription_server FROM vnt_device_configs")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(server, new);
+    }
 
     #[tokio::test]
     async fn release_device_ip_keeps_managed_device_address() {

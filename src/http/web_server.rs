@@ -2,7 +2,7 @@ use crate::ControlService;
 use crate::managed_config::{
     ManagedClientConfigForm, canonicalize_client_config, canonicalize_stored_client_config,
     editable_client_config, issue_subscription, managed_config_semantically_equal, new_join_id,
-    resolve_cert_mode, validate_managed_advanced_config,
+    resolve_cert_mode, update_subscription_server, validate_managed_advanced_config,
 };
 use crate::server::control_server::db::{
     self, ClientType, DeviceIpType, GroupType, Ikev2InputRoute, ManagedConfigRecord, NetworkType,
@@ -1261,13 +1261,10 @@ async fn update_client_access(
     {
         Ok(Ok(config)) => {
             *state.client_access.write() = config.clone();
-            if previous.effective_traffic_servers() != config.effective_traffic_servers() {
-                match db::update_inherited_traffic_servers(
-                    &config.effective_traffic_servers(),
-                    &config.effective_subscription_server(),
-                    unix_timestamp(),
-                )
-                .await
+            if previous.resolved_traffic_servers() != config.resolved_traffic_servers()
+                || previous.subscription_server != config.subscription_server
+            {
+                match db::update_inherited_client_access(&previous, &config, unix_timestamp()).await
                 {
                     Ok(records) => {
                         for record in records {
@@ -2027,6 +2024,17 @@ async fn get_subscription(
         Err(error) => return ApiResponse::<()>::err(error.to_string()).into_response(),
     };
     if let Some(subscription) = record.subscription {
+        // Older versions updated the endpoint column but retained the issued
+        // link. Repair that stale snapshot when it is copied again.
+        let server = if record.subscription_server.is_empty() {
+            state.client_access.read().effective_subscription_server()
+        } else {
+            record.subscription_server
+        };
+        let subscription = match update_subscription_server(&subscription, &server) {
+            Ok(value) => value,
+            Err(error) => return ApiResponse::<()>::err(error.to_string()).into_response(),
+        };
         return no_store(ApiResponse::ok(SubscriptionResponse { subscription }).into_response());
     }
     // A VNT device imported from the previous release receives its link on

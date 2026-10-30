@@ -325,6 +325,24 @@ pub fn issue_subscription(
     })
 }
 
+/// Changes the bootstrap endpoint without rotating the device's credentials.
+pub fn update_subscription_server(subscription: &str, server: &str) -> anyhow::Result<String> {
+    let encoded = subscription
+        .strip_prefix(SUBSCRIPTION_PREFIX)
+        .ok_or_else(|| anyhow::anyhow!("不支持的订阅链接格式"))?;
+    let mut payload: SubscriptionPayloadV2 =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(encoded)?)?;
+    anyhow::ensure!(payload.v == 2, "不支持的订阅链接版本");
+    if payload.server == server {
+        return Ok(subscription.to_string());
+    }
+    payload.server = server.to_string();
+    Ok(format!(
+        "{SUBSCRIPTION_PREFIX}{}",
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload)?)
+    ))
+}
+
 pub fn client_proof(credential_key: &[u8], client_nonce: &[u8]) -> Vec<u8> {
     let mut digest = Sha256::new();
     digest.update(credential_key);
@@ -804,6 +822,28 @@ mod tests {
 
     fn access() -> ClientAccessConfig {
         ClientAccessConfig::new("tcp://vpn.example.com:29872".to_string(), Vec::new())
+    }
+
+    #[test]
+    fn subscription_endpoint_refresh_preserves_authentication_and_is_idempotent() {
+        let issued = issue_subscription(&access(), Some(&"a".repeat(64)), "join-id").unwrap();
+        let link = update_subscription_server(&issued.subscription, "tcp://vpn.example.com:29873")
+            .unwrap();
+        let payload: SubscriptionPayloadV2 = serde_json::from_slice(
+            &URL_SAFE_NO_PAD
+                .decode(link.strip_prefix(SUBSCRIPTION_PREFIX).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(payload.server, "tcp://vpn.example.com:29873");
+        assert_eq!(payload.join_id, "join-id");
+        assert_eq!(payload.credential_key, issued.credential_key);
+        assert_eq!(payload.cert_mode, format!("finger:{}", "a".repeat(64)));
+        assert_eq!(
+            update_subscription_server(&link, &payload.server).unwrap(),
+            link
+        );
+        assert!(update_subscription_server("invalid", &payload.server).is_err());
     }
 
     #[test]
