@@ -387,6 +387,16 @@ impl NetworkState {
         &self.sender_map
     }
 
+    /// Release all DashMap guards before callers inspect device state.
+    /// Registration takes lease_state before writing sender_map; keeping an
+    /// iterator guard while acquiring lease_state would invert that order.
+    pub fn sender_snapshot(&self) -> Vec<(Ipv4Addr, DeviceSender)> {
+        self.sender_map
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().clone()))
+            .collect()
+    }
+
     pub fn active_link_ip(
         &self,
         expected_ip: Ipv4Addr,
@@ -2052,6 +2062,50 @@ mod tests {
             .allocate_ip_and_get_entry_as(req, random_id, tx, ClientType::Vnt, vec![instance; 32])
             .unwrap();
         rx
+    }
+
+    #[tokio::test]
+    async fn sender_snapshot_allows_registration_while_reading_device_state() {
+        let state = std::sync::Arc::new(outer_state());
+        let ip = Ipv4Addr::new(10, 26, 0, 5);
+        let _old_receiver = register(&state, ip, 1, 1).await;
+        let snapshot = state.sender_snapshot();
+        assert_eq!(snapshot.len(), 1);
+
+        // Keep the snapshot alive as heartbeat, peer sync and broadcast do.
+        // A DashMap iterator/ref retained here would block this replacement.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let writer_state = state.clone();
+        let writer = std::thread::spawn(move || {
+            let (tx, rx) = mpsc::channel(1);
+            let req = request(ip, false);
+            writer_state
+                .allocate_ip_and_get_entry_as(req, 2, tx, ClientType::Vnt, vec![2; 32])
+                .unwrap();
+            done_tx.send(rx).unwrap();
+        });
+        let mut receiver = done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("snapshot must not block registration's sender_map write");
+        writer.join().unwrap();
+
+        for (snapshot_ip, _) in &snapshot {
+            assert!(
+                state
+                    .get_device_entry_by_ip(*snapshot_ip)
+                    .unwrap()
+                    .is_connected
+            );
+        }
+        state.sender_snapshot()[0]
+            .1
+            .try_send(Bytes::from_static(b"new instance"))
+            .unwrap();
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            Bytes::from_static(b"new instance")
+        );
+        assert_eq!(snapshot[0].0, ip);
     }
 
     #[test]

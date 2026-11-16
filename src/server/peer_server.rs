@@ -848,10 +848,9 @@ impl PeerServerManager {
             let clients =
                 if let Some(state) = self.network_state_provider.get_network_state(&network_code) {
                     let clients: Vec<ClientLatencyInfo> = state
-                        .sender_map()
-                        .iter()
-                        .map(|entry| {
-                            let ip = *entry.key();
+                        .sender_snapshot()
+                        .into_iter()
+                        .map(|(ip, _sender)| {
                             let latency_ms = state
                                 .get_device_entry_by_ip(ip)
                                 .and_then(|device| device.latency_ms)

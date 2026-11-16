@@ -406,8 +406,7 @@ impl WireGuardService {
                     let _ = self.encapsulate(key, &packet).await;
                 }
             }
-            for sender in state.sender_map().iter() {
-                let target_ip = *sender.key();
+            for (target_ip, sender) in state.sender_snapshot() {
                 let Some(device) = state.get_device_entry_by_ip(target_ip) else {
                     continue;
                 };
@@ -424,7 +423,7 @@ impl WireGuardService {
                 relay_packet.set_src_id(source.into());
                 relay_packet.set_dest_id(destination.into());
                 relay_packet.set_payload(&packet)?;
-                let _ = sender.value().try_send(relay.freeze());
+                let _ = sender.try_send(relay.freeze());
             }
             return Ok(());
         }

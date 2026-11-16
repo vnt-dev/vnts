@@ -1530,8 +1530,7 @@ impl ControlService {
                     .unwrap()
                     .as_millis() as u64;
 
-                for entry in state.sender_map().iter() {
-                    let ip = *entry.key();
+                for (ip, sender) in state.sender_snapshot() {
                     if state.get_device_entry_by_ip(ip).is_some_and(|device| {
                         !matches!(
                             device.client_type,
@@ -1540,8 +1539,6 @@ impl ControlService {
                     }) {
                         continue;
                     }
-                    let sender = entry.value().clone();
-
                     let mut buf = BytesMut::zeroed(HEAD_LENGTH + 8);
                     if let Ok(mut packet) = NetPacket::new(&mut buf) {
                         packet.set_msg_type(MsgType::Ping);
