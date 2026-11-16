@@ -44,6 +44,11 @@ impl ControlHandler {
     }
 
     pub async fn handle_reg(&mut self, buf: &[u8]) -> anyhow::Result<()> {
+        let progress = crate::utils::diagnostics::Operation::new(
+            "handle_registration",
+            format!("addr={}", self.addr),
+        );
+        progress.stage("parse_request");
         if self.session.is_some() || self.subscription_session.is_some() {
             bail!("Session is already active");
         }
@@ -54,6 +59,7 @@ impl ControlHandler {
         let reg = match request {
             RequestMessage::Reg(reg) => reg,
             RequestMessage::SubscriptionRegister(request) => {
+                progress.stage("register_subscription");
                 let response = match self
                     .control_service
                     .register_subscription_connection(request, sender.clone())
@@ -68,10 +74,12 @@ impl ControlHandler {
                         message: error.to_string(),
                     }),
                 };
+                progress.stage("enqueue_subscription_response");
                 sender.send(Bytes::from(response.encode())).await?;
                 return Ok(());
             }
             RequestMessage::SubscriptionConfig(request) => {
+                progress.stage("fetch_subscription_config");
                 let response = match self
                     .control_service
                     .fetch_subscription_config(request)
@@ -83,6 +91,7 @@ impl ControlHandler {
                         message: error.to_string(),
                     }),
                 };
+                progress.stage("enqueue_config_response");
                 sender.send(Bytes::from(response.encode())).await?;
                 return Ok(());
             }
@@ -97,14 +106,17 @@ impl ControlHandler {
             reg.device_id
         );
         let registration_mode = reg.registration_mode;
+        progress.stage("register_service");
         let session = match self.control_service.register(reg, sender.clone()).await {
             Ok(session) => session,
             Err(e) => {
+                log::warn!("registration rejected addr={} error={e:#}", self.addr);
                 let msg_response = ErrorResponseMsg {
                     code: 400,
                     message: format!("{e}"),
                 };
                 let vec = ResponseMessage::Error(msg_response).encode();
+                progress.stage("enqueue_registration_error");
                 sender.send(Bytes::from(vec)).await?;
                 return Ok(());
             }
@@ -136,7 +148,17 @@ impl ControlHandler {
             application_channel_supported: true,
         };
         let vec = ResponseMessage::Reg(reg_msg_response).encode();
+        progress.stage("enqueue_registration_response");
         sender.send(Bytes::from(vec)).await?;
+        log::info!(
+            "registration response queued addr={} network_code={} device_id={} ip={} session_id={}",
+            self.addr,
+            session.network_code,
+            session.device_id,
+            session.ip,
+            session.random_id,
+        );
+        progress.stage("activate_subscription");
         if let Some((network_code, device_id)) = session.subscription_identity.clone()
             && let Err(error) = self
                 .control_service

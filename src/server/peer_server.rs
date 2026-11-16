@@ -842,9 +842,19 @@ impl PeerServerManager {
         &self,
         network_codes: Vec<String>,
     ) -> ServerClientInfoResponse {
+        let progress = crate::utils::diagnostics::Operation::new(
+            "peer_client_info",
+            format!("networks={}", network_codes.len()),
+        );
         let mut networks = Vec::new();
 
         for network_code in network_codes {
+            let network_progress = crate::utils::diagnostics::Operation::new(
+                "peer_client_info_network",
+                format!("network_code={network_code}"),
+            );
+            network_progress.stage("snapshot_senders_and_inspect_devices");
+            progress.stage("build_network_info");
             let clients =
                 if let Some(state) = self.network_state_provider.get_network_state(&network_code) {
                     let clients: Vec<ClientLatencyInfo> = state

@@ -1000,7 +1000,16 @@ impl NetworkState {
         client_type: ClientType,
         client_instance_id: Vec<u8>,
     ) -> anyhow::Result<(Ipv4Addr, Option<Ipv4Addr>, Option<DeviceEntry>)> {
+        let progress = crate::utils::diagnostics::Operation::new(
+            "allocate_session",
+            format!(
+                "network_code={} device_id={} session_id={random_id}",
+                self.network_code, reg_req.device_id
+            ),
+        );
+        progress.stage("wait_lease_state");
         let mut guard = self.lease_state.lock();
+        progress.stage("check_existing_links");
         if !client_instance_id.is_empty()
             && let Some(existing) = guard.device_map.get(&reg_req.device_id).cloned()
             && let Some(ip) = existing.ip
@@ -1011,6 +1020,7 @@ impl NetworkState {
             pool.add_link(random_id, sender);
             return Ok((ip, None, Some(existing)));
         }
+        progress.stage("allocate_address");
         let (ip, old_ip) = guard.allocate_ip_as(
             self.net.as_ref(),
             self.gateway,
@@ -1020,6 +1030,7 @@ impl NetworkState {
         )?;
 
         if let Some(old_ip) = old_ip {
+            progress.stage("remove_old_sender");
             self.sender_map.remove(&old_ip);
             self.traffic_stats_map.remove(&old_ip);
         }
@@ -1035,6 +1046,7 @@ impl NetworkState {
         if !stale_active_ips.is_empty() {
             guard.full_sync_version = guard.data_version;
         }
+        progress.stage("remove_stale_senders");
         for stale_ip in stale_active_ips {
             guard.active_ip_map.remove(&stale_ip);
             self.sender_map.remove(&stale_ip);
@@ -1042,11 +1054,13 @@ impl NetworkState {
         }
 
         let entry = guard.device_map.get(&reg_req.device_id).cloned();
+        progress.stage("replace_sender");
         self.sender_map
             .insert(ip, DeviceSender::new(client_instance_id, random_id, sender));
         guard.active_ip_map.insert(ip, reg_req.device_id.clone());
 
         if let Some(entry) = &entry {
+            progress.stage("update_traffic_stats");
             self.traffic_stats_map
                 .insert(ip, entry.traffic_stats.clone());
         }

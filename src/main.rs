@@ -33,6 +33,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     utils::log::log_init("vnts2");
+    utils::diagnostics::start_watchdog();
     log::info!("version: {:?}", env!("CARGO_PKG_VERSION"));
     let config_path = args
         .conf

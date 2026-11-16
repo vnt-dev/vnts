@@ -597,6 +597,14 @@ impl ControlService {
         sender: Sender<Bytes>,
         client_type: ClientType,
     ) -> anyhow::Result<Session> {
+        let progress = crate::utils::diagnostics::Operation::new(
+            "register",
+            format!(
+                "network_code={} device_id={}",
+                reg_req.network_code, reg_req.device_id
+            ),
+        );
+        progress.stage("validate_request");
         reg_req.check()?;
         let network_code = reg_req.network_code.clone();
         let registration_mode = reg_req.registration_mode;
@@ -608,6 +616,7 @@ impl ControlService {
         let subscription_registration = None;
         let claimed_subscription_identity =
             validate_subscription_identity(&reg_req, subscription_registration.as_ref())?;
+        progress.stage("load_managed_config");
         let managed_config =
             if let Some((managed_network, managed_device)) = &claimed_subscription_identity {
                 db::get_managed_config(managed_network, managed_device).await?
@@ -622,12 +631,15 @@ impl ControlService {
             bail!("network_code '{}' is not in white_list", network_code);
         }
 
+        progress.stage("lookup_mutation_lock");
         let mutation_lock = self
             .device_mutation_locks
             .entry(network_code.clone())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone();
+        progress.stage("wait_mutation_lock");
         let _mutation_guard = mutation_lock.lock().await;
+        progress.stage("resolve_network_config");
 
         let is_new_network = !self.db_nets.read().contains_key(&reg_req.network_code);
         let config = if is_new_network && client_type == ClientType::RemoteDesktop {
@@ -644,6 +656,7 @@ impl ControlService {
         );
 
         if is_new_network {
+            progress.stage("save_new_network");
             db::save_network(&NetworkRecord {
                 network_code: network_code.clone(),
                 gateway: config
@@ -664,6 +677,7 @@ impl ControlService {
             self.db_nets.write().insert(network_code.clone(), config);
         }
 
+        progress.stage("get_network_state");
         let state = self
             .get_or_create_network_state(reg_req.network_code.clone(), config)
             .await;
@@ -692,6 +706,7 @@ impl ControlService {
             validate_registered_revision(registration.applied_revision, record.revision)?;
         }
 
+        progress.stage("check_existing_device");
         let existing = state.get_device_entry(&reg_req.device_id);
         if existing
             .as_ref()
@@ -734,6 +749,7 @@ impl ControlService {
             let client_instance_id = reg_req.client_instance_id.clone();
 
             let managed_sender = sender.clone();
+            progress.stage("allocate_ip_and_replace_session");
             let (ip, _old_ip, entry) = match state.allocate_ip_and_get_entry_as(
                 reg_req,
                 random_id,
@@ -748,6 +764,7 @@ impl ControlService {
                 }
             };
 
+            progress.stage("update_subscription_session");
             if let (Some(identity), Some(registration), Some(_)) = (
                 subscription_identity.clone(),
                 subscription_registration.as_ref(),
@@ -847,6 +864,7 @@ impl ControlService {
         {
             let nc = network_code.clone();
             let record = entry.to_record(&nc);
+            progress.stage("save_device_db");
             db::save_or_update_device(&record).await?;
         }
 
@@ -1459,18 +1477,26 @@ impl ControlService {
 
     async fn release_expired_ips(&self, state: &Arc<NetworkState>) {
         let network_code = state.network_code();
+        let progress = crate::utils::diagnostics::Operation::new(
+            "release_expired_ips",
+            format!("network_code={network_code}"),
+        );
+        progress.stage("lookup_mutation_lock");
         let mutation_lock = self
             .device_mutation_locks
             .entry(network_code.clone())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone();
+        progress.stage("wait_mutation_lock");
         let _guard = mutation_lock.lock().await;
+        progress.stage("collect_expired_devices");
         let expired_devices = state.collect_expired_devices();
 
         if expired_devices.is_empty() {
             return;
         }
 
+        progress.stage("remove_expired_devices");
         let expired_devices = state.remove_devices(&expired_devices);
 
         for device_id in expired_devices {
@@ -1479,6 +1505,7 @@ impl ControlService {
                 network_code,
                 device_id
             );
+            progress.stage("release_ip_db");
             if let Err(e) = db::release_device_ip(&network_code, &device_id).await {
                 log::error!("Error releasing device IP: {}", e);
             }
@@ -1492,6 +1519,9 @@ impl ControlService {
             loop {
                 tokio::time::sleep(interval).await;
 
+                let progress =
+                    crate::utils::diagnostics::Operation::new("lease_cleanup", String::new());
+                progress.stage("snapshot_networks");
                 // 收集所有 state 的引用
                 let state_list: Vec<Arc<NetworkState>> = network_state_provider
                     .iter()
@@ -1499,10 +1529,15 @@ impl ControlService {
                     .collect();
 
                 for state in state_list {
+                    progress.stage("release_expired_ips");
                     service.release_expired_ips(&state).await;
                 }
 
+                drop(progress);
                 tokio::time::sleep(Duration::from_secs(3)).await;
+                let progress =
+                    crate::utils::diagnostics::Operation::new("network_cleanup", String::new());
+                progress.stage("release_networks");
                 service.release_network();
             }
         });
@@ -1521,16 +1556,27 @@ impl ControlService {
         use crate::protocol::ip_packet_protocol::{HEAD_LENGTH, MsgType, NetPacket};
         use bytes::BytesMut;
 
+        let progress = crate::utils::diagnostics::Operation::new("client_ping", String::new());
+        progress.stage("list_networks");
         let network_codes = self.get_network_codes();
 
+        progress.stage("ping_networks");
         for network_code in network_codes {
+            let network_progress = crate::utils::diagnostics::Operation::new(
+                "client_ping_network",
+                format!("network_code={network_code}"),
+            );
+            network_progress.stage("get_network_state");
             if let Some(state) = self.get_network_state(&network_code) {
                 let timestamp = SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH)
                     .unwrap()
                     .as_millis() as u64;
 
-                for (ip, sender) in state.sender_snapshot() {
+                network_progress.stage("snapshot_senders");
+                let senders = state.sender_snapshot();
+                network_progress.stage("inspect_devices_and_enqueue_ping");
+                for (ip, sender) in senders {
                     if state.get_device_entry_by_ip(ip).is_some_and(|device| {
                         !matches!(
                             device.client_type,
@@ -3050,6 +3096,14 @@ pub struct Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        let progress = crate::utils::diagnostics::Operation::new(
+            "session_drop",
+            format!(
+                "network_code={} device_id={} ip={} session_id={}",
+                self.network_code, self.device_id, self.ip, self.random_id
+            ),
+        );
+        progress.stage("remove_subscription_link");
         if let Some(identity) = &self.subscription_identity {
             let remove_entry =
                 self.subscription_sessions
@@ -3065,6 +3119,7 @@ impl Drop for Session {
         }
         match self.registration_status {
             RegistrationStatus::Confirmed => {
+                progress.stage("offline_ip");
                 let record = self.network_state.offline_ip(
                     &self.device_id,
                     self.ip,
@@ -3080,6 +3135,7 @@ impl Drop for Session {
                 }
             }
             RegistrationStatus::PendingConfirmation => {
+                progress.stage("release_pre_registered_ip");
                 log::info!(
                     "Releasing pre-registered IP for network_code={}, device_id={}, ip={}",
                     self.network_code,
