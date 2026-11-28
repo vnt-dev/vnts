@@ -1,13 +1,17 @@
 //! Progress tracking independent of Tokio, so blocked workers can still be diagnosed.
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, Once, OnceLock};
 use std::time::{Duration, Instant};
 
 const STALLED_AFTER: Duration = Duration::from_secs(5);
 const REPEAT_AFTER: Duration = Duration::from_secs(30);
-static OPERATIONS: OnceLock<Mutex<HashMap<u64, Pending>>> = OnceLock::new();
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+static OPERATIONS: OnceLock<Mutex<Operations>> = OnceLock::new();
+
+struct Operations {
+    next_id: u64,
+    pending: HashMap<u64, Pending>,
+}
 
 struct Pending {
     operation: &'static str,
@@ -18,8 +22,13 @@ struct Pending {
     last_warning: Option<Instant>,
 }
 
-fn operations() -> &'static Mutex<HashMap<u64, Pending>> {
-    OPERATIONS.get_or_init(Mutex::default)
+fn operations() -> &'static Mutex<Operations> {
+    OPERATIONS.get_or_init(|| {
+        Mutex::new(Operations {
+            next_id: 1,
+            pending: HashMap::new(),
+        })
+    })
 }
 
 pub struct Operation(u64);
@@ -27,22 +36,21 @@ pub struct Operation(u64);
 impl Operation {
     // Only pass identifiers here, never request bodies, passwords or tokens.
     pub fn new(operation: &'static str, context: String) -> Self {
-        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let now = Instant::now();
-        operations()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                id,
-                Pending {
-                    operation,
-                    context,
-                    stage: "start",
-                    started: now,
-                    stage_started: now,
-                    last_warning: None,
-                },
-            );
+        let mut registry = operations().lock().unwrap_or_else(|e| e.into_inner());
+        let id = registry.next_id;
+        registry.next_id = id.wrapping_add(1);
+        registry.pending.insert(
+            id,
+            Pending {
+                operation,
+                context,
+                stage: "start",
+                started: now,
+                stage_started: now,
+                last_warning: None,
+            },
+        );
         Self(id)
     }
 
@@ -50,6 +58,7 @@ impl Operation {
         if let Some(pending) = operations()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .pending
             .get_mut(&self.0)
         {
             pending.stage = stage;
@@ -64,6 +73,7 @@ impl Drop for Operation {
         let pending = operations()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .pending
             .remove(&self.0);
         if let Some(pending) = pending
             && pending.started.elapsed() >= Duration::from_secs(1)
@@ -102,7 +112,7 @@ fn collect_warnings(pending: &mut HashMap<u64, Pending>, now: Instant) -> Vec<St
 /// Call from within the running Tokio runtime, after logging is configured.
 pub fn start_watchdog() {
     static START: Once = Once::new();
-    static HEARTBEAT: AtomicU64 = AtomicU64::new(0);
+    static HEARTBEAT: AtomicU32 = AtomicU32::new(0);
     START.call_once(|| {
         let thread = std::thread::Builder::new()
             .name("diagnostic-watchdog".into())
@@ -113,9 +123,10 @@ pub fn start_watchdog() {
                 loop {
                     std::thread::sleep(STALLED_AFTER);
                     let now = Instant::now();
-                    let warnings = collect_warnings(
-                        &mut operations().lock().unwrap_or_else(|e| e.into_inner()), now,
-                    );
+                    let warnings = {
+                        let mut registry = operations().lock().unwrap_or_else(|e| e.into_inner());
+                        collect_warnings(&mut registry.pending, now)
+                    };
                     // Never call the logger while holding the diagnostics registry lock.
                     for warning in warnings {
                         log::warn!("{warning}");
@@ -162,11 +173,11 @@ mod tests {
             id = operation.0;
             operation.stage("wait_lease_state");
             let registry = operations().lock().unwrap();
-            let pending = registry.get(&id).unwrap();
+            let pending = registry.pending.get(&id).unwrap();
             assert_eq!(pending.stage, "wait_lease_state");
             assert!(pending.last_warning.is_none());
         }
-        assert!(!operations().lock().unwrap().contains_key(&id));
+        assert!(!operations().lock().unwrap().pending.contains_key(&id));
     }
 
     #[test]
