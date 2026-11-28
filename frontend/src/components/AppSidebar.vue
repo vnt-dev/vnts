@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ChevronDown, Link2, Network, Radio, Server, Settings, ShieldCheck, Waves } from '@lucide/vue'
+import { ChevronDown, Link2, Network, Route, Radio, Server, Settings, ShieldCheck, Waves } from '@lucide/vue'
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import AppLogo from './AppLogo.vue'
@@ -37,6 +37,14 @@ const activeSettingsSection = computed(() =>
       >
         <Server :size="18" />
         服务器列表
+      </RouterLink>
+      <RouterLink
+        to="/port-mappings"
+        class="flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100"
+        active-class="!bg-blue-50 !font-semibold !text-blue-700 dark:!bg-blue-500/15 dark:!text-blue-400"
+      >
+        <Route :size="18" />
+        端口映射
       </RouterLink>
       <div>
         <RouterLink

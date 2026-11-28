@@ -8,6 +8,8 @@ import type {
   NetworkInfo,
   NetworkWhitelistSettings,
   PeerServersResponse,
+  PortMapping,
+  PortMappingConfig,
   Ikev2ServiceInfo,
   UpdateIkev2ServicePayload,
   UpdateNetworkPayload,
@@ -123,4 +125,15 @@ export const settingsApi = {
     downloadFile(`/ikev2/ca-certificate?format=${format}`, `vnt-ikev2-ca.${format === 'der' ? 'cer' : 'pem'}`),
   downloadIkev2ServerCertificate: (format: 'der' | 'pem' = 'der') =>
     downloadFile(`/ikev2/server-certificate?format=${format}`, `vnt-ikev2-server.${format === 'der' ? 'cer' : 'pem'}`),
+}
+
+export const portMappingApi = {
+  list: () => request<PortMapping[]>('/port-mappings'),
+  poll: () => fetchSilent<PortMapping[]>('/port-mappings'),
+  create: (body: PortMappingConfig) =>
+    request<PortMapping[]>('/port-mappings', { method: 'POST', body }),
+  update: (id: string, body: PortMappingConfig) =>
+    request<PortMapping[]>(`/port-mappings/${encodeURIComponent(id)}`, { method: 'PUT', body }),
+  remove: (id: string) =>
+    request<PortMapping[]>(`/port-mappings/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 }

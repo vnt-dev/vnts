@@ -37,6 +37,8 @@ pub struct ConfigFile {
     pub wireguard: Option<WireGuardConfig>,
     #[serde(default)]
     pub client_access: ClientAccessConfig,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) port_mappings: Vec<crate::server::reverse_proxy::MappingRule>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
@@ -228,6 +230,7 @@ impl Default for ConfigFile {
             ikev2: None,
             wireguard: None,
             client_access: ClientAccessConfig::default(),
+            port_mappings: Vec::new(),
         }
     }
 }
@@ -260,6 +263,7 @@ impl ConfigFile {
     }
 
     fn validate(&self) -> anyhow::Result<()> {
+        crate::server::reverse_proxy::ReverseProxy::validate(&self.port_mappings)?;
         for network_code in self.white_list.iter().chain(self.custom_nets.keys()) {
             validate_network_code(network_code)?;
         }
@@ -479,6 +483,27 @@ pub fn update_client_access_config(
     parsed.client_access.validate_optional()?;
     persist_document(path, rendered)?;
     Ok(parsed.client_access)
+}
+
+pub(crate) fn update_port_mappings(
+    path: &Path,
+    rules: &[crate::server::reverse_proxy::MappingRule],
+) -> anyhow::Result<()> {
+    #[derive(Serialize)]
+    struct Mappings<'a> {
+        port_mappings: &'a [crate::server::reverse_proxy::MappingRule],
+    }
+
+    let mut document = std::fs::read_to_string(path)?.parse::<DocumentMut>()?;
+    let mut mappings = toml::to_string(&Mappings {
+        port_mappings: rules,
+    })?
+    .parse::<DocumentMut>()?;
+    document.remove("port_mappings");
+    if let Some(item) = mappings.remove("port_mappings") {
+        document.insert("port_mappings", item);
+    }
+    persist_document(path, document.to_string())
 }
 
 pub fn update_wireguard_config(

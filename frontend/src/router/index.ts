@@ -28,6 +28,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '服务器列表' },
   },
   {
+    path: '/port-mappings',
+    name: 'port-mappings',
+    component: () => import('@/views/PortMappingsView.vue'),
+    meta: { title: '端口映射' },
+  },
+  {
     path: '/settings',
     name: 'settings',
     component: () => import('@/views/SettingsView.vue'),

@@ -154,6 +154,7 @@ impl RegRequestMsg {
 }
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct RegResponseMsg {
+    pub reverse_proxy_supported: bool,
     pub connection_id: Option<u32>,
     pub ip: Ipv4Addr,
     pub prefix_len: u8,
@@ -169,6 +170,7 @@ pub struct RegResponseMsg {
 impl RegResponseMsg {
     pub fn to(self) -> proto::RegResponseMsg {
         proto::RegResponseMsg {
+            reverse_proxy_supported: self.reverse_proxy_supported,
             connection_id: self.connection_id,
             ip: if self.connection_id.is_some() {
                 0

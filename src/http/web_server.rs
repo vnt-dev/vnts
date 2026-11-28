@@ -10,6 +10,7 @@ use crate::server::control_server::db::{
 use crate::server::control_server::service::{
     DeviceInfoVO, NetworkInfoVO, NetworkWhitelist, SubscriptionLiveState, SubscriptionPushStatus,
 };
+use crate::server::reverse_proxy::{Change as MappingChange, MappingConfig, MappingStatus};
 use crate::utils::config::{
     ClientAccessConfig, Ikev2Config, WireGuardConfig, load_ikev2_config, load_wireguard_config,
     update_client_access_config as persist_client_access_config,
@@ -21,7 +22,7 @@ use anyhow::Context;
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path, Query, State},
+    extract::{Path, Query, State, rejection::JsonRejection},
     http::{HeaderMap, Request, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -2639,12 +2640,56 @@ fn safe_static_path(path: &str) -> Option<PathBuf> {
     Some(StdPath::new("static").join(relative))
 }
 
+async fn list_port_mappings(State(state): State<AppState>) -> ApiResponse<Vec<MappingStatus>> {
+    ApiResponse::ok(state.control_service.reverse_proxy.list())
+}
+
+async fn change_port_mapping(
+    state: AppState,
+    change: MappingChange,
+) -> ApiResponse<Vec<MappingStatus>> {
+    let _guard = state.config_update_lock.lock().await;
+    let proxy = &state.control_service.reverse_proxy;
+    match proxy.change(&state.config_path, change).await {
+        Ok(()) => ApiResponse::ok(proxy.list()),
+        Err(error) => ApiResponse::err(error.to_string()),
+    }
+}
+
+async fn create_port_mapping(
+    State(state): State<AppState>,
+    config: Result<Json<MappingConfig>, JsonRejection>,
+) -> ApiResponse<Vec<MappingStatus>> {
+    match config {
+        Ok(Json(config)) => change_port_mapping(state, MappingChange::Create(config)).await,
+        Err(error) => ApiResponse::err(error.body_text()),
+    }
+}
+
+async fn update_port_mapping(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    config: Result<Json<MappingConfig>, JsonRejection>,
+) -> ApiResponse<Vec<MappingStatus>> {
+    match config {
+        Ok(Json(config)) => change_port_mapping(state, MappingChange::Update(id, config)).await,
+        Err(error) => ApiResponse::err(error.body_text()),
+    }
+}
+
+async fn delete_port_mapping(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResponse<Vec<MappingStatus>> {
+    change_port_mapping(state, MappingChange::Delete(id)).await
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn start_http_server(
     control_service: ControlService,
     username: String,
     password: String,
-    web_bind: SocketAddr,
+    listener: tokio::net::TcpListener,
     config_path: PathBuf,
     client_access: ClientAccessConfig,
     certificate_fingerprint: String,
@@ -2679,10 +2724,7 @@ pub async fn start_http_server(
 
     let app = build_app(app_state);
 
-    log::info!("HTTP Server running at http://{}", web_bind);
-
-    let listener =
-        tokio::net::TcpListener::from_std(crate::utils::net::bind_tcp_listener(web_bind)?)?;
+    log::info!("HTTP Server running at http://{}", listener.local_addr()?);
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -2694,6 +2736,14 @@ fn build_app(app_state: AppState) -> Router {
         .allow_headers(Any);
 
     let api_routes = Router::new()
+        .route(
+            "/port-mappings",
+            get(list_port_mappings).post(create_port_mapping),
+        )
+        .route(
+            "/port-mappings/{id}",
+            put(update_port_mapping).delete(delete_port_mapping),
+        )
         .route("/network_codes", get(list_network_code))
         .route("/networks", get(list_networks))
         .route("/networks", post(create_network))

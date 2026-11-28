@@ -122,12 +122,17 @@ async fn main() -> anyhow::Result<()> {
         control_service.set_wireguard_manager(wireguard);
     }
 
-    if let Some(web_bind) = web_bind {
+    let web_listener = web_bind
+        .map(|addr| tokio::net::TcpListener::from_std(utils::net::bind_tcp_listener(addr)?))
+        .transpose()?;
+    control_service.reverse_proxy.start(conf.port_mappings);
+
+    if let Some(web_listener) = web_listener {
         http::web_server::start_http_server(
             control_service,
             username,
             password,
-            web_bind,
+            web_listener,
             config_path,
             client_access,
             certificate_fingerprint,

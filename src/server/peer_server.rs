@@ -552,8 +552,11 @@ impl PeerServerManager {
             .network_state_provider
             .get_network_state(&forward.network_code)
         {
-            use crate::protocol::ip_packet_protocol::NetPacket;
+            use crate::protocol::ip_packet_protocol::{MsgType, NetPacket};
             if let Ok(packet) = NetPacket::new(forward.data) {
+                if matches!(packet.msg_type(), Ok(MsgType::ReverseProxy)) {
+                    return;
+                }
                 let dest = Ipv4Addr::from(packet.dest_id());
                 if packet.msg_type().ok()
                     == Some(crate::protocol::ip_packet_protocol::MsgType::Application)

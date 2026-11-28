@@ -109,6 +109,11 @@ async fn quic_stream_handle(
         bail!("framed_read next empty");
     };
     let buf = first?;
+    if let Some(token) = crate::protocol::reverse_proxy::read_attach(&buf) {
+        return control_service
+            .reverse_proxy
+            .attach(token, framed_write, framed_read);
+    }
     let (out_sender, mut out_receiver) = tokio::sync::mpsc::channel(1024);
     let (in_sender, mut in_receiver) = tokio::sync::mpsc::channel(1024);
     let mut handler = ControlHandler::new(control_service, addr, out_sender.downgrade());
@@ -125,7 +130,8 @@ async fn quic_stream_handle(
                         break;
                     }
                 }
-                Some(rs) = framed_read.next() => {
+                rs = framed_read.next() => {
+                    let Some(rs) = rs else { break; };
                     match rs {
                         Ok(bytes) => {
                             if in_sender.send(bytes).await.is_err() {

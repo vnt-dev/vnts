@@ -114,6 +114,21 @@ where
         _ => bail!("unexpected first message type"),
     };
 
+    if let Some(token) = crate::protocol::reverse_proxy::read_attach(&buf) {
+        let (send, recv) = ws_stream.split();
+        let send = send
+            .with(|bytes| std::future::ready(Ok::<_, tungstenite::Error>(Message::Binary(bytes))));
+        let recv = recv.filter_map(|item| {
+            std::future::ready(match item {
+                Ok(Message::Binary(bytes)) => Some(Ok(bytes)),
+                Ok(Message::Close(_)) => Some(Err(tungstenite::Error::ConnectionClosed)),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+        });
+        return control_service.reverse_proxy.attach(token, send, recv);
+    }
+
     let (out_sender, mut out_receiver) = tokio::sync::mpsc::channel(1024);
     let (in_sender, mut in_receiver) = tokio::sync::mpsc::channel(1024);
 
@@ -130,7 +145,8 @@ where
                         break;
                     }
                 }
-                Some(rs) = ws_stream.next() => {
+                rs = ws_stream.next() => {
+                    let Some(rs) = rs else { break; };
                     match rs {
                         Ok(msg) => {
                             match msg {

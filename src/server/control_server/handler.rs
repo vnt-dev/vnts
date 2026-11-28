@@ -26,6 +26,7 @@ pub struct ControlHandler {
     sender: WeakSender<Bytes>,
     session: Option<Session>,
     subscription_session: Option<SubscriptionControlSession>,
+    reverse_proxy_link: Option<std::sync::Arc<crate::server::reverse_proxy::ProxyLink>>,
 }
 
 impl ControlHandler {
@@ -40,6 +41,7 @@ impl ControlHandler {
             sender,
             session: None,
             subscription_session: None,
+            reverse_proxy_link: None,
         }
     }
 
@@ -132,6 +134,8 @@ impl ControlHandler {
         let session = self.session.insert(session);
 
         let reg_msg_response = RegResponseMsg {
+            reverse_proxy_supported: session.network_state.group_type()
+                != crate::server::control_server::db::GroupType::RemoteDesktop,
             connection_id: (session.network_state.group_type()
                 == crate::server::control_server::db::GroupType::RemoteDesktop)
                 .then(|| u32::from(session.ip)),
@@ -228,6 +232,7 @@ impl ControlHandler {
         }
 
         let service = self.control_service.clone();
+        let previous_ip = session.ip;
         let response = match service.fast_register(session, request.ip).await {
             Ok(()) => ResponseMessage::FastReg(FastRegResponseMsg { success: true }),
             Err(error) => ResponseMessage::Error(ErrorResponseMsg {
@@ -235,6 +240,9 @@ impl ControlHandler {
                 message: error.to_string(),
             }),
         };
+        if previous_ip != session.ip && self.reverse_proxy_link.is_some() {
+            self.update_reverse_proxy_link(true);
+        }
         let response = Self::gateway_response_packet(MsgType::FastReg, &response.encode())?;
         sender.send(response).await?;
         Ok(())
@@ -248,6 +256,29 @@ impl ControlHandler {
         packet.set_ttl(1);
         packet.set_payload(payload)?;
         Ok(buf.freeze())
+    }
+
+    fn update_reverse_proxy_link(&mut self, allowed: bool) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let proxy = &self.control_service.reverse_proxy;
+        if let Some(link) = self.reverse_proxy_link.take() {
+            proxy.clear_link(&link);
+        }
+        if allowed {
+            self.reverse_proxy_link =
+                Some(proxy.set_link(crate::server::reverse_proxy::ProxyLink {
+                    network: session.network_code.clone(),
+                    ip: session.ip,
+                    device_id: session.device_id.clone(),
+                    state: session.network_state.clone(),
+                    instance: session.client_instance_id.clone(),
+                    id: session.random_id,
+                    sender: self.sender.clone(),
+                    stop: tokio_util::sync::CancellationToken::new(),
+                }));
+        }
     }
 
     pub async fn handle_gateway(&mut self, mut buf: BytesMut) -> anyhow::Result<()> {
@@ -270,6 +301,20 @@ impl ControlHandler {
             bail!("Session is not active");
         };
         match msg_type {
+            MsgType::ReverseProxy => {
+                if session.registration_status == RegistrationStatus::Confirmed
+                    && u32::from(session.ip) == packet.src_id()
+                    && u32::from(session.network_state.gateway()) == packet.dest_id()
+                    && session.network_state.group_type()
+                        != crate::server::control_server::db::GroupType::RemoteDesktop
+                    && let [allowed @ (0 | 1)] = packet.payload()
+                {
+                    let allowed = *allowed == 1;
+                    if self.reverse_proxy_link.is_some() != allowed {
+                        self.update_reverse_proxy_link(allowed);
+                    }
+                }
+            }
             MsgType::Turn => {
                 if session.network_state.group_type()
                     == crate::server::control_server::db::GroupType::RemoteDesktop
@@ -471,7 +516,12 @@ impl ControlHandler {
         ) else {
             bail!("Session has been replaced by another client instance");
         };
+        let moved = session.ip != active_ip;
         session.ip = active_ip;
+        if moved && self.reverse_proxy_link.is_some() {
+            self.update_reverse_proxy_link(true);
+        }
+        let session = self.session.as_ref().unwrap();
         if session.registration_status == RegistrationStatus::PendingConfirmation {
             if let Ok(request) = RequestMessage::from_slice(&buf)
                 && matches!(request, RequestMessage::ConfirmReg(_))
@@ -692,7 +742,7 @@ impl ControlHandler {
             MsgType::ExcludeBroadcast => {
                 let broadcast_packet = SelectiveBroadcast::from_slice(packet.payload())?;
                 let mut packet = NetPacket::new(broadcast_packet.data)?;
-                if !packet.decr_ttl() {
+                if matches!(packet.msg_type(), Ok(MsgType::ReverseProxy)) || !packet.decr_ttl() {
                     return Ok(());
                 }
                 let buf = Bytes::from(packet.into_buffer());
@@ -712,7 +762,7 @@ impl ControlHandler {
             MsgType::TargetBroadcast => {
                 let broadcast_packet = SelectiveBroadcast::from_slice(packet.payload())?;
                 let mut packet = NetPacket::new(broadcast_packet.data)?;
-                if !packet.decr_ttl() {
+                if matches!(packet.msg_type(), Ok(MsgType::ReverseProxy)) || !packet.decr_ttl() {
                     return Ok(());
                 }
                 let buf = Bytes::from(packet.into_buffer());
@@ -853,6 +903,14 @@ impl ControlHandler {
         reply_net_packet.set_seq(packet.seq());
         reply_net_packet.set_payload(&reply_ip_buf).ok()?;
         Some(reply_buf.freeze())
+    }
+}
+
+impl Drop for ControlHandler {
+    fn drop(&mut self) {
+        if let Some(link) = self.reverse_proxy_link.take() {
+            self.control_service.reverse_proxy.clear_link(&link);
+        }
     }
 }
 

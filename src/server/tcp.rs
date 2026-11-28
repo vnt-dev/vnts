@@ -86,6 +86,10 @@ where
         bail!("framed next empty");
     };
     let buf = first?;
+    if let Some(token) = crate::protocol::reverse_proxy::read_attach(&buf) {
+        let (send, recv) = framed.split();
+        return control_service.reverse_proxy.attach(token, send, recv);
+    }
     let (out_sender, mut out_receiver) = tokio::sync::mpsc::channel(1024);
     let (in_sender, mut in_receiver) = tokio::sync::mpsc::channel(1024);
 
@@ -103,7 +107,8 @@ where
                         break;
                     }
                 }
-                Some(rs) = framed.next() => {
+                rs = framed.next() => {
+                    let Some(rs) = rs else { break; };
                     match rs {
                         Ok(bytes) => {
                             if let Err(_closed) = in_sender.send(bytes).await {

@@ -2,6 +2,7 @@ pub mod control_server;
 pub mod ikev2;
 pub mod network_state_provider;
 pub mod peer_server;
+pub(crate) mod reverse_proxy;
 pub mod wireguard;
 
 // 传输层

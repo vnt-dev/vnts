@@ -303,6 +303,7 @@ fn network_pattern_matches(pattern: &str, network_code: &str) -> bool {
 
 #[derive(Clone)]
 pub struct ControlService {
+    pub(crate) reverse_proxy: Arc<crate::server::reverse_proxy::ReverseProxy>,
     server_instance_id: Arc<Vec<u8>>,
     default_net: Ipv4Net,
     default_gateway: Ipv4Addr,
@@ -373,6 +374,7 @@ impl ControlService {
         let db_nets = Self::merge_network_configs(Self::load_networks_from_db().await, config_nets);
 
         let service = Self {
+            reverse_proxy: Arc::default(),
             server_instance_id: Arc::new({
                 let mut value = vec![0_u8; 32];
                 rand::rng().fill_bytes(&mut value);

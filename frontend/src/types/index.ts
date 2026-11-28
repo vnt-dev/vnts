@@ -285,3 +285,21 @@ export interface CreateManagedDevicePayload {
   traffic_servers_override: string[]
   client_type?: 'VNT' | 'REMOTE_DESKTOP'
 }
+
+export interface PortMappingConfig {
+  protocol: 'tcp' | 'udp'
+  listen_ip: string
+  listen_port: number
+  network_code: string
+  virtual_ip: string
+  lan_ip: string | null
+  target_port: number
+  enabled: boolean
+}
+
+export interface PortMapping extends PortMappingConfig {
+  id: string
+  listening: boolean
+  bind_error: string | null
+  target_ready: boolean
+}

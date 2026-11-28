@@ -35,6 +35,7 @@ message RegRequestMsg {
 
 
 message RegResponseMsg {
+  bool reverse_proxy_supported = 12;
   optional fixed32 connection_id = 11;
   bool application_channel_supported = 10;
     fixed32 ip = 1;

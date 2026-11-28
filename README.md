@@ -31,6 +31,12 @@ IKEv2 客户端从对应网络的地址池获取虚拟 IP，并可跨互联服�
 WireGuard、IKEv2 和 VNT 设备支持本地及跨服务端单播互通。普通 VNT 客户端必须在注册请求中设置 `allow_wireguard = true` 才会发现 WireGuard 设备并接受其流量；该开关与 `allow_ikev2` 相互独立。当前服务端支持 IPv4，暂不支持 WireGuard IPv6 和跨服务端广播。
 
 
+## 服务端端口映射
+
+在 Web 管理端打开「端口映射」，选择 TCP 或 UDP，填写服务端监听端口、网络编号、目标客户端的虚拟 IPv4 和目标端口。监听地址默认是 `0.0.0.0`。内网 IPv4 留空时，目标客户端连接自己的 `127.0.0.1`。填写内网 IPv4 后，客户端使用自身的网络连接目标地址。
+
+目标 VNT 客户端须通过 TCP、QUIC 或 WSS 直连本服务端，并在本地开启「允许服务端反代」，或配置 `allow_reverse_proxy = true`。命令行也可传入 `--allow-reverse-proxy`。规则保存在服务端 `config.toml` 的 `port_mappings` 中，受管订阅无法开启客户端授权。
+
 ## Web 管理端（前端）
 
 前端基于 Vue 3 + Vite + Tailwind CSS，源码位于 `frontend/`，构建产物输出到 `static/`

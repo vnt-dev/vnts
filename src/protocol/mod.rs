@@ -3,6 +3,7 @@ use prost::Message;
 
 pub mod control_message;
 pub mod ip_packet_protocol;
+pub(crate) mod reverse_proxy;
 pub mod rpc_message;
 pub mod server_message;
 

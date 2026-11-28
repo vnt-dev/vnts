@@ -114,6 +114,7 @@ pub enum MsgType {
     WireGuardRelay = 26,
     SubscriptionConfigPush = 31,
     SubscriptionConfigAck = 32,
+    ReverseProxy = 34,
 }
 
 impl From<MsgType> for u8 {
@@ -157,6 +158,7 @@ impl TryFrom<u8> for MsgType {
             26 => MsgType::WireGuardRelay,
             31 => MsgType::SubscriptionConfigPush,
             32 => MsgType::SubscriptionConfigAck,
+            34 => MsgType::ReverseProxy,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
