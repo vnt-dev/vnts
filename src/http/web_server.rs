@@ -8,13 +8,14 @@ use crate::server::control_server::db::{
     self, ClientType, DeviceIpType, GroupType, Ikev2InputRoute, ManagedConfigRecord, NetworkType,
 };
 use crate::server::control_server::service::{
-    DeviceInfoVO, NetworkInfoVO, SubscriptionLiveState, SubscriptionPushStatus,
+    DeviceInfoVO, NetworkInfoVO, NetworkWhitelist, SubscriptionLiveState, SubscriptionPushStatus,
 };
 use crate::utils::config::{
     ClientAccessConfig, Ikev2Config, WireGuardConfig, load_ikev2_config, load_wireguard_config,
     update_client_access_config as persist_client_access_config,
     update_ikev2_config as persist_ikev2_config, update_white_list as persist_white_list,
     update_wireguard_config as persist_wireguard_config, validate_network_code,
+    validate_network_pattern,
 };
 use anyhow::Context;
 use axum::{
@@ -32,7 +33,6 @@ use rand::Rng;
 use rand::distr::Alphanumeric;
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Component, Path as StdPath, PathBuf};
 use std::sync::Arc;
@@ -145,56 +145,85 @@ async fn list_networks(State(state): State<AppState>) -> ApiResponse<Vec<Network
     ApiResponse::ok(info)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Serialize)]
 struct NetworkWhitelistSettings {
     network_codes: Vec<String>,
+    network_patterns: Vec<String>,
 }
 
-fn normalize_network_codes(network_codes: Vec<String>) -> anyhow::Result<Vec<String>> {
-    let mut normalized = BTreeSet::new();
-    for network_code in network_codes {
-        validate_network_code(&network_code)?;
-        normalized.insert(network_code);
+impl From<NetworkWhitelist> for NetworkWhitelistSettings {
+    fn from(whitelist: NetworkWhitelist) -> Self {
+        let mut network_codes: Vec<_> = whitelist.network_codes.into_iter().collect();
+        let mut network_patterns: Vec<_> = whitelist.network_patterns.into_iter().collect();
+        network_codes.sort();
+        network_patterns.sort();
+        Self {
+            network_codes,
+            network_patterns,
+        }
     }
-    Ok(normalized.into_iter().collect())
+}
+
+#[derive(Deserialize)]
+struct UpdateNetworkWhitelist {
+    network_codes: Vec<String>,
+    network_patterns: Option<Vec<String>>,
+}
+
+impl UpdateNetworkWhitelist {
+    fn validate(&self) -> anyhow::Result<()> {
+        for code in &self.network_codes {
+            validate_network_code(code)?;
+        }
+        if let Some(patterns) = &self.network_patterns {
+            for pattern in patterns {
+                validate_network_pattern(pattern)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 async fn get_network_whitelist(
     State(state): State<AppState>,
 ) -> ApiResponse<NetworkWhitelistSettings> {
-    ApiResponse::ok(NetworkWhitelistSettings {
-        network_codes: state.control_service.get_white_list(),
-    })
+    ApiResponse::ok(state.control_service.get_white_list().into())
 }
 
 async fn update_network_whitelist(
     State(state): State<AppState>,
-    Json(body): Json<NetworkWhitelistSettings>,
+    Json(body): Json<UpdateNetworkWhitelist>,
 ) -> Response {
-    let network_codes = match normalize_network_codes(body.network_codes) {
-        Ok(network_codes) => network_codes,
-        Err(error) => return ApiResponse::<()>::err(error.to_string()).into_response(),
-    };
-
-    let _guard = state.config_update_lock.lock().await;
-    let config_path = state.config_path.as_ref().clone();
-    let persisted_codes = network_codes.clone();
-    match tokio::task::spawn_blocking(move || persist_white_list(&config_path, &persisted_codes))
-        .await
-    {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            return ApiResponse::<()>::err(format!("保存配置失败: {error}")).into_response();
-        }
-        Err(error) => {
-            return ApiResponse::<()>::err(format!("保存配置任务失败: {error}")).into_response();
-        }
+    if let Err(error) = body.validate() {
+        return ApiResponse::<()>::err(error.to_string()).into_response();
     }
 
-    state
-        .control_service
-        .replace_white_list(network_codes.iter().cloned().collect::<HashSet<_>>());
-    ApiResponse::ok(NetworkWhitelistSettings { network_codes }).into_response()
+    let guard = state.config_update_lock.lock_owned().await;
+    match tokio::task::spawn_blocking(move || {
+        // Hold the lock through the runtime update even if the HTTP request is cancelled.
+        let _guard = guard;
+        let whitelist = NetworkWhitelist {
+            network_codes: body.network_codes.into_iter().collect(),
+            network_patterns: body
+                .network_patterns
+                .map(|patterns| patterns.into_iter().collect())
+                .unwrap_or_else(|| state.control_service.get_white_list().network_patterns),
+        };
+        let settings = NetworkWhitelistSettings::from(whitelist.clone());
+        persist_white_list(
+            &state.config_path,
+            &settings.network_codes,
+            &settings.network_patterns,
+        )?;
+        state.control_service.replace_white_list(whitelist);
+        Ok::<_, anyhow::Error>(settings)
+    })
+    .await
+    {
+        Ok(Ok(settings)) => ApiResponse::ok(settings).into_response(),
+        Ok(Err(error)) => ApiResponse::<()>::err(format!("保存配置失败: {error}")).into_response(),
+        Err(error) => ApiResponse::<()>::err(format!("保存配置任务失败: {error}")).into_response(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -2734,7 +2763,7 @@ fn build_app(app_state: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppState, AuthConfig, Claims, ClientListenerPorts, build_app, normalize_network_codes,
+        AppState, AuthConfig, Claims, ClientListenerPorts, UpdateNetworkWhitelist, build_app,
         requested_servers, resolve_managed_device_ips, safe_static_path,
     };
     use crate::server::control_server::db::{ClientType, DeviceIpType, Ikev2InputRoute};
@@ -2770,17 +2799,12 @@ mod tests {
     }
 
     #[test]
-    fn whitelist_codes_are_validated_deduplicated_and_sorted() {
-        assert_eq!(
-            normalize_network_codes(vec![
-                "zeta".to_string(),
-                "alpha".to_string(),
-                "zeta".to_string(),
-            ])
-            .unwrap(),
-            vec!["alpha".to_string(), "zeta".to_string()]
-        );
-        assert!(normalize_network_codes(vec![" alpha".to_string()]).is_err());
+    fn whitelist_settings_reject_exact_codes_with_surrounding_whitespace() {
+        let update = UpdateNetworkWhitelist {
+            network_codes: vec![" alpha".to_string()],
+            network_patterns: None,
+        };
+        assert!(update.validate().is_err());
     }
 
     #[test]
@@ -2891,26 +2915,58 @@ mod tests {
             .unwrap();
         assert_eq!(get_response.status(), StatusCode::OK);
 
-        let put_response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("PUT")
-                    .uri("/api/settings/network-whitelist")
-                    .header(header::AUTHORIZATION, &authorization)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"network_codes":["zeta","alpha","zeta"]}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(put_response.status(), StatusCode::OK);
+        let put_rules = async |body: &'static str| {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri("/api/settings/network-whitelist")
+                        .header(header::AUTHORIZATION, &authorization)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+        };
+
+        let updated = put_rules(
+            r#"{"network_codes":["zeta","alpha*","zeta"],"network_patterns":["office-*","*-vpn","office-*"]}"#,
+        )
+        .await;
         assert_eq!(
-            control_service.get_white_list(),
-            vec!["alpha".to_string(), "zeta".to_string()]
+            updated["data"]["network_codes"],
+            serde_json::json!(["alpha*", "zeta"])
         );
-        let persisted = std::fs::read_to_string(config_path).unwrap();
-        assert!(persisted.contains("white_list = [\"alpha\", \"zeta\"]"));
+        assert_eq!(
+            updated["data"]["network_patterns"],
+            serde_json::json!(["*-vpn", "office-*"])
+        );
+
+        let legacy = put_rules(r#"{"network_codes":["alpha*"]}"#).await;
+        assert_eq!(
+            legacy["data"]["network_patterns"],
+            updated["data"]["network_patterns"]
+        );
+        let saved = control_service.get_white_list();
+        assert_eq!(saved.network_codes, HashSet::from(["alpha*".to_string()]));
+        assert_eq!(
+            saved.network_patterns,
+            HashSet::from(["*-vpn".to_string(), "office-*".to_string()])
+        );
+        let persisted = std::fs::read_to_string(&config_path).unwrap();
+        assert!(persisted.contains("white_list = [\"alpha*\"]"));
+        assert!(persisted.contains("white_list_patterns = [\"*-vpn\", \"office-*\"]"));
+        let invalid = put_rules(r#"{"network_codes":["beta"],"network_patterns":["*"]}"#).await;
+        assert_eq!(invalid["code"], 400);
+        assert_eq!(control_service.get_white_list(), saved);
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), persisted);
 
         let app_with_unwritable_config = build_app(AppState {
             control_service: control_service.clone(),
@@ -2931,17 +2987,25 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri("/api/settings/network-whitelist")
-                    .header(header::AUTHORIZATION, authorization)
+                    .header(header::AUTHORIZATION, &authorization)
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"network_codes":["beta"]}"#))
+                    .body(Body::from(
+                        r#"{"network_codes":["beta"],"network_patterns":[]}"#,
+                    ))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(failed_update.status(), StatusCode::OK);
-        assert_eq!(
-            control_service.get_white_list(),
-            vec!["alpha".to_string(), "zeta".to_string()]
+        assert_eq!(control_service.get_white_list(), saved);
+
+        let cleared = put_rules(r#"{"network_codes":["alpha*"],"network_patterns":[]}"#).await;
+        assert_eq!(cleared["data"]["network_patterns"], serde_json::json!([]));
+        assert!(control_service.get_white_list().network_patterns.is_empty());
+        assert!(
+            std::fs::read_to_string(config_path)
+                .unwrap()
+                .contains("white_list_patterns = []")
         );
     }
 

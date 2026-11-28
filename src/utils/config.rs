@@ -21,6 +21,8 @@ pub struct ConfigFile {
     pub group_types: HashMap<String, crate::server::control_server::db::GroupType>,
     #[serde(default)]
     pub white_list: HashSet<String>,
+    #[serde(default)]
+    pub white_list_patterns: HashSet<String>,
     pub lease_duration: u64,
     pub web_bind: Option<SocketAddr>,
     pub username: Option<String>,
@@ -214,6 +216,7 @@ impl Default for ConfigFile {
             custom_nets: Default::default(),
             group_types: Default::default(),
             white_list: Default::default(),
+            white_list_patterns: Default::default(),
             lease_duration: 24 * 60 * 60,
             web_bind: Some("[::]:29871".parse().unwrap()),
             username: Some("admin".to_string()),
@@ -259,6 +262,9 @@ impl ConfigFile {
     fn validate(&self) -> anyhow::Result<()> {
         for network_code in self.white_list.iter().chain(self.custom_nets.keys()) {
             validate_network_code(network_code)?;
+        }
+        for pattern in &self.white_list_patterns {
+            validate_network_pattern(pattern)?;
         }
         if let Some(ikev2) = &self.ikev2 {
             ikev2.validate()?;
@@ -396,24 +402,40 @@ pub fn validate_network_code(network_code: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn update_white_list(path: &Path, network_codes: &[String]) -> anyhow::Result<()> {
+pub fn validate_network_pattern(pattern: &str) -> anyhow::Result<()> {
+    validate_network_code(pattern)?;
+    anyhow::ensure!(
+        pattern.contains('*') && !pattern.trim_matches('*').is_empty(),
+        "通配符规则必须包含 * 和至少一个非星号字符"
+    );
+    Ok(())
+}
+
+pub fn update_white_list(
+    path: &Path,
+    network_codes: &[String],
+    network_patterns: &[String],
+) -> anyhow::Result<()> {
     for network_code in network_codes {
         validate_network_code(network_code)?;
+    }
+    for pattern in network_patterns {
+        validate_network_pattern(pattern)?;
     }
 
     let content = std::fs::read_to_string(path)?;
     let mut document = content.parse::<DocumentMut>()?;
-    if let Some(white_list) = document.get_mut("white_list").and_then(Item::as_array_mut) {
-        white_list.clear();
-        for network_code in network_codes {
-            white_list.push(network_code.as_str());
+    for (key, rules) in [
+        ("white_list", network_codes),
+        ("white_list_patterns", network_patterns),
+    ] {
+        if let Some(array) = document.get_mut(key).and_then(Item::as_array_mut) {
+            array.clear();
+            array.extend(rules.iter().map(String::as_str));
+        } else {
+            let array = rules.iter().map(String::as_str).collect::<Array>();
+            document[key] = Item::Value(Value::Array(array));
         }
-    } else {
-        let mut white_list = Array::new();
-        for network_code in network_codes {
-            white_list.push(network_code.as_str());
-        }
-        document["white_list"] = Item::Value(Value::Array(white_list));
     }
 
     persist_document(path, document.to_string())
@@ -600,8 +622,10 @@ quic_bind = "[::]:29872"
 ws_bind = "[::]:29872"
 # 默认虚拟网段
 network = "10.26.0.0/24"
-# 网络编号白名单
+# 精确匹配的网络编码，星号按普通字符匹配
 white_list = []
+# 通配符规则，* 可位于任意位置，例如 "office-*" 或 "*-vpn"；两份列表均为空时允许所有网络
+white_list_patterns = []
 # IP租约时长，单位秒，默认24小时，离线超过这个时间IP就会被回收
 lease_duration = 86400
 # Web管理端绑定地址，不写则不启用web服务
@@ -660,6 +684,7 @@ mod tests {
     use super::{
         ClientAccessConfig, ConfigFile, Ikev2Config, load_ikev2_config, load_wireguard_config,
         update_ikev2_config, update_white_list, update_wireguard_config, validate_network_code,
+        validate_network_pattern,
     };
     use std::collections::HashSet;
 
@@ -728,6 +753,7 @@ lease_duration = 86400
         .expect("config");
 
         assert!(config.white_list.is_empty());
+        assert!(config.white_list_patterns.is_empty());
         assert!(config.custom_nets.is_empty());
     }
 
@@ -792,6 +818,19 @@ white_list = [" net1"]
         assert!(validate_network_code("").is_err());
         assert!(validate_network_code(" net1").is_err());
         assert!(validate_network_code(&"网".repeat(11)).is_err());
+        assert!(validate_network_code("net*").is_ok());
+    }
+
+    #[test]
+    fn network_patterns_require_a_star_and_a_literal_within_the_byte_limit() {
+        for pattern in ["net*", "*net", "*net**", "net*prod", "*?*"] {
+            assert!(validate_network_pattern(pattern).is_ok(), "{pattern}");
+        }
+        for pattern in ["", "net", "*", "***", " net*", "*net "] {
+            assert!(validate_network_pattern(pattern).is_err(), "{pattern}");
+        }
+        assert!(validate_network_pattern(&format!("{}**", "网".repeat(10))).is_ok());
+        assert!(validate_network_pattern(&format!("{}***", "网".repeat(10))).is_err());
     }
 
     #[test]
@@ -808,16 +847,25 @@ lease_duration = 86400
         )
         .unwrap();
 
-        update_white_list(&path, &["alpha".to_string(), "beta".to_string()]).unwrap();
+        update_white_list(
+            &path,
+            &["alpha*".to_string(), "beta".to_string()],
+            &["*vpn".to_string()],
+        )
+        .unwrap();
 
-        let updated = std::fs::read_to_string(path).unwrap();
+        let updated = std::fs::read_to_string(&path).unwrap();
         assert!(updated.contains("# keep this comment"));
         assert!(updated.contains("# whitelist comment"));
         assert!(updated.contains("network = \"10.26.0.0/24\""));
-        let config: ConfigFile = toml::from_str(&updated).unwrap();
+        let config = ConfigFile::load_from(Some(path)).unwrap();
         assert_eq!(
             config.white_list,
-            HashSet::from(["alpha".to_string(), "beta".to_string()])
+            HashSet::from(["alpha*".to_string(), "beta".to_string()])
+        );
+        assert_eq!(
+            config.white_list_patterns,
+            HashSet::from(["*vpn".to_string()])
         );
     }
 

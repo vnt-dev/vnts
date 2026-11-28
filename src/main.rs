@@ -1,6 +1,6 @@
 pub mod connection_id;
 use crate::server::TurnConfig;
-use crate::server::control_server::service::ControlService;
+use crate::server::control_server::service::{ControlService, NetworkWhitelist};
 use crate::server::peer_server::PeerServerManager;
 use crate::utils::config::ConfigFile;
 use clap::Parser;
@@ -96,7 +96,10 @@ async fn main() -> anyhow::Result<()> {
     let control_service = ControlService::new_with_groups(
         conf.network,
         conf.custom_nets,
-        conf.white_list,
+        NetworkWhitelist {
+            network_codes: conf.white_list,
+            network_patterns: conf.white_list_patterns,
+        },
         Duration::from_secs(conf.lease_duration),
         conf.group_types,
     )

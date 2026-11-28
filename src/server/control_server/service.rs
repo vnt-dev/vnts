@@ -273,13 +273,41 @@ impl SubscriptionSessionEntry {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NetworkWhitelist {
+    pub network_codes: HashSet<String>,
+    pub network_patterns: HashSet<String>,
+}
+
+fn network_pattern_matches(pattern: &str, network_code: &str) -> bool {
+    let mut segments = pattern.split('*');
+    let prefix = segments.next().unwrap_or_default();
+    let Some(suffix) = segments.next_back() else {
+        return network_code == prefix;
+    };
+    let Some(mut remaining) = network_code
+        .strip_prefix(prefix)
+        .and_then(|rest| rest.strip_suffix(suffix))
+    else {
+        return false;
+    };
+
+    for segment in segments {
+        let Some((_, rest)) = remaining.split_once(segment) else {
+            return false;
+        };
+        remaining = rest;
+    }
+    true
+}
+
 #[derive(Clone)]
 pub struct ControlService {
     server_instance_id: Arc<Vec<u8>>,
     default_net: Ipv4Net,
     default_gateway: Ipv4Addr,
     default_lease_duration: Duration,
-    white_list: Arc<RwLock<HashSet<String>>>,
+    white_list: Arc<RwLock<NetworkWhitelist>>,
     db_nets: Arc<RwLock<HashMap<String, NetworkConfig>>>,
     network_state_provider: NetworkStateProvider,
     network_init_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -305,7 +333,10 @@ impl ControlService {
         Self::new_with_groups(
             default_net,
             custom_nets,
-            white_list,
+            NetworkWhitelist {
+                network_codes: white_list,
+                ..Default::default()
+            },
             lease_duration,
             HashMap::new(),
         )
@@ -314,7 +345,7 @@ impl ControlService {
     pub async fn new_with_groups(
         default_net: Ipv4Net,
         custom_nets: HashMap<String, Ipv4Net>,
-        white_list: HashSet<String>,
+        white_list: NetworkWhitelist,
         lease_duration: Duration,
         group_types: HashMap<String, GroupType>,
     ) -> anyhow::Result<Self> {
@@ -524,16 +555,19 @@ impl ControlService {
 
     fn network_code_allowed(&self, network_code: &str) -> bool {
         let white_list = self.white_list.read();
-        white_list.is_empty() || white_list.contains(network_code)
+        (white_list.network_codes.is_empty() && white_list.network_patterns.is_empty())
+            || white_list.network_codes.contains(network_code)
+            || white_list
+                .network_patterns
+                .iter()
+                .any(|pattern| network_pattern_matches(pattern, network_code))
     }
 
-    pub fn get_white_list(&self) -> Vec<String> {
-        let mut white_list = self.white_list.read().iter().cloned().collect::<Vec<_>>();
-        white_list.sort();
-        white_list
+    pub fn get_white_list(&self) -> NetworkWhitelist {
+        self.white_list.read().clone()
     }
 
-    pub fn replace_white_list(&self, white_list: HashSet<String>) {
+    pub fn replace_white_list(&self, white_list: NetworkWhitelist) {
         *self.white_list.write() = white_list;
     }
 
@@ -3223,9 +3257,10 @@ fn has_effective_runtime_metadata(ack: &SubscriptionConfigAck) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ControlService, NetworkConfig, SubscriptionPushStatus, SubscriptionSessionEntry,
-        SubscriptionSessionLink, ack_can_update_live_state, authenticate_managed_access,
-        first_usable_ip, has_effective_runtime_metadata, network_counts, network_from_gateway,
+        ControlService, NetworkConfig, NetworkWhitelist, SubscriptionPushStatus,
+        SubscriptionSessionEntry, SubscriptionSessionLink, ack_can_update_live_state,
+        authenticate_managed_access, first_usable_ip, has_effective_runtime_metadata,
+        network_counts, network_from_gateway, network_pattern_matches,
         validate_registered_revision, validate_subscription_identity,
     };
     use crate::managed_config::client_proof;
@@ -3850,7 +3885,7 @@ mod tests {
         let restricted = ControlService::new(
             "10.26.0.0/24".parse().unwrap(),
             HashMap::new(),
-            HashSet::from(["net1".to_string()]),
+            HashSet::from(["net1".to_string(), "literal*".to_string()]),
             Duration::from_secs(3600),
         )
         .await
@@ -3858,6 +3893,34 @@ mod tests {
         assert!(restricted.network_code_allowed("net1"));
         assert!(!restricted.network_code_allowed("NET1"));
         assert!(!restricted.network_code_allowed("net2"));
+        assert!(restricted.network_code_allowed("literal*"));
+        assert!(!restricted.network_code_allowed("literal-vpn"));
+    }
+
+    #[test]
+    fn network_patterns_match_the_whole_code() {
+        for (pattern, code, expected) in [
+            ("xxx*", "xxx", true),
+            ("xxx*", "xxx-prod", true),
+            ("xxx*", "XXX-prod", false),
+            ("xxx*", "axxx-prod", false),
+            ("*prod", "xxx-prod", true),
+            ("*prod", "prod-dev", false),
+            ("office-*-vpn", "office--vpn", true),
+            ("office-*-vpn", "office-上海-vpn", true),
+            ("office-*-vpn", "office-上海-vpn2", false),
+            ("**网*prod**", "办公网-prod-1", true),
+            ("a*a", "a", false),
+            ("*ab*b", "ab", false),
+            ("*?*", "abc", false),
+            ("*?*", "a?c", true),
+        ] {
+            assert_eq!(
+                network_pattern_matches(pattern, code),
+                expected,
+                "{pattern} / {code}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -3876,15 +3939,22 @@ mod tests {
             .await
             .unwrap();
 
-        service.replace_white_list(HashSet::from(["net2".to_string()]));
-
-        assert_eq!(service.get_white_list(), vec!["net2".to_string()]);
+        service.replace_white_list(NetworkWhitelist {
+            network_codes: HashSet::from(["net2".to_string()]),
+            network_patterns: HashSet::from(["office-*-vpn".to_string()]),
+        });
         assert!(session.network_state.is_device_online("device-a"));
         assert!(
             service
-                .register(registration("net1", "device-b"), sender)
+                .register(registration("net1", "device-b"), sender.clone())
                 .await
                 .is_err()
+        );
+        assert!(
+            service
+                .register(registration("office-east-vpn", "device-c"), sender)
+                .await
+                .is_ok()
         );
         assert!(session.network_state.is_device_online("device-a"));
     }

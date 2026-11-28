@@ -202,6 +202,7 @@ export interface DeviceWireGuardAccessInfo {
 
 export interface NetworkWhitelistSettings {
   network_codes: string[]
+  network_patterns: string[]
 }
 
 export interface ClientAccessSettings {
